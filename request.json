@@ -1,0 +1,28 @@
+{
+  "input": {
+    "bounds": {
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[[-72, -36], [-72, -36.1], [-71.9, -36.1], [-71.9, -36], [-72, -36]]]
+      }
+    },
+    "data": [
+      {
+        "dataFilter": {
+          "timeRange": {
+            "from": "2024-04-15T00:00:00Z",
+            "to": "2024-04-15T23:59:59Z"
+          },
+          "maxCloudCoverage": 20
+        },
+        "type": "sentinel-2-l2a"
+      }
+    ]
+  },
+  "output": {
+    "width": 512,
+    "height": 512,
+    "format": "image/png"
+  },
+  "evalscript": "//VERSION=3\nfunction setup() { return { input: ['B04','B03','B02'], output: { bands: 3 } }; }\nfunction evaluatePixel(sample) { return [sample.B04 / 3000, sample.B03 / 3000, sample.B02 / 3000]; }"
+}
