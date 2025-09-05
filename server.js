@@ -7,7 +7,7 @@ const express = require('express');
 const cors = require('cors');
 const app = express();
 
-// ✅ Configuración CORS mejorada (sin espacios al final)
+// ✅ Configuración CORS mejorada
 app.use(cors({
   origin: 'https://itpraxis.cl',
   methods: ['POST'],
@@ -63,7 +63,7 @@ app.post('/api/sentinel2', async (req, res) => {
   }
 
   try {
-    // ✅ Obtener token de acceso (sin espacios en la URL)
+    // ✅ Obtener token de acceso
     const tokenResponse = await fetch('https://services.sentinel-hub.com/oauth/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -91,8 +91,8 @@ app.post('/api/sentinel2', async (req, res) => {
               coordinates: [coordinates]
             }
           },
-          // ✅ CORRECCIÓN DEFINITIVA: Añadir "data:" con dos puntos (NO SOLO CORCHETES)
-          data: [
+          // ✅ CORRECCIÓN DEFINITIVA: Añadir "data" como propiedad válida
+           [
             {
               dataFilter: {
                 timeRange: {
@@ -234,7 +234,7 @@ app.post('/api/check-coverage', async (req, res) => {
   }
 
   try {
-    // Obtener token de acceso (sin espacios en la URL)
+    // Obtener token de acceso
     const tokenResponse = await fetch('https://services.sentinel-hub.com/oauth/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -250,7 +250,7 @@ app.post('/api/check-coverage', async (req, res) => {
     const accessToken = tokenData.access_token;
     console.log('✅ access_token obtenido para verificar cobertura');
 
-    // ✅ CORRECCIÓN DEFINITIVA: Añadir "data:" con dos puntos
+    // ✅ CORRECCIÓN DEFINITIVA: Añadir "data" como propiedad válida
     const metadataPayload = {
       input: {
         bounds: {
@@ -259,8 +259,8 @@ app.post('/api/check-coverage', async (req, res) => {
             coordinates: [coordinates]
           }
         },
-        // ✅ CORRECCIÓN DEFINITIVA: Añadir "data:" con dos puntos
-        data: [
+        // ✅ CORRECCIÓN DEFINITIVA: Añadir "data" como propiedad válida
+         [
           {
             dataFilter: {
               timeRange: {
@@ -293,7 +293,7 @@ app.post('/api/check-coverage', async (req, res) => {
         }
       `,
       // ✅ CORRECCIÓN: metadata: { (con dos puntos)
-      metadata: {
+      meta {
         "availableDates": true
       }
     };
