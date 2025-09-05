@@ -91,8 +91,8 @@ app.post('/api/sentinel2', async (req, res) => {
               coordinates: [coordinates]
             }
           },
-          // ✅ CORRECCIÓN DEFINITIVA: Añadir "data" antes del array
-          data: [
+          // ✅ CORRECCIÓN: Añadir "data" antes del array
+           [
             {
               dataFilter: {
                 timeRange: {
@@ -250,7 +250,7 @@ app.post('/api/check-coverage', async (req, res) => {
     const accessToken = tokenData.access_token;
     console.log('✅ access_token obtenido para verificar cobertura');
 
-    // ✅ CORRECCIÓN DEFINITIVA: Consulta de metadatos SIN output
+    // ✅ CORRECCIÓN: Consulta de metadatos CON evalscript mínimo
     const metadataPayload = {
       input: {
         bounds: {
@@ -259,8 +259,7 @@ app.post('/api/check-coverage', async (req, res) => {
             coordinates: [coordinates]
           }
         },
-        // ✅ CORRECCIÓN DEFINITIVA: Añadir "data" antes del array
-        data: [
+         [
           {
             dataFilter: {
               timeRange: {
@@ -273,7 +272,26 @@ app.post('/api/check-coverage', async (req, res) => {
           }
         ]
       },
-      // ✅ Eliminar output para obtener solo metadatos
+      // ✅ CORRECCIÓN: Mantener output mínimo
+      output: {
+        width: 512,
+        height: 512,
+        format: "image/png"
+      },
+      // ✅ CORRECCIÓN: Evalscript mínimo ES OBLIGATORIO
+      evalscript: `
+        // VERSION=3
+        function setup() {
+          return {
+            input: ["B04"],
+            output: { bands: 1 }
+          };
+        }
+        function evaluatePixel(sample) {
+          return [1];
+        }
+      `,
+      // ✅ CORRECCIÓN: metadata (no meta)
       metadata: {
         "availableDates": true
       }
