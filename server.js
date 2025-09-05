@@ -7,7 +7,7 @@ const express = require('express');
 const cors = require('cors');
 const app = express();
 
-// ✅ Configuración CORS mejorada (sin espacios al final)
+// ✅ Configuración CORS mejorada
 app.use(cors({
   origin: 'https://itpraxis.cl',
   methods: ['POST'],
@@ -63,7 +63,7 @@ app.post('/api/sentinel2', async (req, res) => {
   }
 
   try {
-    // ✅ Obtener token de acceso (sin espacios en la URL)
+    // ✅ Obtener token de acceso
     const tokenResponse = await fetch('https://services.sentinel-hub.com/oauth/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -91,8 +91,8 @@ app.post('/api/sentinel2', async (req, res) => {
               coordinates: [coordinates]
             }
           },
-          // ✅ CORRECCIÓN DEFINITIVA: data: [ (dos puntos obligatorios)
-          data: [
+          // ✅ CORRECCIÓN: Añadir "data:" con dos puntos
+           [
             {
               dataFilter: {
                 timeRange: {
@@ -135,7 +135,6 @@ app.post('/api/sentinel2', async (req, res) => {
         `
       };
 
-      // ✅ Sin espacios en la URL
       const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
         method: 'POST',
         headers: {
@@ -214,7 +213,7 @@ app.post('/api/sentinel2', async (req, res) => {
     console.error('❌ Error:', error.message);
     res.status(500).json({ 
       error: error.message,
-      suggestion: "Verifica que las coordenadas estén en formato [longitud, latitud] con 4 decimales y que el área esté en tierra firme"
+      suggestion: "Verifica que las coordenadas formen un polígono válido de 10x10 km máximo en tierra firme"
     });
   }
 });
@@ -235,7 +234,7 @@ app.post('/api/check-coverage', async (req, res) => {
   }
 
   try {
-    // Obtener token de acceso (sin espacios en la URL)
+    // Obtener token de acceso
     const tokenResponse = await fetch('https://services.sentinel-hub.com/oauth/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -251,7 +250,7 @@ app.post('/api/check-coverage', async (req, res) => {
     const accessToken = tokenData.access_token;
     console.log('✅ access_token obtenido para verificar cobertura');
 
-    // ✅ CORRECCIÓN DEFINITIVA: data: [ (dos puntos obligatorios)
+    // ✅ CORRECCIÓN: Consulta de metadatos CON evalscript mínimo y metadata correctamente formado
     const metadataPayload = {
       input: {
         bounds: {
@@ -260,7 +259,7 @@ app.post('/api/check-coverage', async (req, res) => {
             coordinates: [coordinates]
           }
         },
-        data: [
+         [
           {
             dataFilter: {
               timeRange: {
@@ -275,11 +274,10 @@ app.post('/api/check-coverage', async (req, res) => {
       },
       // ✅ Mantener output mínimo
       output: {
-        width: 512,
-        height: 512,
+        width: 1,
+        height: 1,
         format: "image/png"
       },
-      // ✅ Evalscript mínimo ES OBLIGATORIO
       evalscript: `
         // VERSION=3
         function setup() {
@@ -292,13 +290,13 @@ app.post('/api/check-coverage', async (req, res) => {
           return [1];
         }
       `,
-      // ✅ metadata (no meta)
+      // ✅ CORRECCIÓN: metadata: { ... } (con dos puntos y llaves)
       metadata: {
         "availableDates": true
       }
     };
 
-    // ✅ Sin espacios en la URL
+    // Realizar la consulta de metadatos
     const metadataResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
       method: 'POST',
       headers: {
@@ -356,7 +354,7 @@ app.post('/api/check-coverage', async (req, res) => {
     console.error('❌ Error al verificar cobertura:', error.message);
     res.status(500).json({ 
       error: error.message,
-      suggestion: "Verifica que las coordenadas estén en formato [longitud, latitud] con 4 decimales y que el área esté en tierra firme"
+      suggestion: "Verifica que las coordenadas formen un polígono válido de 10x10 km máximo en tierra firme"
     });
   }
 });
