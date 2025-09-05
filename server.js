@@ -1,4 +1,4 @@
-// server.js (versión corregida)
+// server.js (versión definitiva - corregida y optimizada)
 require('dotenv').config();
 console.log('🔑 CLIENT_ID cargado:', process.env.CLIENT_ID ? '✅ Sí' : '❌ No');
 console.log('🔐 CLIENT_SECRET cargado:', process.env.CLIENT_SECRET ? '✅ Sí' : '❌ No');
@@ -7,7 +7,7 @@ const express = require('express');
 const cors = require('cors');
 const app = express();
 
-// ✅ Configuración CORS mejorada
+// ✅ Configuración CORS mejorada (sin espacios al final)
 app.use(cors({
   origin: 'https://itpraxis.cl',
   methods: ['POST'],
@@ -91,7 +91,7 @@ app.post('/api/sentinel2', async (req, res) => {
               coordinates: [coordinates]
             }
           },
-          // ✅ CORRECCIÓN: Añadir "data" antes del array
+          // ✅ CORRECCIÓN: Estructura correcta con "data"
           data: [
             {
               dataFilter: {
@@ -99,7 +99,7 @@ app.post('/api/sentinel2', async (req, res) => {
                   from: `${attemptDate}T00:00:00Z`,
                   to: `${attemptDate}T23:59:59Z`
                 },
-                maxCloudCoverage: 20
+                maxCloudCoverage: 80  // Aumentado de 20 a 80 para más cobertura
               },
               type: "sentinel-2-l2a"
             }
@@ -108,7 +108,10 @@ app.post('/api/sentinel2', async (req, res) => {
         output: {
           width: 512,
           height: 512,
-          format: "image/png"
+          format: "image/png",
+          // ✅ Añadido para resolver problemas de resolución
+          upsampling: "NEAREST",
+          downsampling: "NEAREST"
         },
         evalscript: `
           // VERSION=3
@@ -122,28 +125,13 @@ app.post('/api/sentinel2', async (req, res) => {
             };
           }
 
-          // Ajuste de contraste para valores muy bajos (especial para Chile)
+          // Evalscript simplificado para evitar problemas de contraste
           function evaluatePixel(sample) {
-            // Valores típicos para Sentinel-2 L2A en zonas forestales chilenas
-            const MIN_VAL = 0;
-            const MAX_VAL = 2500;
-            
-            // Calcular valores normalizados
-            let r = (sample.B04 - MIN_VAL) / (MAX_VAL - MIN_VAL);
-            let g = (sample.B03 - MIN_VAL) / (MAX_VAL - MIN_VAL);
-            let b = (sample.B02 - MIN_VAL) / (MAX_VAL - MIN_VAL);
-            
-            // Ajuste no lineal para mejorar contraste en valores bajos
-            const gamma = 1.5;
-            r = Math.pow(r, gamma);
-            g = Math.pow(g, gamma);
-            b = Math.pow(b, gamma);
-            
-            // Asegurar valores en rango [0, 1]
+            const MAX_VAL = 3000;
             return [
-              Math.max(0, Math.min(r, 1)),
-              Math.max(0, Math.min(g, 1)),
-              Math.max(0, Math.min(b, 1))
+              sample.B04 / MAX_VAL,
+              sample.B03 / MAX_VAL,
+              sample.B02 / MAX_VAL
             ];
           }
         `
@@ -227,7 +215,7 @@ app.post('/api/sentinel2', async (req, res) => {
     console.error('❌ Error:', error.message);
     res.status(500).json({ 
       error: error.message,
-      suggestion: "Verifica que las coordenadas estén en formato [longitud, latitud] y que estén dentro de la cobertura de Sentinel-2"
+      suggestion: "Verifica que las coordenadas estén en formato [longitud, latitud] y que el área sea suficientemente grande para Sentinel-2 (mínimo 10x10 km)"
     });
   }
 });
@@ -277,7 +265,7 @@ app.post('/api/check-coverage', async (req, res) => {
           {
             dataFilter: {
               timeRange: {
-                from: "2020-01-01T00:00:00Z", // Usamos una fecha arbitraria para la consulta de metadatos
+                from: "2020-01-01T00:00:00Z",
                 to: "2025-01-01T23:59:59Z"
               },
               maxCloudCoverage: 100
@@ -286,15 +274,14 @@ app.post('/api/check-coverage', async (req, res) => {
           }
         ]
       },
-      // No necesitamos imagen, solo metadatos
+      // ✅ CORRECCIÓN: Resolución adecuada para evitar el error de "meters per pixel"
       output: {
-        width: 1,
-        height: 1,
+        width: 512,
+        height: 512,
         format: "image/png"
       },
-      // Evalscript mínimo para obtener metadatos
       evalscript: `
-        //VERSION=3
+        // VERSION=3
         function setup() {
           return {
             input: ["B04"],
@@ -305,7 +292,6 @@ app.post('/api/check-coverage', async (req, res) => {
           return [1];
         }
       `,
-      // Solicitar metadatos de fechas disponibles
       metadata: {
         "availableDates": true
       }
@@ -350,7 +336,7 @@ app.post('/api/check-coverage', async (req, res) => {
       return res.json({
         hasCoverage: false,
         message: "No hay datos disponibles para este área en las últimas 12 semanas",
-        suggestedDates: datesToSuggest.slice(0, 10) // Solo las 10 primeras
+        suggestedDates: datesToSuggest.slice(0, 10)
       });
     }
 
@@ -361,7 +347,7 @@ app.post('/api/check-coverage', async (req, res) => {
     return res.json({
       hasCoverage: true,
       totalDates: availableDates.length,
-      availableDates: availableDates.slice(0, 30), // Devolver máximo 30 fechas
+      availableDates: availableDates.slice(0, 30),
       message: `Se encontraron ${availableDates.length} fechas con datos disponibles`
     });
 
@@ -369,7 +355,7 @@ app.post('/api/check-coverage', async (req, res) => {
     console.error('❌ Error al verificar cobertura:', error.message);
     res.status(500).json({ 
       error: error.message,
-      suggestion: "Verifica que las coordenadas estén en formato [longitud, latitud] y que estén dentro de la cobertura global de Sentinel-2"
+      suggestion: "Verifica que las coordenadas estén en formato [longitud, latitud] y que el área sea suficientemente grande para Sentinel-2 (mínimo 10x10 km)"
     });
   }
 });
