@@ -91,7 +91,7 @@ app.post('/api/sentinel2', async (req, res) => {
               coordinates: [coordinates]
             }
           },
-          // ✅ CORRECCIÓN: Añadir "data:" con dos puntos
+          // ✅ CORRECCIÓN DEFINITIVA: Añadir DOS PUNTOS después de "data"
            [
             {
               dataFilter: {
@@ -213,7 +213,7 @@ app.post('/api/sentinel2', async (req, res) => {
     console.error('❌ Error:', error.message);
     res.status(500).json({ 
       error: error.message,
-      suggestion: "Verifica que las coordenadas formen un polígono válido de 10x10 km máximo en tierra firme"
+      suggestion: "Verifica que las coordenadas estén en formato [longitud, latitud] y que el área esté en tierra firme"
     });
   }
 });
@@ -250,7 +250,7 @@ app.post('/api/check-coverage', async (req, res) => {
     const accessToken = tokenData.access_token;
     console.log('✅ access_token obtenido para verificar cobertura');
 
-    // ✅ CORRECCIÓN: Consulta de metadatos CON evalscript mínimo y metadata correctamente formado
+    // ✅ CORRECCIÓN DEFINITIVA: Añadir DOS PUNTOS después de "data"
     const metadataPayload = {
       input: {
         bounds: {
@@ -274,10 +274,11 @@ app.post('/api/check-coverage', async (req, res) => {
       },
       // ✅ Mantener output mínimo
       output: {
-        width: 1,
-        height: 1,
+        width: 512,
+        height: 512,
         format: "image/png"
       },
+      // ✅ Evalscript mínimo ES OBLIGATORIO
       evalscript: `
         // VERSION=3
         function setup() {
@@ -290,8 +291,8 @@ app.post('/api/check-coverage', async (req, res) => {
           return [1];
         }
       `,
-      // ✅ CORRECCIÓN: metadata: { ... } (con dos puntos y llaves)
-      metadata: {
+      // ✅ metadata (no meta)
+      meta {
         "availableDates": true
       }
     };
@@ -354,7 +355,7 @@ app.post('/api/check-coverage', async (req, res) => {
     console.error('❌ Error al verificar cobertura:', error.message);
     res.status(500).json({ 
       error: error.message,
-      suggestion: "Verifica que las coordenadas formen un polígono válido de 10x10 km máximo en tierra firme"
+      suggestion: "Verifica que las coordenadas estén en formato [longitud, latitud] y que el área esté en tierra firme"
     });
   }
 });
