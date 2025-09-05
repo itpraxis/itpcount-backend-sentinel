@@ -83,70 +83,71 @@ app.post('/api/sentinel2', async (req, res) => {
     const tryGetImage = async (attemptDate) => {
       console.log(`Intentando con fecha: ${attemptDate}`);
       
-      const payload = {
-        input: {
-          bounds: {
-            geometry: {
-              type: "Polygon",
-              coordinates: [coordinates]
-            }
+const payload = {
+  input: {
+    bounds: {
+      geometry: {
+        type: "Polygon",
+        coordinates: [coordinates]
+      }
+    },
+    // ✅ CORRECCIÓN: Cambiar de "]" a "data: ["
+    data: [
+      {
+        dataFilter: {
+          timeRange: {
+            from: `${date}T00:00:00Z`,
+            to: `${date}T23:59:59Z`
           },
-           [
-            {
-              dataFilter: {
-                timeRange: {
-                  from: `${attemptDate}T00:00:00Z`,
-                  to: `${attemptDate}T23:59:59Z`
-                },
-                maxCloudCoverage: 20
-              },
-              type: "sentinel-2-l2a"
-            }
-          ]
+          maxCloudCoverage: 20
         },
-        output: {
-          width: 512,
-          height: 512,
-          format: "image/png"
-        },
-        evalscript: `
-          // VERSION=3
-          function setup() {
-            return { 
-              input: ["B04", "B03", "B02"], 
-              output: { 
-                bands: 3, 
-                sampleType: "AUTO" 
-              } 
-            };
-          }
-
-          // Ajuste de contraste para valores muy bajos (especial para Chile)
-          function evaluatePixel(sample) {
-            // Valores típicos para Sentinel-2 L2A en zonas forestales chilenas
-            const MIN_VAL = 0;
-            const MAX_VAL = 2500;
-            
-            // Calcular valores normalizados
-            let r = (sample.B04 - MIN_VAL) / (MAX_VAL - MIN_VAL);
-            let g = (sample.B03 - MIN_VAL) / (MAX_VAL - MIN_VAL);
-            let b = (sample.B02 - MIN_VAL) / (MAX_VAL - MIN_VAL);
-            
-            // Ajuste no lineal para mejorar contraste en valores bajos
-            const gamma = 1.5;
-            r = Math.pow(r, gamma);
-            g = Math.pow(g, gamma);
-            b = Math.pow(b, gamma);
-            
-            // Asegurar valores en rango [0, 1]
-            return [
-              Math.max(0, Math.min(r, 1)),
-              Math.max(0, Math.min(g, 1)),
-              Math.max(0, Math.min(b, 1))
-            ];
-          }
-        `
+        type: "sentinel-2-l2a"
+      }
+    ]
+  },
+  output: {
+    width: 512,
+    height: 512,
+    format: "image/png"
+  },
+  evalscript: `
+    // VERSION=3
+    function setup() {
+      return { 
+        input: ["B04", "B03", "B02"], 
+        output: { 
+          bands: 3, 
+          sampleType: "AUTO" 
+        } 
       };
+    }
+
+    // Ajuste de contraste para valores muy bajos (especial para Chile)
+    function evaluatePixel(sample) {
+      // Valores típicos para Sentinel-2 L2A en zonas forestales chilenas
+      const MIN_VAL = 0;
+      const MAX_VAL = 2500;
+      
+      // Calcular valores normalizados
+      let r = (sample.B04 - MIN_VAL) / (MAX_VAL - MIN_VAL);
+      let g = (sample.B03 - MIN_VAL) / (MAX_VAL - MIN_VAL);
+      let b = (sample.B02 - MIN_VAL) / (MAX_VAL - MIN_VAL);
+      
+      // Ajuste no lineal para mejorar contraste en valores bajos
+      const gamma = 1.5;
+      r = Math.pow(r, gamma);
+      g = Math.pow(g, gamma);
+      b = Math.pow(b, gamma);
+      
+      // Asegurar valores en rango [0, 1]
+      return [
+        Math.max(0, Math.min(r, 1)),
+        Math.max(0, Math.min(g, 1)),
+        Math.max(0, Math.min(b, 1))
+      ];
+    }
+  `
+};
 
       const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
         method: 'POST',
