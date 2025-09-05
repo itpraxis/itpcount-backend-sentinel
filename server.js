@@ -268,19 +268,26 @@ app.post('/api/check-coverage', async (req, res) => {
 
     // Configurar la consulta de metadatos
     const metadataPayload = {
-      input: {
-        bounds: {
-          geometry: {
-            type: "Polygon",
-            coordinates: [coordinates]
-          }
-        },
-         [
-          {
-            type: "sentinel-2-l2a"
-          }
-        ]
-      },
+		input: {
+		  bounds: {
+			geometry: {
+			  type: "Polygon",
+			  coordinates: [coordinates]
+			}
+		  },
+		  data: [  // ✅ ¡ESTA PALABRA FALTA EN TU CÓDIGO!
+			{
+			  dataFilter: {
+				timeRange: {
+				  from: `${date}T00:00:00Z`,
+				  to: `${date}T23:59:59Z`
+				},
+				maxCloudCoverage: 20
+			  },
+			  type: "sentinel-2-l2a"
+			}
+		  ]
+		}
       // No necesitamos imagen, solo metadatos
       output: {
         width: 1,
