@@ -7,7 +7,7 @@ const express = require('express');
 const cors = require('cors');
 const app = express();
 
-// ✅ Configuración CORS mejorada (sin espacios al final)
+// ✅ Configuración CORS mejorada
 app.use(cors({
   origin: 'https://itpraxis.cl',
   methods: ['POST'],
@@ -63,7 +63,7 @@ app.post('/api/sentinel2', async (req, res) => {
   }
 
   try {
-    // ✅ URLs corregidas (sin espacios)
+    // ✅ Obtener token de acceso
     const tokenResponse = await fetch('https://services.sentinel-hub.com/oauth/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -91,15 +91,14 @@ app.post('/api/sentinel2', async (req, res) => {
               coordinates: [coordinates]
             }
           },
-          // ✅ CORRECCIÓN: Estructura correcta con "data"
-          data: [
+           [
             {
               dataFilter: {
                 timeRange: {
                   from: `${attemptDate}T00:00:00Z`,
                   to: `${attemptDate}T23:59:59Z`
                 },
-                maxCloudCoverage: 80  // Aumentado de 20 a 80 para más cobertura
+                maxCloudCoverage: 80
               },
               type: "sentinel-2-l2a"
             }
@@ -109,7 +108,6 @@ app.post('/api/sentinel2', async (req, res) => {
           width: 512,
           height: 512,
           format: "image/png",
-          // ✅ Añadido para resolver problemas de resolución
           upsampling: "NEAREST",
           downsampling: "NEAREST"
         },
@@ -125,7 +123,6 @@ app.post('/api/sentinel2', async (req, res) => {
             };
           }
 
-          // Evalscript simplificado para evitar problemas de contraste
           function evaluatePixel(sample) {
             const MAX_VAL = 3000;
             return [
@@ -160,7 +157,7 @@ app.post('/api/sentinel2', async (req, res) => {
 
       const base64 = Buffer.from(buffer).toString('base64');
       return {
-        url: `data:image/png;base64,${base64}`,
+        url: `image/png;base64,${base64}`,
         usedDate: attemptDate
       };
     };
@@ -215,7 +212,7 @@ app.post('/api/sentinel2', async (req, res) => {
     console.error('❌ Error:', error.message);
     res.status(500).json({ 
       error: error.message,
-      suggestion: "Verifica que las coordenadas estén en formato [longitud, latitud] y que el área sea suficientemente grande para Sentinel-2 (mínimo 10x10 km)"
+      suggestion: "Verifica que las coordenadas estén en formato [longitud, latitud] con 4 decimales y que el área esté en tierra firme"
     });
   }
 });
@@ -252,7 +249,7 @@ app.post('/api/check-coverage', async (req, res) => {
     const accessToken = tokenData.access_token;
     console.log('✅ access_token obtenido para verificar cobertura');
 
-    // Configurar la consulta de metadatos
+    // ✅ CORRECCIÓN: Consulta de metadatos SIN output (solo metadatos)
     const metadataPayload = {
       input: {
         bounds: {
@@ -261,7 +258,7 @@ app.post('/api/check-coverage', async (req, res) => {
             coordinates: [coordinates]
           }
         },
-        data: [
+         [
           {
             dataFilter: {
               timeRange: {
@@ -274,24 +271,7 @@ app.post('/api/check-coverage', async (req, res) => {
           }
         ]
       },
-      // ✅ CORRECCIÓN: Resolución adecuada para evitar el error de "meters per pixel"
-      output: {
-        width: 512,
-        height: 512,
-        format: "image/png"
-      },
-      evalscript: `
-        // VERSION=3
-        function setup() {
-          return {
-            input: ["B04"],
-            output: { bands: 1 }
-          };
-        }
-        function evaluatePixel(sample) {
-          return [1];
-        }
-      `,
+      // ✅ CORRECCIÓN: Eliminar output para obtener solo metadatos
       metadata: {
         "availableDates": true
       }
@@ -355,7 +335,7 @@ app.post('/api/check-coverage', async (req, res) => {
     console.error('❌ Error al verificar cobertura:', error.message);
     res.status(500).json({ 
       error: error.message,
-      suggestion: "Verifica que las coordenadas estén en formato [longitud, latitud] y que el área sea suficientemente grande para Sentinel-2 (mínimo 10x10 km)"
+      suggestion: "Verifica que las coordenadas estén en formato [longitud, latitud] con 4 decimales y que el área esté en tierra firme"
     });
   }
 });
