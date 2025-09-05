@@ -91,7 +91,7 @@ app.post('/api/sentinel2', async (req, res) => {
               coordinates: [coordinates]
             }
           },
-          // ✅ CORRECCIÓN DEFINITIVA: Añadir dos puntos después de "data"
+          // ✅ CORRECCIÓN DEFINITIVA: data: [ (dos puntos obligatorios)
            [
             {
               dataFilter: {
@@ -251,7 +251,7 @@ app.post('/api/check-coverage', async (req, res) => {
     const accessToken = tokenData.access_token;
     console.log('✅ access_token obtenido para verificar cobertura');
 
-    // ✅ CORRECCIÓN DEFINITIVA: Añadir dos puntos después de "data"
+    // ✅ CORRECCIÓN DEFINITIVA:  [ (dos puntos obligatorios)
     const metadataPayload = {
       input: {
         bounds: {
