@@ -68,17 +68,39 @@ app.post('/api/sentinel2', async (req, res) => {
 		// VERSION=3
 		function setup() {
 		  return { 
-			input: ["B04","B03","B02"], 
-			output: { bands: 3, sampleType: "AUTO" } 
+			input: ["B04", "B03", "B02"], 
+			output: { 
+			  bands: 3, 
+			  sampleType: "AUTO" 
+			} 
 		  };
 		}
+
+		// Función para ajuste de contraste no lineal (mejor para valores bajos)
+		function applyContrast(value, gamma = 1.8) {
+		  return Math.pow(value, gamma);
+		}
+
 		function evaluatePixel(sample) {
-		  // Ajuste agresivo para mejorar contraste
-		  const maxVal = 2500;
+		  // Valores mínimos y máximos típicos para Sentinel-2 L2A
+		  const MIN_VAL = 0;
+		  const MAX_VAL = 3000;
+		  
+		  // Calcular valores normalizados
+		  let r = (sample.B04 - MIN_VAL) / (MAX_VAL - MIN_VAL);
+		  let g = (sample.B03 - MIN_VAL) / (MAX_VAL - MIN_VAL);
+		  let b = (sample.B02 - MIN_VAL) / (MAX_VAL - MIN_VAL);
+		  
+		  // Aplicar ajuste de contraste no lineal
+		  r = applyContrast(r, 1.5);
+		  g = applyContrast(g, 1.5);
+		  b = applyContrast(b, 1.5);
+		  
+		  // Asegurar que los valores estén en rango [0, 1]
 		  return [
-			Math.min(sample.B04 / maxVal, 1),
-			Math.min(sample.B03 / maxVal, 1),
-			Math.min(sample.B02 / maxVal, 1)
+			Math.max(0, Math.min(r, 1)),
+			Math.max(0, Math.min(g, 1)),
+			Math.max(0, Math.min(b, 1))
 		  ];
 		}		
       `
