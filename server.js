@@ -65,13 +65,22 @@ app.post('/api/sentinel2', async (req, res) => {
         format: "image/png"
       },
       evalscript: `
-        //VERSION=3
-        function setup() {
-          return { input: ["B04","B03","B02"], output: { bands: 3 } };
-        }
-        function evaluatePixel(sample) {
-          return [sample.B04 / 3000, sample.B03 / 3000, sample.B02 / 3000];
-        }
+		// VERSION=3
+		function setup() {
+		  return { 
+			input: ["B04","B03","B02"], 
+			output: { bands: 3, sampleType: "AUTO" } 
+		  };
+		}
+		function evaluatePixel(sample) {
+		  // Ajuste agresivo para mejorar contraste
+		  const maxVal = 2500;
+		  return [
+			Math.min(sample.B04 / maxVal, 1),
+			Math.min(sample.B03 / maxVal, 1),
+			Math.min(sample.B02 / maxVal, 1)
+		  ];
+		}		
       `
     };
 
