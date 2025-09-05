@@ -293,7 +293,7 @@ app.post('/api/check-coverage', async (req, res) => {
         }
       `,
       // ✅ metadata (no meta)
-      metadata: {
+      meta {
         "availableDates": true
       }
     };
