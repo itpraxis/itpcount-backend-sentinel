@@ -92,7 +92,7 @@ app.post('/api/sentinel2', async (req, res) => {
             }
           },
           // ✅ CORRECCIÓN DEFINITIVA: data: [ (dos puntos obligatorios)
-           [
+          data: [
             {
               dataFilter: {
                 timeRange: {
@@ -251,7 +251,7 @@ app.post('/api/check-coverage', async (req, res) => {
     const accessToken = tokenData.access_token;
     console.log('✅ access_token obtenido para verificar cobertura');
 
-    // ✅ CORRECCIÓN DEFINITIVA:  [ (dos puntos obligatorios)
+    // ✅ CORRECCIÓN DEFINITIVA: data: [ (dos puntos obligatorios)
     const metadataPayload = {
       input: {
         bounds: {
@@ -260,7 +260,7 @@ app.post('/api/check-coverage', async (req, res) => {
             coordinates: [coordinates]
           }
         },
-         [
+        data: [
           {
             dataFilter: {
               timeRange: {
@@ -293,7 +293,7 @@ app.post('/api/check-coverage', async (req, res) => {
         }
       `,
       // ✅ metadata (no meta)
-      meta {
+      metadata: {
         "availableDates": true
       }
     };
