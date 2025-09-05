@@ -292,7 +292,7 @@ app.post('/api/check-coverage', async (req, res) => {
           return [1];
         }
       `,
-      // ✅ CORRECCIÓN: metadata: { (con dos puntos)
+      // ✅ CORRECCIÓN DEFINITIVA: metadata: { (con dos puntos)
       meta {
         "availableDates": true
       }
