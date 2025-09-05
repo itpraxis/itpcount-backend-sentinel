@@ -91,7 +91,8 @@ app.post('/api/sentinel2', async (req, res) => {
               coordinates: [coordinates]
             }
           },
-           [
+          // ✅ CORRECCIÓN DEFINITIVA: Añadir "data" antes del array
+          data: [
             {
               dataFilter: {
                 timeRange: {
@@ -249,7 +250,7 @@ app.post('/api/check-coverage', async (req, res) => {
     const accessToken = tokenData.access_token;
     console.log('✅ access_token obtenido para verificar cobertura');
 
-    // ✅ CORRECCIÓN: Consulta de metadatos SIN output (solo metadatos)
+    // ✅ CORRECCIÓN DEFINITIVA: Consulta de metadatos SIN output
     const metadataPayload = {
       input: {
         bounds: {
@@ -258,7 +259,8 @@ app.post('/api/check-coverage', async (req, res) => {
             coordinates: [coordinates]
           }
         },
-         [
+        // ✅ CORRECCIÓN DEFINITIVA: Añadir "data" antes del array
+        data: [
           {
             dataFilter: {
               timeRange: {
@@ -271,7 +273,7 @@ app.post('/api/check-coverage', async (req, res) => {
           }
         ]
       },
-      // ✅ CORRECCIÓN: Eliminar output para obtener solo metadatos
+      // ✅ Eliminar output para obtener solo metadatos
       metadata: {
         "availableDates": true
       }
