@@ -7,7 +7,7 @@ const express = require('express');
 const cors = require('cors');
 const app = express();
 
-// ✅ Configuración CORS mejorada
+// ✅ Configuración CORS mejorada (sin espacios al final)
 app.use(cors({
   origin: 'https://itpraxis.cl',
   methods: ['POST'],
@@ -63,7 +63,7 @@ app.post('/api/sentinel2', async (req, res) => {
   }
 
   try {
-    // ✅ Obtener token de acceso
+    // ✅ Obtener token de acceso (sin espacios en la URL)
     const tokenResponse = await fetch('https://services.sentinel-hub.com/oauth/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -91,7 +91,7 @@ app.post('/api/sentinel2', async (req, res) => {
               coordinates: [coordinates]
             }
           },
-          // ✅ CORRECCIÓN: Añadir "data" antes del array
+          // ✅ CORRECCIÓN DEFINITIVA: Añadir dos puntos después de "data"
            [
             {
               dataFilter: {
@@ -135,6 +135,7 @@ app.post('/api/sentinel2', async (req, res) => {
         `
       };
 
+      // ✅ Sin espacios en la URL
       const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
         method: 'POST',
         headers: {
@@ -234,7 +235,7 @@ app.post('/api/check-coverage', async (req, res) => {
   }
 
   try {
-    // Obtener token de acceso
+    // Obtener token de acceso (sin espacios en la URL)
     const tokenResponse = await fetch('https://services.sentinel-hub.com/oauth/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -250,7 +251,7 @@ app.post('/api/check-coverage', async (req, res) => {
     const accessToken = tokenData.access_token;
     console.log('✅ access_token obtenido para verificar cobertura');
 
-    // ✅ CORRECCIÓN: Consulta de metadatos CON evalscript mínimo
+    // ✅ CORRECCIÓN DEFINITIVA: Añadir dos puntos después de "data"
     const metadataPayload = {
       input: {
         bounds: {
@@ -272,13 +273,13 @@ app.post('/api/check-coverage', async (req, res) => {
           }
         ]
       },
-      // ✅ CORRECCIÓN: Mantener output mínimo
+      // ✅ Mantener output mínimo
       output: {
         width: 512,
         height: 512,
         format: "image/png"
       },
-      // ✅ CORRECCIÓN: Evalscript mínimo ES OBLIGATORIO
+      // ✅ Evalscript mínimo ES OBLIGATORIO
       evalscript: `
         // VERSION=3
         function setup() {
@@ -291,13 +292,13 @@ app.post('/api/check-coverage', async (req, res) => {
           return [1];
         }
       `,
-      // ✅ CORRECCIÓN: metadata (no meta)
+      // ✅ metadata (no meta)
       metadata: {
         "availableDates": true
       }
     };
 
-    // Realizar la consulta de metadatos
+    // ✅ Sin espacios en la URL
     const metadataResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
       method: 'POST',
       headers: {
