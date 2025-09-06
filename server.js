@@ -98,10 +98,10 @@ app.post('/api/sentinel2', async (req, res) => {
             {
               dataFilter: {
                 timeRange: {
-                  from: `${attemptDate}T00:00:00Z`,
-                  to: `${attemptDate}T23:59:59Z`
+					from: "2023-01-01T00:00:00Z", // ✅ Rango amplio	Original	from: `${attemptDate}T00:00:00Z`,
+					to: "2024-12-31T23:59:59Z" // ✅ Rango amplio		Original	to: `${attemptDate}T23:59:59Z`
                 },
-                maxCloudCoverage: 80
+                maxCloudCoverage: 100			// Original		80
               },
               type: "sentinel-2-l2a"
             }
