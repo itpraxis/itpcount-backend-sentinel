@@ -96,7 +96,7 @@ app.post('/api/sentinel2', async (req, res) => {
           bounds: {
             geometry: {
               type: "Polygon",
-              coordinates: [coordinates]
+              coordinates: coordinates
             }
           },
           // ✅ CORRECCIÓN DEFINITIVA: Añadir "data:" con dos puntos
@@ -265,7 +265,7 @@ app.post('/api/check-coverage', async (req, res) => {
         bounds: {
           geometry: {
             type: "Polygon",
-            coordinates: [coordinates]
+            coordinates: coordinates
           }
         },
 		data: [
@@ -400,7 +400,7 @@ app.post('/api/catalogo-coverage', async (req, res) => {
     // 2. Construir la URL de la API de Catálogo
     const geometry = {
       type: "Polygon",
-      coordinates: [coordinates]
+      coordinates: coordinates
     };
     const geometryString = JSON.stringify(geometry);
     const timeRange = "2020-01-01T00:00:00Z/2025-01-01T23:59:59Z";
