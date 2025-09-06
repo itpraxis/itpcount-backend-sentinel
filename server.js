@@ -1,4 +1,4 @@
-// server.js (versión definitiva - corregida y optimizada)
+// server.js (versión final y funcional)
 require('dotenv').config();
 console.log('🔑 CLIENT_ID cargado:', process.env.CLIENT_ID ? '✅ Sí' : '❌ No');
 console.log('🔐 CLIENT_SECRET cargado:', process.env.CLIENT_SECRET ? '✅ Sí' : '❌ No');
@@ -7,7 +7,6 @@ const express = require('express');
 const cors = require('cors');
 const app = express();
 
-// ✅ Configuración CORS mejorada (sin espacios al final)
 app.use(cors({
   origin: 'https://itpraxis.cl',
   methods: ['POST'],
@@ -19,55 +18,55 @@ app.use(express.json());
 
 const port = process.env.PORT || 3001;
 
-// ✅ Fechas alternativas para Chile (ordenadas por probabilidad de éxito)
 const CHILE_DATES = [
-  '2023-01-15',   // Verano chileno (máxima probabilidad)
-  '2023-09-15',   // Primavera
-  '2022-12-01',   // Primera semana de verano
-  '2023-03-15',   // Otoño
-  '2022-10-10',   // Primavera
-  '2023-06-21'    // Invierno (menor probabilidad)
+  '2023-01-15',
+  '2023-09-15',
+  '2022-12-01',
+  '2023-03-15',
+  '2022-10-10',
+  '2023-06-21'
 ];
 
-// ✅ Función para obtener fechas alternativas cercanas
 const getAlternativeDates = (baseDate) => {
   const alternatives = [];
   const base = new Date(baseDate);
-  
-  // Agregar 7 días hacia adelante y atrás
+
   for (let i = -7; i <= 7; i++) {
-    if (i === 0) continue; // Saltar la fecha original
-    
+    if (i === 0) continue;
+
     const alternative = new Date(base);
     alternative.setDate(base.getDate() + i);
-    
-    // Formato YYYY-MM-DD
+
     const year = alternative.getFullYear();
     const month = String(alternative.getMonth() + 1).padStart(2, '0');
     const day = String(alternative.getDate()).padStart(2, '0');
-    
+
     alternatives.push(`${year}-${month}-${day}`);
   }
-  
+
   return alternatives;
 };
 
 app.post('/api/sentinel2', async (req, res) => {
   const { coordinates, date } = req.body;
 
-  // ✅ Validación de entrada
   if (!coordinates || !date) {
-    return res.status(400).json({ 
-      error: 'Faltan parámetros requeridos: coordinates y date' 
+    return res.status(400).json({
+      error: 'Faltan parámetros requeridos: coordinates y date'
     });
   }
 
   try {
-    // ✅ Obtener token de acceso (sin espacios en la URL)
+    const body = new URLSearchParams({
+        grant_type: 'client_credentials',
+        client_id: process.env.CLIENT_ID,
+        client_secret: process.env.CLIENT_SECRET
+    });
+
     const tokenResponse = await fetch('https://services.sentinel-hub.com/oauth/token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: `grant_type=client_credentials&client_id=${process.env.CLIENT_ID}&client_secret=${process.env.CLIENT_SECRET}`
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: body.toString()
     });
 
     if (!tokenResponse.ok) {
@@ -79,56 +78,51 @@ app.post('/api/sentinel2', async (req, res) => {
     const accessToken = tokenData.access_token;
     console.log('✅ access_token obtenido');
 
-    // ✅ Función para intentar obtener imagen
     const tryGetImage = async (attemptDate) => {
-		
+      console.log('🔍 Verificando attemptDate:', attemptDate);
+      if (!attemptDate || typeof attemptDate !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(attemptDate)) {
+        throw new Error(`Fecha inválida: ${attemptDate}`);
+      }
 
-	// ✅ Verificación crítica antes de construir el payload
-	console.log('🔍 Verificando attemptDate:', attemptDate);
-	if (!attemptDate || typeof attemptDate !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(attemptDate)) {
-	  throw new Error(`Fecha inválida: ${attemptDate}`);
-	}		
-		
       console.log(`Intentando con fecha: ${attemptDate}`);
-      
+
       const payload = {
         input: {
           bounds: {
             geometry: {
               type: "Polygon",
-              coordinates: [coordinates]
+              coordinates: [coordinates] // ✅ CORRECCIÓN FINAL
             }
           },
-          // ✅ CORRECCIÓN DEFINITIVA: Añadir "data:" con dos puntos
           data: [
-			{
-			dataFilter: {
-				timeRange: {
+            {
+              dataFilter: {
+                timeRange: {
                   from: `${attemptDate}T00:00:00Z`,
                   to: `${attemptDate}T23:59:59Z`
-				},
-			maxCloudCoverage: 80
-			},
-			type: "sentinel-2-l2a"
-			}
+                },
+                maxCloudCoverage: 80
+              },
+              type: "sentinel-2-l2a"
+            }
           ]
         },
         output: {
           width: 512,
           height: 512,
-		  format: "image/png", // ✅ CORRECCIÓN CLAVE AQUÍ (format: "application/json", se usa para obtener datos)
+          format: "image/png",
           upsampling: "NEAREST",
           downsampling: "NEAREST"
         },
         evalscript: `
           // VERSION=3
           function setup() {
-            return { 
-              input: ["B04", "B03", "B02"], 
-              output: { 
-                bands: 3, 
-                sampleType: "AUTO" 
-              } 
+            return {
+              input: ["B04", "B03", "B02"],
+              output: {
+                bands: 3,
+                sampleType: "AUTO"
+              }
             };
           }
 
@@ -143,7 +137,6 @@ app.post('/api/sentinel2', async (req, res) => {
         `
       };
 
-      // ✅ Sin espacios en la URL
       const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
         method: 'POST',
         headers: {
@@ -159,8 +152,7 @@ app.post('/api/sentinel2', async (req, res) => {
       }
 
       const buffer = await imageResponse.arrayBuffer();
-      
-      // ✅ Verificación de tamaño de imagen
+
       if (buffer.byteLength < 1000) {
         throw new Error(`Imagen demasiado pequeña para ${attemptDate}`);
       }
@@ -172,7 +164,6 @@ app.post('/api/sentinel2', async (req, res) => {
       };
     };
 
-    // ✅ Intentar con la fecha solicitada
     let result;
     try {
       result = await tryGetImage(date);
@@ -182,7 +173,6 @@ app.post('/api/sentinel2', async (req, res) => {
       console.warn(`⚠️ Falló con fecha solicitada: ${date} - ${error.message}`);
     }
 
-    // ✅ Intentar con fechas alternativas específicas para Chile
     for (const alternativeDate of CHILE_DATES) {
       try {
         result = await tryGetImage(alternativeDate);
@@ -196,7 +186,6 @@ app.post('/api/sentinel2', async (req, res) => {
       }
     }
 
-    // ✅ Intentar con fechas cercanas (±7 días)
     const nearbyDates = getAlternativeDates(date);
     for (const alternativeDate of nearbyDates) {
       try {
@@ -211,8 +200,7 @@ app.post('/api/sentinel2', async (req, res) => {
       }
     }
 
-    // ✅ Si todo falla, devolver error detallado
-    return res.status(404).json({ 
+    return res.status(404).json({
       error: "No se encontraron datos de imagen para estas coordenadas en ninguna fecha disponible",
       suggestedDates: CHILE_DATES,
       request: { coordinates, date }
@@ -220,7 +208,7 @@ app.post('/api/sentinel2', async (req, res) => {
 
   } catch (error) {
     console.error('❌ Error:', error.message);
-    res.status(500).json({ 
+    res.status(500).json({
       error: error.message,
       suggestion: "Verifica que las coordenadas estén en formato [longitud, latitud] y que el área esté en tierra firme"
     });
