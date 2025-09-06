@@ -100,17 +100,17 @@ app.post('/api/sentinel2', async (req, res) => {
             }
           },
           // ✅ CORRECCIÓN DEFINITIVA: Añadir "data:" con dos puntos
-		  data: [
-            {
-              dataFilter: {
-                timeRange: {
+          data: [
+			{
+			dataFilter: {
+				timeRange: {
                   from: `${attemptDate}T00:00:00Z`,
                   to: `${attemptDate}T23:59:59Z`
-                },
-                maxCloudCoverage: 80
-              },
-              type: "sentinel-2-l2a"
-            }
+				},
+			maxCloudCoverage: 80
+			},
+			type: "sentinel-2-l2a"
+			}
           ]
         },
         output: {
@@ -301,8 +301,8 @@ app.post('/api/check-coverage', async (req, res) => {
           return [1];
         }
       `,
-      // ✅ CORRECCIÓN: metadata: { (con dos puntos)
-      metadata: {
+      // ✅ CORRECCIÓN: meta: { (con dos puntos)
+      meta: {
         "availableDates": true
       }
     };
