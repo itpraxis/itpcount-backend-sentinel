@@ -368,3 +368,88 @@ app.post('/api/check-coverage', async (req, res) => {
     });
   }
 });
+
+// NUEVO ENDPOINT: Verificar catálogo cobertura de Sentinel-2
+app.post('/api/catalogo-coverage', async (req, res) => {
+  const { coordinates } = req.body;
+
+  // Validación de entrada
+  if (!coordinates) {
+    return res.status(400).json({
+      error: 'Faltan parámetros requeridos: coordinates'
+    });
+  }
+
+  try {
+    // 1. Obtener token de acceso
+    const tokenResponse = await fetch('https://services.sentinel-hub.com/oauth/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: `grant_type=client_credentials&client_id=${process.env.CLIENT_ID}&client_secret=${process.env.CLIENT_SECRET}`
+    });
+
+    if (!tokenResponse.ok) {
+      const error = await tokenResponse.text();
+      throw new Error(`Error al obtener token: ${error}`);
+    }
+
+    const tokenData = await tokenResponse.json();
+    const accessToken = tokenData.access_token;
+    console.log('✅ access_token obtenido para verificar cobertura');
+
+    // 2. Construir la URL de la API de Catálogo
+    const geometry = {
+      type: "Polygon",
+      coordinates: [coordinates]
+    };
+    const geometryString = JSON.stringify(geometry);
+    const timeRange = "2020-01-01T00:00:00Z/2025-01-01T23:59:59Z";
+    const collectionId = "sentinel-2-l2a";
+
+    const catalogUrl = `https://services.sentinel-hub.com/api/v1/catalog/search?bbox=&datetime=${timeRange}&collections=${collectionId}&limit=100&query={"eo:cloud_cover": {"gte": 0, "lte": 100}}&intersects=${encodeURIComponent(geometryString)}`;
+    
+    // 3. Hacer la solicitud GET al endpoint de Catálogo
+    const catalogResponse = await fetch(catalogUrl, {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${accessToken}`
+      }
+    });
+
+    if (!catalogResponse.ok) {
+      const error = await catalogResponse.text();
+      throw new Error(`Error al obtener datos del Catálogo: ${error}`);
+    }
+
+    const catalogData = await catalogResponse.json();
+
+    // 4. Procesar las fechas disponibles
+    const availableDates = catalogData.features
+      .map(feature => feature.properties.datetime.split('T')[0])
+      .filter((value, index, self) => self.indexOf(value) === index) // Eliminar duplicados
+      .sort((a, b) => new Date(b) - new Date(a)); // Ordenar de más reciente a más antigua
+
+    if (availableDates.length === 0) {
+      return res.json({
+        hasCoverage: false,
+        message: "No hay datos de imagen disponibles para este área en el periodo de tiempo especificado."
+      });
+    }
+
+    // Devolver las fechas disponibles
+    return res.json({
+      hasCoverage: true,
+      totalDates: availableDates.length,
+      availableDates: availableDates.slice(0, 30), // Devolver solo las 30 más recientes
+      message: `Se encontraron ${availableDates.length} fechas con datos disponibles`
+    });
+
+  } catch (error) {
+    console.error('❌ Error al verificar cobertura:', error.message);
+    res.status(500).json({
+      error: error.message,
+      suggestion: "Verifica que las coordenadas estén en formato [longitud, latitud] y que el área esté en tierra firme"
+    });
+  }
+});
