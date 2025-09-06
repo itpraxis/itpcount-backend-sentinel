@@ -115,18 +115,18 @@ app.post('/api/sentinel2', async (req, res) => {
           downsampling: "NEAREST"
         },
 		evalscript: `
-		//VERSION=3
+		// VERSION=3
 		function setup() {
 		  return {
-			input: ["B01"],
-			output: { bands: 1, sampleType: "UINT8" }
+			input: ["B12"],
+			output: { bands: 1, sampleType: "UINT16" }
 		  };
 		}
 
 		function evaluatePixel(samples) {
-		  return [samples.B01];
+		  return [samples.B12];
 		}
-		`
+		`		
       };
 
       const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
