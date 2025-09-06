@@ -92,7 +92,7 @@ app.post('/api/sentinel2', async (req, res) => {
             }
           },
           // ✅ CORRECCIÓN DEFINITIVA: Añadir "data" como propiedad válida
-           [
+           data: [
             {
               dataFilter: {
                 timeRange: {
@@ -260,7 +260,7 @@ app.post('/api/check-coverage', async (req, res) => {
           }
         },
         // ✅ CORRECCIÓN DEFINITIVA: Añadir "data" como propiedad válida
-         [
+         data: [
           {
             dataFilter: {
               timeRange: {
