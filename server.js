@@ -50,11 +50,11 @@ const getAlternativeDates = (baseDate) => {
 app.post('/api/sentinel2', async (req, res) => {
   const { coordinates, date } = req.body;
 
-//  if (!coordinates || !date) {
-//    return res.status(400).json({
-//      error: 'Faltan parámetros requeridos: coordinates y date'
-//    });
-//  }
+  if (!coordinates || !date) {
+    return res.status(400).json({
+      error: 'Faltan parámetros requeridos: coordinates y date'
+    });
+  }
 
   try {
     const body = new URLSearchParams({
@@ -124,7 +124,8 @@ app.post('/api/sentinel2', async (req, res) => {
 		}
 
 		function evaluatePixel(samples) {
-		  return [samples.B01];
+		  return [2.5 * sample.B04, 2.5 * sample.B03, 2.5 * sample.B02];
+		  //return [samples.B01];
 		}
 		`		
       };
@@ -268,18 +269,27 @@ app.post('/api/check-coverage', async (req, res) => {
         format: "application/json"
       },
       // ✅ Evalscript mínimo ES OBLIGATORIO
-      evalscript: `
-        // VERSION=3
-        function setup() {
-          return {
-            input: ["B04"],
-            output: { bands: 1 }
-          };
-        }
-        function evaluatePixel(sample) {
-          return [1];
-        }
-      `,
+        evalscript: `
+          // VERSION=3
+          function setup() {
+            return {
+              input: ["B04", "B03", "B02"],
+              output: {
+                bands: 3,
+                sampleType: "AUTO"
+              }
+            };
+          }
+
+          function evaluatePixel(sample) {
+            const MAX_VAL = 3000;
+            return [
+              sample.B04 / MAX_VAL,
+              sample.B03 / MAX_VAL,
+              sample.B02 / MAX_VAL
+            ];
+          }
+        `,
       // ✅ CORRECCIÓN: meta: { (con dos puntos)
       meta: {
         "availableDates": true
