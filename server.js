@@ -50,11 +50,11 @@ const getAlternativeDates = (baseDate) => {
 app.post('/api/sentinel2', async (req, res) => {
   const { coordinates, date } = req.body;
 
-  if (!coordinates || !date) {
-    return res.status(400).json({
-      error: 'Faltan parámetros requeridos: coordinates y date'
-    });
-  }
+//  if (!coordinates || !date) {
+//    return res.status(400).json({
+//      error: 'Faltan parámetros requeridos: coordinates y date'
+//    });
+//  }
 
   try {
     const body = new URLSearchParams({
@@ -124,10 +124,9 @@ app.post('/api/sentinel2', async (req, res) => {
 		}
 
 		function evaluatePixel(samples) {
-		  return [2.5 * sample.B04, 2.5 * sample.B03, 2.5 * sample.B02];
-		  //return [samples.B01];
+			return [2.5 * sample.B04, 2.5 * sample.B03, 2.5 * sample.B02];
 		}
-		`		
+		`
       };
 
       const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
