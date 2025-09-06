@@ -81,6 +81,14 @@ app.post('/api/sentinel2', async (req, res) => {
 
     // ✅ Función para intentar obtener imagen
     const tryGetImage = async (attemptDate) => {
+		
+
+	// ✅ Verificación crítica antes de construir el payload
+	console.log('🔍 Verificando attemptDate:', attemptDate);
+	if (!attemptDate || typeof attemptDate !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(attemptDate)) {
+	  throw new Error(`Fecha inválida: ${attemptDate}`);
+	}		
+		
       console.log(`Intentando con fecha: ${attemptDate}`);
       
       const payload = {
@@ -92,7 +100,7 @@ app.post('/api/sentinel2', async (req, res) => {
             }
           },
           // ✅ CORRECCIÓN DEFINITIVA: Añadir "data:" con dos puntos
-          data: [
+		  data: [
             {
               dataFilter: {
                 timeRange: {
@@ -261,7 +269,7 @@ app.post('/api/check-coverage', async (req, res) => {
           }
         },
         // ✅ CORRECCIÓN DEFINITIVA: Añadir "data:" con dos puntos
-        data: [
+		data: [
           {
             dataFilter: {
               timeRange: {
