@@ -115,33 +115,28 @@ app.post('/api/sentinel2', async (req, res) => {
           downsampling: "NEAREST"
         },
 		evalscript: `
-		// VERSION=3
-		function setup() {
-			return {
-				input: [{
-					bands: ["B04", "B03", "B02"],
-					units: "DN"
-				}],
-				output: {
-					bands: 3,
-					sampleType: "AUTO"
-				}
-			};
-		}
-		
-		function evaluatePixel(samples) {
-			const bands = samples.BANDS;
-			
-			// Dynamic scaling to make the image visible
-			const factor = 2.5;
-			const normalized = [
-				factor * bands.B04,
-				factor * bands.B03,
-				factor * bands.B02
-			];
+    // VERSION=3
+    function setup() {
+        return {
+            input: ["B04", "B03", "B02"], // Bands as an array of strings
+            output: {
+                bands: 3,
+                sampleType: "AUTO"
+            }
+        };
+    }
+    
+    function evaluatePixel(samples) {
+        // Direct access to band properties on the samples object
+        const factor = 2.5;
+        const normalized = [
+            factor * samples.B04, // No `bands` object, use `samples` directly
+            factor * samples.B03,
+            factor * samples.B02
+        ];
 
-			return normalized.map(val => Math.min(Math.max(val, 0), 1));
-		}
+        return normalized.map(val => Math.min(Math.max(val, 0), 1));
+    }
 		`		
       };
 
