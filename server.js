@@ -116,7 +116,7 @@ app.post('/api/sentinel2', async (req, res) => {
         output: {
           width: 512,
           height: 512,
-		  format: "application/json"
+		  format: "application/json",
           upsampling: "NEAREST",
           downsampling: "NEAREST"
         },
