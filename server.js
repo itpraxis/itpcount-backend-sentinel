@@ -50,11 +50,11 @@ const getAlternativeDates = (baseDate) => {
 app.post('/api/sentinel2', async (req, res) => {
   const { coordinates, date } = req.body;
 
-  if (!coordinates || !date) {
-    return res.status(400).json({
-      error: 'Faltan parámetros requeridos: coordinates y date'
-    });
-  }
+//  if (!coordinates || !date) {
+//    return res.status(400).json({
+//      error: 'Faltan parámetros requeridos: coordinates y date'
+//    });
+//  }
 
   try {
     const body = new URLSearchParams({
@@ -224,11 +224,11 @@ app.post('/api/check-coverage', async (req, res) => {
   const { coordinates } = req.body;
   
   // Validación de entrada
-//  if (!coordinates) {
-//    return res.status(400).json({ 
-//      error: 'Faltan parámetros requeridos: coordinates' 
-//    });
-//  }
+  if (!coordinates) {
+    return res.status(400).json({ 
+      error: 'Faltan parámetros requeridos: coordinates' 
+    });
+  }
 
   try {
     // Obtener token de acceso (sin espacios en la URL)
