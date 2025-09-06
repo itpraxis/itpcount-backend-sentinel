@@ -80,9 +80,9 @@ app.post('/api/sentinel2', async (req, res) => {
 
     const tryGetImage = async (attemptDate) => {
       console.log('🔍 Verificando attemptDate:', attemptDate);
-      if (!attemptDate || typeof attemptDate !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(attemptDate)) {
-        throw new Error(`Fecha inválida: ${attemptDate}`);
-      }
+      // if (!attemptDate || typeof attemptDate !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(attemptDate)) {
+      //   throw new Error(`Fecha inválida: ${attemptDate}`);
+      // }
 
       console.log(`Intentando con fecha: ${attemptDate}`);
 
