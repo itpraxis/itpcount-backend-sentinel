@@ -282,10 +282,10 @@ app.post('/api/check-coverage', async (req, res) => {
           }
         ]
       },
-      // ✅ CORRECCIÓN: format: "application/json" (no "image/png")
+      // ✅ CORRECCIÓN: width: 50, height: 50 (no 1x1)
       output: {
-        width: 1,
-        height: 1,
+        width: 50,
+        height: 50,
         format: "application/json"
       },
       // ✅ Evalscript mínimo ES OBLIGATORIO
