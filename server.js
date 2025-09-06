@@ -19,7 +19,7 @@ app.use(express.json());
 const port = process.env.PORT || 3001;
 
 const CHILE_DATES = [
-  '2023-01-15',
+  '2024-03-25',
   '2023-09-15',
   '2022-12-01',
   '2023-03-15',
@@ -124,7 +124,7 @@ app.post('/api/sentinel2', async (req, res) => {
 		}
 
 		function evaluatePixel(samples) {
-			return [2.5 * sample.B04, 2.5 * sample.B03, 2.5 * sample.B02];
+		  return [samples.B01];
 		}
 		`
       };
