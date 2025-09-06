@@ -116,7 +116,7 @@ app.post('/api/sentinel2', async (req, res) => {
         output: {
           width: 512,
           height: 512,
-		  format: "application/json",
+		  format: "image/png", // ✅ CORRECCIÓN CLAVE AQUÍ (format: "application/json", se usa para obtener datos)
           upsampling: "NEAREST",
           downsampling: "NEAREST"
         },
