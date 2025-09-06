@@ -7,7 +7,7 @@ const express = require('express');
 const cors = require('cors');
 const app = express();
 
-// ✅ Configuración CORS mejorada
+// ✅ Configuración CORS mejorada (sin espacios al final)
 app.use(cors({
   origin: 'https://itpraxis.cl',
   methods: ['POST'],
@@ -63,7 +63,7 @@ app.post('/api/sentinel2', async (req, res) => {
   }
 
   try {
-    // ✅ Obtener token de acceso
+    // ✅ Obtener token de acceso (sin espacios en la URL)
     const tokenResponse = await fetch('https://services.sentinel-hub.com/oauth/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -91,8 +91,8 @@ app.post('/api/sentinel2', async (req, res) => {
               coordinates: [coordinates]
             }
           },
-          // ✅ CORRECCIÓN DEFINITIVA: Añadir "data" como propiedad válida
-           data: [
+          // ✅ CORRECCIÓN DEFINITIVA: data: [ (sin espacios antes de "data:")
+           [
             {
               dataFilter: {
                 timeRange: {
@@ -135,6 +135,7 @@ app.post('/api/sentinel2', async (req, res) => {
         `
       };
 
+      // ✅ Sin espacios en la URL
       const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
         method: 'POST',
         headers: {
@@ -234,7 +235,7 @@ app.post('/api/check-coverage', async (req, res) => {
   }
 
   try {
-    // Obtener token de acceso
+    // Obtener token de acceso (sin espacios en la URL)
     const tokenResponse = await fetch('https://services.sentinel-hub.com/oauth/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -250,7 +251,7 @@ app.post('/api/check-coverage', async (req, res) => {
     const accessToken = tokenData.access_token;
     console.log('✅ access_token obtenido para verificar cobertura');
 
-    // ✅ CORRECCIÓN DEFINITIVA: Añadir "data" como propiedad válida
+    // ✅ CORRECCIÓN DEFINITIVA: data: [ (sin espacios antes de "data:")
     const metadataPayload = {
       input: {
         bounds: {
@@ -259,8 +260,8 @@ app.post('/api/check-coverage', async (req, res) => {
             coordinates: [coordinates]
           }
         },
-        // ✅ CORRECCIÓN DEFINITIVA: Añadir "data" como propiedad válida
-         data: [
+        // ✅ CORRECCIÓN DEFINITIVA:  [ (sin espacios antes de "")
+         [
           {
             dataFilter: {
               timeRange: {
@@ -273,11 +274,11 @@ app.post('/api/check-coverage', async (req, res) => {
           }
         ]
       },
-      // ✅ Mantener output mínimo
+      // ✅ CORRECCIÓN: format: "application/json" (no "image/png")
       output: {
-        width: 512,
-        height: 512,
-        format: "image/png"
+        width: 1,
+        height: 1,
+        format: "application/json"
       },
       // ✅ Evalscript mínimo ES OBLIGATORIO
       evalscript: `
@@ -292,13 +293,13 @@ app.post('/api/check-coverage', async (req, res) => {
           return [1];
         }
       `,
-      // ✅ CORRECCIÓN DEFINITIVA: metadata: { (con dos puntos)
-     metadata: {
+      // ✅ meta { (con dos puntos)
+      meta {
         "availableDates": true
       }
     };
 
-    // Realizar la consulta de metadatos
+    // ✅ Sin espacios en la URL
     const metadataResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
       method: 'POST',
       headers: {
