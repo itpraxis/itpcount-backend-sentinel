@@ -117,15 +117,20 @@ app.post('/api/sentinel2', async (req, res) => {
 		evalscript: `
 		// VERSION=3
 		function setup() {
-		  return {
-			input: ["B04", "B03", "B02"],
-			output: {bands: 3, sampleType: "AUTO"}
-		  };
-		}
+			return {
+				input: ["B04", "B03", "B02"],
+				output: { bands: 3, sampleType: "AUTO" }
+			};
+			}
 
 		function evaluatePixel(samples) {
-			return [2.5 * sample.B04, 2.5 * sample.B03, 2.5 * sample.B02];
-		}
+			const MAX_VAL = 3000;
+			return [
+				samples.B04 / MAX_VAL,
+				samples.B03 / MAX_VAL,
+				samples.B02 / MAX_VAL
+			];
+		}		
 		`		
       };
 
