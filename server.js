@@ -145,9 +145,9 @@ app.post('/api/sentinel2', async (req, res) => {
 
       const buffer = await imageResponse.arrayBuffer();
 
-      if (buffer.byteLength < 1000) {
-        throw new Error(`Imagen demasiado pequeña para ${attemptDate}`);
-      }
+//      if (buffer.byteLength < 1000) {
+//        throw new Error(`Imagen demasiado pequeña para ${attemptDate}`);
+//      }
 
       const base64 = Buffer.from(buffer).toString('base64');
       return {
