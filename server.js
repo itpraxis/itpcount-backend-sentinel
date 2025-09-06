@@ -115,23 +115,24 @@ app.post('/api/sentinel2', async (req, res) => {
           downsampling: "NEAREST"
         },
 		evalscript: `
-//VERSION=3
-function setup() {
-  return {
-    input: [{
-      bands: ["B04", "B03", "B02"],
-      units: "DN"
-    }],
-    output: {
-      bands: 3,
-      sampleType: "AUTO"
+    //VERSION=3
+    function setup() {
+        return {
+            input: [{
+                bands: ["B02", "B03", "B04"], // Sentinel-2 bands for true color
+                units: "DN"
+            }],
+            output: {
+                bands: 3,
+                sampleType: "AUTO"
+            }
+        };
     }
-  };
-}
-
-function evaluatePixel(samples) {
-  return [2.5 * samples.B04, 2.5 * samples.B03, 2.5 * samples.B02];
-}
+    
+    function evaluatePixel(samples) {
+        // Simple true-color visualization
+        return [samples.B04, samples.B03, samples.B02];
+    }
 		`		
       };
 
