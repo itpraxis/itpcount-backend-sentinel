@@ -118,13 +118,13 @@ app.post('/api/sentinel2', async (req, res) => {
 		// VERSION=3
 		function setup() {
 		  return {
-			input: ["B12"],
-			output: { bands: 1, sampleType: "UINT16" }
+			input: ["B04", "B03", "B02"],
+			output: {bands: 3, sampleType: "AUTO"}
 		  };
 		}
 
 		function evaluatePixel(samples) {
-		  return [samples.B12];
+			return [2.5 * sample.B04, 2.5 * sample.B03, 2.5 * sample.B02];
 		}
 		`		
       };
