@@ -282,7 +282,7 @@ app.post('/api/check-coverage', async (req, res) => {
           }
         ]
       },
-      // ✅ CORRECCIÓN: width: 50, height: 50 (no 1x1)
+      // ✅ CORRECCIÓN: format: "application/json" (no "image/png")
       output: {
         width: 50,
         height: 50,
