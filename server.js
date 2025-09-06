@@ -118,19 +118,30 @@ app.post('/api/sentinel2', async (req, res) => {
 		// VERSION=3
 		function setup() {
 			return {
-				input: ["B04", "B03", "B02"],
-				output: { bands: 3, sampleType: "AUTO" }
+				input: [{
+					bands: ["B04", "B03", "B02"],
+					units: "DN"
+				}],
+				output: {
+					bands: 3,
+					sampleType: "AUTO"
+				}
 			};
-			}
-
+		}
+		
 		function evaluatePixel(samples) {
-			const MAX_VAL = 3000;
-			return [
-				samples.B04 / MAX_VAL,
-				samples.B03 / MAX_VAL,
-				samples.B02 / MAX_VAL
+			const bands = samples.BANDS;
+			
+			// Dynamic scaling to make the image visible
+			const factor = 2.5;
+			const normalized = [
+				factor * bands.B04,
+				factor * bands.B03,
+				factor * bands.B02
 			];
-		}		
+
+			return normalized.map(val => Math.min(Math.max(val, 0), 1));
+		}
 		`		
       };
 
