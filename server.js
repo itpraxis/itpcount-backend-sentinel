@@ -91,7 +91,7 @@ app.post('/api/sentinel2', async (req, res) => {
           bounds: {
             geometry: {
               type: "Polygon",
-              coordinates: coordinates // ✅ CORRECCIÓN FINAL
+              coordinates: coordinates		// ✅ CORRECCIÓN FINAL
             }
           },
           data: [
