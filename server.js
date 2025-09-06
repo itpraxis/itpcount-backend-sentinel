@@ -114,27 +114,19 @@ app.post('/api/sentinel2', async (req, res) => {
           upsampling: "NEAREST",
           downsampling: "NEAREST"
         },
-        evalscript: `
-          // VERSION=3
-          function setup() {
-            return {
-              input: ["B04", "B03", "B02"],
-              output: {
-                bands: 3,
-                sampleType: "AUTO"
-              }
-            };
-          }
+		evalscript: `
+		//VERSION=3
+		function setup() {
+		  return {
+			input: ["B01"],
+			output: { bands: 1, sampleType: "UINT8" }
+		  };
+		}
 
-          function evaluatePixel(sample) {
-            const MAX_VAL = 3000;
-            return [
-              sample.B04 / MAX_VAL,
-              sample.B03 / MAX_VAL,
-              sample.B02 / MAX_VAL
-            ];
-          }
-        `
+		function evaluatePixel(samples) {
+		  return [samples.B01];
+		}
+		`		
       };
 
       const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
