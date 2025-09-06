@@ -119,8 +119,9 @@ app.post('/api/sentinel2', async (req, res) => {
     function setup() {
         return {
             input: [{
-                bands: ["B02", "B03", "B04"], // Sentinel-2 bands for true color
-                units: "DN"
+                bands: ["B02", "B03", "B04"],
+                // ✅ CAMBIO: Cambiar DN a REFLECTANCE
+                units: "REFLECTANCE" 
             }],
             output: {
                 bands: 3,
