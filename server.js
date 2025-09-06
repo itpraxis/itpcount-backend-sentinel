@@ -146,6 +146,7 @@ function evaluatePixel(samples) {
 
       if (!imageResponse.ok) {
         const error = await imageResponse.text();
+		console.error(`❌ Error detallado de la API de Sentinel-Hub para ${attemptDate}:`, error); // ✅ AGREGAR ESTA LÍNEA
         throw new Error(`Error en imagen para ${attemptDate}: ${error}`);
       }
 
