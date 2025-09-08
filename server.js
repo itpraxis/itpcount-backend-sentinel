@@ -675,3 +675,131 @@ app.post('/api/sentinel2simple', async (req, res) => {
     });
   }
 });
+
+app.post('/api/sentinel2simple2', async (req, res) => {
+  const { coordinates, date } = req.body;
+
+  // Paso 1: Convertir el polígono a un bounding box (bbox)
+  let minLon = Infinity, minLat = Infinity, maxLon = -Infinity, maxLat = -Infinity;
+
+  // Las coordenadas están anidadas en un array, por eso se usa coordinates[0]
+  if (coordinates && coordinates[0] && Array.isArray(coordinates[0])) {
+    coordinates[0].forEach(coord => {
+      const [lon, lat] = coord;
+      minLon = Math.min(minLon, lon);
+      minLat = Math.min(minLat, lat);
+      maxLon = Math.max(maxLon, lon);
+      maxLat = Math.max(maxLat, lat);
+    });
+  } else {
+    return res.status(400).json({ error: 'Formato de coordenadas de polígono inválido.' });
+  }
+
+  const bbox = [minLon, minLat, maxLon, maxLat];
+  console.log(`✅ Polígono convertido a bbox: [${bbox.join(', ')}]`);
+
+  try {
+    const body = new URLSearchParams({
+      grant_type: 'client_credentials',
+      client_id: process.env.CLIENT_ID,
+      client_secret: process.env.CLIENT_SECRET
+    });
+
+    const tokenResponse = await fetch('https://services.sentinel-hub.com/oauth/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: body.toString()
+    });
+
+    if (!tokenResponse.ok) {
+      const error = await tokenResponse.text();
+      throw new Error(`Error al obtener token: ${error}`);
+    }
+
+    const tokenData = await tokenResponse.json();
+    const accessToken = tokenData.access_token;
+
+    const payload = {
+      input: {
+        // Paso 2: Usar el bbox calculado en el payload
+        bounds: {
+          bbox: bbox,
+          properties: {
+            crs: "http://www.opengis.net/def/crs/OGC/1.3/CRS84"
+          }
+        },
+        data: [
+          {
+            dataFilter: {
+              timeRange: {
+                from: `${date}T00:00:00Z`,
+                to: `${date}T23:59:59Z`
+              },
+              maxCloudCoverage: 100
+            },
+            type: "sentinel-2-l2a"
+          }
+        ]
+      },
+      output: {
+        width: 512,
+        height: 512,
+        format: "image/png",
+        upsampling: "NEAREST",
+        downsampling: "NEAREST"
+      },
+      evalscript: `
+        //VERSION=3
+        function setup() {
+          return {
+            input: [{
+              bands: ["B02", "B03", "B04"],
+              units: "REFLECTANCE"
+            }],
+            output: {
+              bands: 3,
+              sampleType: "AUTO"
+            }
+          };
+        }
+        function evaluatePixel(samples) {
+          return [samples.B04, samples.B03, samples.B02];
+        }
+      `
+    };
+
+    const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${accessToken}`
+      },
+      body: JSON.stringify(payload)
+    });
+
+    if (!imageResponse.ok) {
+      const error = await imageResponse.text();
+      console.error(`❌ Error detallado de la API de Sentinel-Hub para el bbox:`, error);
+      return res.status(imageResponse.status).json({
+        error: `Error en la imagen: ${error}`,
+        statusCode: imageResponse.status
+      });
+    }
+
+    const buffer = await imageResponse.arrayBuffer();
+    const base64 = Buffer.from(buffer).toString('base64');
+    
+    return res.json({
+      url: `image/png;base64,${base64}`,
+      usedDate: date
+    });
+
+  } catch (error) {
+    console.error('❌ Error general:', error.message);
+    res.status(500).json({
+      error: error.message,
+      suggestion: "Verifica que las coordenadas del polígono sean válidas y que el área esté en tierra firme"
+    });
+  }
+});
+
