@@ -241,9 +241,9 @@ const getNdviAverage = async ({ geometry, date }) => {
                     }
                 ]
             },
+            // ✅ Modificación clave: Agregamos el parámetro 'resolution'
             output: {
-                width: 10,
-                height: 10,
+                resolution: 1500, // Usamos la resolución máxima permitida
                 format: "application/json"
             },
             evalscript: `
