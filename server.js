@@ -225,7 +225,7 @@ app.post('/api/sentinel2', async (req, res) => {
     }
 });
 
-app.post('/api/get-valid-dates', async (req, res) => {
+app.post('/api/get-valid-dates1', async (req, res) => {
     // Coordenadas de prueba para Londres
     const testBbox = [-0.161, 51.488, 0.057, 51.52];
 
@@ -251,7 +251,7 @@ app.post('/api/get-valid-dates', async (req, res) => {
 });
 
 // Nuevo endpoint para obtener fechas disponibles
-app.post('/api/get-valid-dates2', async (req, res) => {
+app.post('/api/get-valid-dates', async (req, res) => {
     const { coordinates } = req.body;
     if (!coordinates) {
         return res.status(400).json({ error: 'Faltan parámetros requeridos: coordinates' });
