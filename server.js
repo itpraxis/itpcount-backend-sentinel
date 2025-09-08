@@ -232,7 +232,7 @@ app.post('/api/get-valid-dates', async (req, res) => {
     const testBbox = [-0.161, 51.488, 0.057, 51.52];
 
     try {
-        let availableDates = await getAvailableDates(testBbox, 10);
+        let availableDates = await getAvailableDates(testBbox, 90);
         if (availableDates.length === 0) {
             availableDates = await getAvailableDates(testBbox, 100);
         }
