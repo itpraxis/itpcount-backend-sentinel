@@ -89,6 +89,8 @@ const getAccessToken = async () => {
 };
 
 // Función auxiliar para obtener fechas disponibles del catálogo (se agrega el parámetro de nubosidad)
+// Función auxiliar para obtener fechas disponibles del catálogo (se agrega el parámetro de nubosidad)
+// Función auxiliar para obtener fechas disponibles del catálogo (se agrega el parámetro de nubosidad)
 const getAvailableDates = async (bbox, maxCloudCoverage) => {
     try {
         const accessToken = await getAccessToken();
