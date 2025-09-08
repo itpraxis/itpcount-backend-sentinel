@@ -3,7 +3,7 @@ console.log('🔑 CLIENT_ID cargado:', process.env.CLIENT_ID ? '✅ Sí' : '❌ 
 console.log('🔐 CLIENT_SECRET cargado:', process.env.CLIENT_SECRET ? '✅ Sí' : '❌ No');
 
 const express = require('express');
-const cors = require('cors');
+const cors = require = require('cors');
 const app = express();
 
 app.use(cors({
@@ -18,29 +18,28 @@ app.use(express.json());
 const port = process.env.PORT || 3001;
 
 // Función auxiliar para convertir polígono a bbox
-// Función auxiliar para convertir polígono a bbox
 const polygonToBbox = (coordinates) => {
-    if (!coordinates || coordinates.length === 0 || !Array.isArray(coordinates[0])) {
-        return null;
-    }
-    const polygonCoords = coordinates[0];
-    if (!Array.isArray(polygonCoords)) {
-        return null;
-    }
-    let minLon = Infinity, minLat = Infinity, maxLon = -Infinity, maxLat = -Infinity;
-    polygonCoords.forEach(coord => {
-        if (Array.isArray(coord) && coord.length >= 2) {
-            const [lon, lat] = coord;
-            minLon = Math.min(minLon, lon);
-            minLat = Math.min(minLat, lat);
-            maxLon = Math.max(maxLon, lon);
-            maxLat = Math.max(maxLat, lat);
-        }
-    });
-    if (minLon === Infinity) {
-        return null;
-    }
-    return [minLon, minLat, maxLon, maxLat];
+    if (!coordinates || coordinates.length === 0 || !Array.isArray(coordinates[0])) {
+        return null;
+    }
+    const polygonCoords = coordinates[0];
+    if (!Array.isArray(polygonCoords)) {
+        return null;
+    }
+    let minLon = Infinity, minLat = Infinity, maxLon = -Infinity, maxLat = -Infinity;
+    polygonCoords.forEach(coord => {
+        if (Array.isArray(coord) && coord.length >= 2) {
+            const [lon, lat] = coord;
+            minLon = Math.min(minLon, lon);
+            minLat = Math.min(minLat, lat);
+            maxLon = Math.max(maxLon, lon);
+            maxLat = Math.max(maxLat, lat);
+        }
+    });
+    if (minLon === Infinity) {
+        return null;
+    }
+    return [minLon, minLat, maxLon, maxLat];
 };
 
 // Función auxiliar para obtener fechas cercanas
@@ -86,61 +85,54 @@ const getAccessToken = async () => {
     return tokenData.access_token;
 };
 
-	// Función auxiliar para obtener fechas disponibles del catálogo (se agrega el parámetro de nubosidad)
-	// Función auxiliar para obtener fechas disponibles del catálogo (se agrega el parámetro de nubosidad)
-	// Function to get available dates from the Sentinel-Hub Catalog API
-	// Función auxiliar para obtener fechas disponibles del catálogo (se agrega el parámetro de nubosidad)
-	const getAvailableDates = async (bbox, maxCloudCoverage) => {
-		try {
-			const accessToken = await getAccessToken();
-			const catalogUrl = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search';
-			
-			// ✅ Obtener la fecha actual y la fecha de inicio (ej. 1 año atrás)
-			const now = new Date();
-			const oneYearAgo = new Date();
-			oneYearAgo.setFullYear(now.getFullYear() - 1);
+const getAvailableDates = async (bbox, maxCloudCoverage) => {
+    try {
+        const accessToken = await getAccessToken();
+        const catalogUrl = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search';
+        
+        const now = new Date();
+        const oneYearAgo = new Date();
+        oneYearAgo.setFullYear(now.getFullYear() - 1);
 
-			const startDate = oneYearAgo.toISOString().split('T')[0];
-			const endDate = now.toISOString().split('T')[0];
+        const startDate = oneYearAgo.toISOString().split('T')[0];
+        const endDate = now.toISOString().split('T')[0];
 
-			// Usar un rango de fechas dinámico para obtener las imágenes más recientes
-			const payload = {
-				"bbox": bbox,
-				// ✅ Modificación del rango de fechas
-				"datetime": `${startDate}T00:00:00Z/${endDate}T23:59:59Z`,
-				"collections": ["sentinel-2-l2a"],
-				"limit": 100,
-				"filter": `eo:cloud_cover < ${maxCloudCoverage}`
-			};
-			
-			console.log('Sending payload to catalog:', JSON.stringify(payload));
-			
-			const catalogResponse = await fetch(catalogUrl, {
-				method: 'POST', 
-				headers: {
-					'Content-Type': 'application/json',
-					'Authorization': `Bearer ${accessToken}`
-				},
-				body: JSON.stringify(payload)
-			});
-			
-			if (!catalogResponse.ok) {
-				const error = await catalogResponse.text();
-				throw new Error(`Error getting data from Catalog: ${error}`);
-			}
-			
-			const catalogData = await catalogResponse.json();
-			const availableDates = catalogData.features
-				.map(feature => feature.properties.datetime.split('T')[0])
-				.filter((value, index, self) => self.indexOf(value) === index)
-				.sort((a, b) => new Date(b) - new Date(a));
-				
-			return availableDates;
-		} catch (error) {
-			console.error('❌ Error in getAvailableDates:', error.message);
-			return [];
-		}
-	};
+        const payload = {
+            "bbox": bbox,
+            "datetime": `${startDate}T00:00:00Z/${endDate}T23:59:59Z`,
+            "collections": ["sentinel-2-l2a"],
+            "limit": 100,
+            "filter": `eo:cloud_cover < ${maxCloudCoverage}`
+        };
+        
+        console.log('Sending payload to catalog:', JSON.stringify(payload));
+        
+        const catalogResponse = await fetch(catalogUrl, {
+            method: 'POST', 
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${accessToken}`
+            },
+            body: JSON.stringify(payload)
+        });
+        
+        if (!catalogResponse.ok) {
+            const error = await catalogResponse.text();
+            throw new Error(`Error getting data from Catalog: ${error}`);
+        }
+        
+        const catalogData = await catalogResponse.json();
+        const availableDates = catalogData.features
+            .map(feature => feature.properties.datetime.split('T')[0])
+            .filter((value, index, self) => self.indexOf(value) === index)
+            .sort((a, b) => new Date(b) - new Date(a));
+            
+        return availableDates;
+    } catch (error) {
+        console.error('❌ Error in getAvailableDates:', error.message);
+        return [];
+    }
+};
 
 /**
  * Intenta obtener una imagen de Sentinel-Hub con reintentos.
@@ -154,14 +146,12 @@ const getAccessToken = async () => {
 const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) => {
     const accessToken = await getAccessToken();
     const attemptDates = [date];
-    // Se calcula el bbox final para retornarlo junto con la imagen
     const finalBbox = geometryType === 'Polygon' ? polygonToBbox(geometry) : geometry;
     
     for (const attemptDate of attemptDates) {
         try {
             const payload = {
                 input: {
-                    // Si el tipo es 'Polygon', se usa el objeto geometry directamente
                     bounds: geometryType === 'Polygon' ? { geometry: { type: "Polygon", coordinates: geometry } } : { bbox: geometry },
                     data: [
                         {
@@ -217,7 +207,7 @@ const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) 
             const result = { 
                 url: `data:image/png;base64,${base64}`, 
                 usedDate: attemptDate,
-                bbox: finalBbox // ✅ Se agrega el bbox final al resultado
+                bbox: finalBbox
             };
             return result;
         } catch (error) {
@@ -225,6 +215,84 @@ const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) 
         }
     }
     throw new Error("No se encontraron datos de imagen para estas coordenadas en ninguna de las fechas intentadas.");
+};
+
+/**
+ * ✅ NUEVA FUNCIÓN: Obtiene el valor promedio de NDVI para un polígono en una fecha.
+ * @param {object} params - Parámetros de la solicitud.
+ * @param {array} params.geometry - Coordenadas del polígono.
+ * @param {string} params.date - Fecha de la imagen.
+ * @returns {number} El valor promedio de NDVI.
+ * @throws {Error} Si no se puede obtener el valor.
+ */
+const getNdviAverage = async ({ geometry, date }) => {
+    const accessToken = await getAccessToken();
+    try {
+        const payload = {
+            input: {
+                bounds: { geometry: { type: "Polygon", coordinates: geometry } },
+                data: [
+                    {
+                        dataFilter: {
+                            timeRange: { from: `${date}T00:00:00Z`, to: `${date}T23:59:59Z` },
+                            maxCloudCoverage: 100
+                        },
+                        type: "sentinel-2-l2a"
+                    }
+                ]
+            },
+            output: {
+                width: 10,
+                height: 10,
+                format: "application/json"
+            },
+            evalscript: `
+                //VERSION=3
+                function setup() {
+                    return {
+                        input: [{ bands: ["B08", "B04", "dataMask"], units: "REFLECTANCE" }],
+                        output: { bands: 1, sampleType: "FLOAT32", noDataValue: -999 }
+                    };
+                }
+                function evaluatePixel(samples) {
+                    if (samples.dataMask === 0) {
+                        return [-999];
+                    }
+                    const nir = samples.B08;
+                    const red = samples.B04;
+                    const ndvi = (nir - red) / (nir + red);
+                    return [ndvi];
+                }
+            `,
+            process: {
+                mode: "STATS"
+            }
+        };
+
+        const response = await fetch('https://services.sentinel-hub.com/api/v1/process', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${accessToken}`
+            },
+            body: JSON.stringify(payload)
+        });
+
+        if (!response.ok) {
+            const error = await response.text();
+            throw new Error(`Error en la API de Sentinel-Hub: ${error}`);
+        }
+        
+        const data = await response.json();
+        
+        const averageNdvi = data.gdal.bands[0].stats.mean;
+        console.log(`✅ NDVI promedio para ${date}: ${averageNdvi}`);
+        return averageNdvi;
+
+    } catch (error) {
+        console.error('❌ Error en getNdviAverage:', error.message);
+        throw error;
+    }
 };
 
 
@@ -274,7 +342,6 @@ app.post('/api/get-valid-dates1', async (req, res) => {
     }
 });
 
-// Nuevo endpoint para obtener fechas disponibles
 app.post('/api/get-valid-dates', async (req, res) => {
     const { coordinates } = req.body;
     if (!coordinates) {
@@ -285,10 +352,8 @@ app.post('/api/get-valid-dates', async (req, res) => {
         return res.status(400).json({ error: 'Formato de coordenadas de polígono inválido.' });
     }
     try {
-        // Intento 1: Buscar fechas con baja nubosidad (<= 10%)
         let availableDates = await getAvailableDates(bbox, 70);
         if (availableDates.length === 0) {
-            // Intento 2: Si no se encuentran, buscar con alta nubosidad (<= 100%)
             availableDates = await getAvailableDates(bbox, 100);
         }
 
@@ -298,7 +363,7 @@ app.post('/api/get-valid-dates', async (req, res) => {
         res.json({
             hasCoverage: true,
             totalDates: availableDates.length,
-            availableDates: availableDates.slice(0, 30), // Retornar las 30 más recientes
+            availableDates: availableDates.slice(0, 30),
             message: `Se encontraron ${availableDates.length} fechas con datos disponibles`
         });
     } catch (error) {
@@ -341,6 +406,35 @@ app.post('/api/sentinel2simple2', async (req, res) => {
             error: error.message,
             suggestion: "Verifica que las coordenadas del polígono sean válidas y que el área esté en tierra firme."
         });
+    }
+});
+
+
+// ==============================================
+// ✅ NUEVO ENDPOINT PARA OBTENER LOS PROMEDIOS DE NDVI
+// ==============================================
+
+app.post('/api/get-ndvi-averages', async (req, res) => {
+    const { coordinates, dates } = req.body;
+    if (!coordinates || !dates || dates.length < 2) {
+        return res.status(400).json({ error: 'Faltan parámetros: coordinates y al menos dos fechas en dates.' });
+    }
+    try {
+        const [avg1, avg2] = await Promise.all([
+            getNdviAverage({ geometry: coordinates, date: dates[0] }),
+            getNdviAverage({ geometry: coordinates, date: dates[1] })
+        ]);
+        
+        res.json({
+            date1: dates[0],
+            avgNdvi1: avg1,
+            date2: dates[1],
+            avgNdvi2: avg2
+        });
+        
+    } catch (error) {
+        console.error('❌ Error en el endpoint /get-ndvi-averages:', error.message);
+        res.status(500).json({ error: error.message });
     }
 });
 
@@ -425,7 +519,6 @@ app.post('/api/catalogo-coverage', async (req, res) => {
         const accessToken = await getAccessToken();
         const catalogUrl = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search';
         
-        // ✅ Se construye el cuerpo de la solicitud como un objeto JSON
         const payload = {
             "bbox": bbox,
             "datetime": "2020-01-01T00:00:00Z/2025-01-01T23:59:59Z",
@@ -439,12 +532,12 @@ app.post('/api/catalogo-coverage', async (req, res) => {
         };
 
         const catalogResponse = await fetch(catalogUrl, {
-            method: 'POST', // ✅ Se cambia el método a POST
+            method: 'POST',
             headers: {
-                'Content-Type': 'application/json', // ✅ Se cambia el Content-Type a application/json
+                'Content-Type': 'application/json',
                 'Authorization': `Bearer ${accessToken}`
             },
-            body: JSON.stringify(payload) // ✅ Se envía el payload en el cuerpo de la solicitud
+            body: JSON.stringify(payload)
         });
         
         if (!catalogResponse.ok) {
