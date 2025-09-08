@@ -96,11 +96,20 @@ const getAvailableDates = async (bbox, maxCloudCoverage) => {
         const catalogUrl = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search';
         
         // Se construye el cuerpo de la solicitud con el filtro en formato CQL2-JSON
+        // ✅ Cuerpo de la solicitud con el filtro en formato CQL2-JSON
         const payload = {
             "bbox": bbox,
             "datetime": "2020-01-01T00:00:00Z/2025-01-01T23:59:59Z",
             "collections": ["sentinel-2-l2a"],
-            "limit": 100
+            "limit": 100,
+            "filter": {
+                "op": "lte",
+                "args": [
+                    { "property": "eo:cloud_cover" },
+                    maxCloudCoverage
+                ]
+            },
+            "filter-lang": "cql2-json"
         };
 
         console.log('Enviando payload al catálogo:', JSON.stringify(payload));
