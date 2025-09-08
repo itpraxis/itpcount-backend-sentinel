@@ -7,7 +7,7 @@ const cors = require('cors');
 const app = express();
 
 app.use(cors({
-    origin: ['https://itpraxis.cl', 'https://www.itpraxis.cl'], // ✅ Aceptar ambos orígenes
+    origin: ['https://itpraxis.cl', 'https://www.itpraxis.cl'],
     methods: ['POST', 'GET'],
     allowedHeaders: ['Content-Type'],
     credentials: true
@@ -19,18 +19,29 @@ const port = process.env.PORT || 3001;
 
 // Función auxiliar para convertir polígono a bbox
 const polygonToBbox = (coordinates) => {
+    // ✅ Validación mejorada para asegurar que el formato es correcto
     if (!coordinates || coordinates.length === 0 || !Array.isArray(coordinates[0])) {
         return null;
     }
-    let minLon = Infinity, minLat = Infinity, maxLon = -Infinity, maxLat = -Infinity;
     const polygonCoords = coordinates[0];
+    if (!Array.isArray(polygonCoords)) {
+        return null; // Retorna null si el primer elemento no es un array de coordenadas
+    }
+    let minLon = Infinity, minLat = Infinity, maxLon = -Infinity, maxLat = -Infinity;
     polygonCoords.forEach(coord => {
-        const [lon, lat] = coord;
-        minLon = Math.min(minLon, lon);
-        minLat = Math.min(minLat, lat);
-        maxLon = Math.max(maxLon, lon);
-        maxLat = Math.max(maxLat, lat);
+        // ✅ Asegura que cada 'coord' es un array de al menos 2 elementos
+        if (Array.isArray(coord) && coord.length >= 2) {
+            const [lon, lat] = coord;
+            minLon = Math.min(minLon, lon);
+            minLat = Math.min(minLat, lat);
+            maxLon = Math.max(maxLon, lon);
+            maxLat = Math.max(maxLat, lat);
+        }
     });
+    // Si no se procesó ninguna coordenada válida, retorna null
+    if (minLon === Infinity) {
+        return null;
+    }
     return [minLon, minLat, maxLon, maxLat];
 };
 
@@ -85,13 +96,15 @@ const getAvailableDates = async (bbox, maxCloudCoverage) => {
         const timeRange = "2020-01-01T00:00:00Z/2025-01-01T23:59:59Z";
         const collectionId = "sentinel-2-l2a";
         
-        // ✅ Se utiliza la nueva URL y el parámetro 'filter' de la versión 1.0.0
-        const catalogUrl = `https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search?bbox=${bboxString}&datetime=${timeRange}&collections=${collectionId}&limit=100&filter={"op":"<=","field":"eo:cloud_cover","value":${maxCloudCoverage}}`;
+        // ✅ Se codifica correctamente el filtro como un componente de URL
+        const filter = { "op": "<=", "field": "eo:cloud_cover", "value": maxCloudCoverage };
+        const filterString = encodeURIComponent(JSON.stringify(filter));
+        const catalogUrl = `https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search?bbox=${bboxString}&datetime=${timeRange}&collections=${collectionId}&limit=100&filter=${filterString}`;
         
         const catalogResponse = await fetch(catalogUrl, {
             method: 'GET',
             headers: {
-                'Content-Type': 'application/geo+json', // ✅ Se actualiza el Content-Type para la nueva API
+                'Content-Type': 'application/geo+json',
                 'Authorization': `Bearer ${accessToken}`
             }
         });
@@ -357,13 +370,15 @@ app.post('/api/catalogo-coverage', async (req, res) => {
         const timeRange = "2020-01-01T00:00:00Z/2025-01-01T23:59:59Z";
         const collectionId = "sentinel-2-l2a";
         
-        // ✅ Se utiliza la nueva URL y el parámetro 'filter' de la versión 1.0.0
-        const catalogUrl = `https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search?bbox=${bboxString}&datetime=${timeRange}&collections=${collectionId}&limit=100&filter={"op":"<=","field":"eo:cloud_cover","value":100}`;
+        // ✅ Se codifica correctamente el filtro como un componente de URL
+        const filter = { "op": "<=", "field": "eo:cloud_cover", "value": 100 };
+        const filterString = encodeURIComponent(JSON.stringify(filter));
+        const catalogUrl = `https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search?bbox=${bboxString}&datetime=${timeRange}&collections=${collectionId}&limit=100&filter=${filterString}`;
         
         const catalogResponse = await fetch(catalogUrl, {
             method: 'GET',
             headers: {
-                'Content-Type': 'application/geo+json', // ✅ Se actualiza el Content-Type para la nueva API
+                'Content-Type': 'application/geo+json',
                 'Authorization': `Bearer ${accessToken}`
             }
         });
