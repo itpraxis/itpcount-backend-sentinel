@@ -120,16 +120,17 @@ const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) 
                     upsampling: "NEAREST",
                     downsampling: "NEAREST"
                 },
+                // ✅ Evalscript más simple y robusto
                 evalscript: `
                     //VERSION=3
                     function setup() {
-                        return {
-                            input: [{ bands: ["B02", "B03", "B04"], units: "REFLECTANCE" }],
-                            output: { bands: 3, sampleType: "AUTO" }
-                        };
+                      return {
+                        input: [{ bands: ["B04", "B03", "B02"], units: "REFLECTANCE" }],
+                        output: { bands: 3, sampleType: "AUTO" }
+                      };
                     }
                     function evaluatePixel(samples) {
-                        return [samples.B04, samples.B03, samples.B02];
+                      return [2.5 * samples.B04, 2.5 * samples.B03, 2.5 * samples.B02];
                     }
                 `
             };
@@ -143,6 +144,7 @@ const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) 
             });
             if (!imageResponse.ok) {
                 const error = await imageResponse.text();
+                // ✅ Manejo de errores más explícito para no detener el bucle
                 throw new Error(`Error en la imagen para ${attemptDate}: ${error}`);
             }
             const buffer = await imageResponse.arrayBuffer();
@@ -197,6 +199,7 @@ app.post('/api/sentinel2simple', async (req, res) => {
     }
 });
 
+// ✅ Endpoint con la lógica de reintento mejorada
 app.post('/api/sentinel2simple2', async (req, res) => {
     const { coordinates, date } = req.body;
     const bbox = polygonToBbox(coordinates);
