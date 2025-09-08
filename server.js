@@ -96,9 +96,12 @@ const getAvailableDates = async (bbox, maxCloudCoverage) => {
         const timeRange = "2020-01-01T00:00:00Z/2025-01-01T23:59:59Z";
         const collectionId = "sentinel-2-l2a";
         
-        // ✅ Se codifica correctamente el filtro como un componente de URL
+        // ✅ Se crea el objeto JSON del filtro
         const filter = { "op": "<=", "field": "eo:cloud_cover", "value": maxCloudCoverage };
+        // ✅ Se convierte a string y se codifica para la URL
         const filterString = encodeURIComponent(JSON.stringify(filter));
+        
+        // ✅ Se inserta el string codificado en la URL
         const catalogUrl = `https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search?bbox=${bboxString}&datetime=${timeRange}&collections=${collectionId}&limit=100&filter=${filterString}`;
         
         const catalogResponse = await fetch(catalogUrl, {
