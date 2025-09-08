@@ -224,6 +224,7 @@ const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) 
  * @param {string} params.date - Fecha de la imagen.
  * @returns {number} El valor promedio de NDVI.
  * @throws {Error} Si no se puede obtener el valor.
+ * 
  */
 const getNdviAverage = async ({ geometry, date }) => {
     const accessToken = await getAccessToken();
