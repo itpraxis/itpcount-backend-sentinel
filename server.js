@@ -681,21 +681,17 @@ app.post('/api/sentinel2simple2', async (req, res) => {
 
   // Paso 1: Convertir el polígono a un bounding box (bbox)
   let minLon = Infinity, minLat = Infinity, maxLon = -Infinity, maxLat = -Infinity;
-
-  // El cambio está aquí: Las coordenadas están anidadas un nivel más
-  // La estructura correcta de GeoJSON para un polígono simple es [ [ [lon, lat], ... ] ]
-  // Por lo tanto, el polígono es coordinates[0].
   if (coordinates && coordinates.length > 0 && Array.isArray(coordinates[0])) {
-      const polygonCoords = coordinates[0]; // Extrae el array de coordenadas del polígono
-      polygonCoords.forEach(coord => {
-        const [lon, lat] = coord;
-        minLon = Math.min(minLon, lon);
-        minLat = Math.min(minLat, lat);
-        maxLon = Math.max(maxLon, lon);
-        maxLat = Math.max(maxLat, lat);
-      });
+    const polygonCoords = coordinates[0];
+    polygonCoords.forEach(coord => {
+      const [lon, lat] = coord;
+      minLon = Math.min(minLon, lon);
+      minLat = Math.min(minLat, lat);
+      maxLon = Math.max(maxLon, lon);
+      maxLat = Math.max(maxLat, lat);
+    });
   } else {
-      return res.status(400).json({ error: 'Formato de coordenadas de polígono inválido.' });
+    return res.status(400).json({ error: 'Formato de coordenadas de polígono inválido.' });
   }
 
   const bbox = [minLon, minLat, maxLon, maxLat];
@@ -721,87 +717,119 @@ app.post('/api/sentinel2simple2', async (req, res) => {
 
     const tokenData = await tokenResponse.json();
     const accessToken = tokenData.access_token;
+    console.log('✅ Token obtenido');
 
-    const payload = {
-      input: {
-        // Paso 2: Usar el bbox calculado en el payload
-        bounds: {
-          bbox: bbox,
-          properties: {
-            crs: "http://www.opengis.net/def/crs/OGC/1.3/CRS84"
-          }
-        },
-        data: [
-          {
-            dataFilter: {
-              timeRange: {
-                from: `${date}T00:00:00Z`,
-                to: `${date}T23:59:59Z`
-              },
-              maxCloudCoverage: 100
-            },
-            type: "sentinel-2-l2a"
-          }
-        ]
-      },
-      output: {
-        width: 512,
-        height: 512,
-        format: "image/png",
-        upsampling: "NEAREST",
-        downsampling: "NEAREST"
-      },
-      evalscript: `
-        //VERSION=3
-        function setup() {
-          return {
-            input: [{
-              bands: ["B02", "B03", "B04"],
-              units: "REFLECTANCE"
-            }],
-            output: {
-              bands: 3,
-              sampleType: "AUTO"
+    // Función auxiliar para intentar obtener la imagen en una fecha específica
+    const tryGetImage = async (attemptDate) => {
+      console.log(`🔍 Intentando con fecha: ${attemptDate}`);
+      const payload = {
+        input: {
+          bounds: {
+            bbox: bbox,
+            properties: {
+              crs: "http://www.opengis.net/def/crs/OGC/1.3/CRS84"
             }
-          };
-        }
-        function evaluatePixel(samples) {
-          return [samples.B04, samples.B03, samples.B02];
-        }
-      `
+          },
+          data: [
+            {
+              dataFilter: {
+                timeRange: {
+                  from: `${attemptDate}T00:00:00Z`,
+                  to: `${attemptDate}T23:59:59Z`
+                },
+                maxCloudCoverage: 100
+              },
+              type: "sentinel-2-l2a"
+            }
+          ]
+        },
+        output: {
+          width: 512,
+          height: 512,
+          format: "image/png",
+          upsampling: "NEAREST",
+          downsampling: "NEAREST"
+        },
+        evalscript: `
+          //VERSION=3
+          function setup() {
+            return {
+              input: [{
+                bands: ["B02", "B03", "B04"],
+                units: "REFLECTANCE"
+              }],
+              output: {
+                bands: 3,
+                sampleType: "AUTO"
+              }
+            };
+          }
+          function evaluatePixel(samples) {
+            return [samples.B04, samples.B03, samples.B02];
+          }
+        `
+      };
+
+      const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${accessToken}`
+        },
+        body: JSON.stringify(payload)
+      });
+
+      if (!imageResponse.ok) {
+        const error = await imageResponse.text();
+        throw new Error(`Error en la imagen para ${attemptDate}: ${error}`);
+      }
+
+      const buffer = await imageResponse.arrayBuffer();
+      const base64 = Buffer.from(buffer).toString('base64');
+      return { url: `image/png;base64,${base64}`, usedDate: attemptDate };
     };
 
-    const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${accessToken}`
-      },
-      body: JSON.stringify(payload)
-    });
+    // Generar fechas de reintento
+    const getNearbyDates = (baseDate, days) => {
+      const dates = [];
+      const d = new Date(baseDate);
+      for (let i = 0; i <= days; i++) {
+        const checkDate = new Date(d);
+        checkDate.setDate(d.getDate() - i);
+        const dateString = checkDate.toISOString().split('T')[0];
+        if (dateString !== baseDate) {
+          dates.push(dateString);
+        }
+      }
+      return dates;
+    };
 
-    if (!imageResponse.ok) {
-      const error = await imageResponse.text();
-      console.error(`❌ Error detallado de la API de Sentinel-Hub para el bbox:`, error);
-      return res.status(imageResponse.status).json({
-        error: `Error en la imagen: ${error}`,
-        statusCode: imageResponse.status
-      });
+    const attemptDates = [date, ...getNearbyDates(date, 7)]; // Intenta la fecha original y hasta 7 días antes
+    let result;
+
+    for (const attemptDate of attemptDates) {
+      try {
+        result = await tryGetImage(attemptDate);
+        console.log(`✅ Éxito con la fecha: ${attemptDate}`);
+        if (attemptDate !== date) {
+          result.warning = `No se encontraron datos para la fecha solicitada (${date}). Se utilizó la fecha ${attemptDate}.`;
+        }
+        return res.json(result);
+      } catch (error) {
+        console.warn(`⚠️ Falló con la fecha: ${attemptDate} - ${error.message}`);
+      }
     }
 
-    const buffer = await imageResponse.arrayBuffer();
-    const base64 = Buffer.from(buffer).toString('base64');
-    
-    return res.json({
-      url: `image/png;base64,${base64}`,
-      usedDate: date
+    return res.status(404).json({
+      error: "No se encontraron datos de imagen para estas coordenadas en ninguna de las fechas intentadas.",
+      suggestion: "Intenta con un rango de fechas diferente o verifica la cobertura de Sentinel-2 para el área."
     });
 
   } catch (error) {
     console.error('❌ Error general:', error.message);
     res.status(500).json({
       error: error.message,
-      suggestion: "Verifica que las coordenadas del polígono sean válidas y que el área esté en tierra firme"
+      suggestion: "Verifica que las coordenadas del polígono sean válidas y que el área esté en tierra firme."
     });
   }
 });
