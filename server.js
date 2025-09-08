@@ -262,7 +262,7 @@ app.post('/api/get-valid-dates', async (req, res) => {
     }
     try {
         // Intento 1: Buscar fechas con baja nubosidad (<= 10%)
-        let availableDates = await getAvailableDates(bbox, 10);
+        let availableDates = await getAvailableDates(bbox, 70);
         if (availableDates.length === 0) {
             // Intento 2: Si no se encuentran, buscar con alta nubosidad (<= 100%)
             availableDates = await getAvailableDates(bbox, 100);
