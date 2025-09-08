@@ -222,7 +222,7 @@ app.post('/api/sentinel2', async (req, res) => {
 });
 
 // Nuevo endpoint para obtener fechas disponibles
-app.post('/api/get-valid-dates', async (req, res) => {
+app.post('/api/get-valid-dates2', async (req, res) => {
     const { coordinates } = req.body;
     if (!coordinates) {
         return res.status(400).json({ error: 'Faltan parámetros requeridos: coordinates' });
@@ -453,6 +453,31 @@ app.get('/api/sentinel-test', async (req, res) => {
     } catch (error) {
         console.error('❌ Error en la prueba de API:', error.message);
         res.status(500).json({ error: `Error en la prueba de API: ${error.message}`, suggestion: 'Verifica la conexión o contacta a soporte de Sentinel-Hub.' });
+    }
+});
+
+app.post('/api/get-valid-dates', async (req, res) => {
+    // Coordenadas de prueba para Londres
+    const testBbox = [-0.161, 51.488, 0.057, 51.52];
+
+    try {
+        let availableDates = await getAvailableDates(testBbox, 10);
+        if (availableDates.length === 0) {
+            availableDates = await getAvailableDates(testBbox, 100);
+        }
+
+        if (availableDates.length === 0) {
+            return res.json({ hasCoverage: false, message: "No se encontraron imágenes para esta ubicación en el rango de fechas." });
+        }
+        res.json({
+            hasCoverage: true,
+            totalDates: availableDates.length,
+            availableDates: availableDates.slice(0, 30),
+            message: `Se encontraron ${availableDates.length} fechas con datos disponibles`
+        });
+    } catch (error) {
+        console.error('❌ Error al verificar cobertura:', error.message);
+        res.status(500).json({ error: error.message, suggestion: "Verifica que las coordenadas sean válidas y el área esté en tierra firme." });
     }
 });
 
