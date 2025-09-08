@@ -90,22 +90,22 @@ const getAccessToken = async () => {
 
 // Función auxiliar para obtener fechas disponibles del catálogo (se agrega el parámetro de nubosidad)
 // Función auxiliar para obtener fechas disponibles del catálogo (se agrega el parámetro de nubosidad)
+// Function to get available dates from the Sentinel-Hub Catalog API
 const getAvailableDates = async (bbox, maxCloudCoverage) => {
     try {
         const accessToken = await getAccessToken();
         const catalogUrl = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search';
         
-        // Se construye el cuerpo de la solicitud con el filtro en formato CQL2-JSON
-        // ✅ Cuerpo de la solicitud con el filtro en formato CQL2-JSON
+        // Use the working cql2-text filter format with the provided maxCloudCoverage
         const payload = {
             "bbox": bbox,
             "datetime": "2020-01-01T00:00:00Z/2025-01-01T23:59:59Z",
             "collections": ["sentinel-2-l2a"],
             "limit": 100,
-            "filter" : "eo:cloud_cover < 80" 
+            "filter": `eo:cloud_cover < ${maxCloudCoverage}` // ✅ Dynamic filter string
         };
-
-        console.log('Enviando payload al catálogo:', JSON.stringify(payload));
+        
+        console.log('Sending payload to catalog:', JSON.stringify(payload));
         
         const catalogResponse = await fetch(catalogUrl, {
             method: 'POST', 
@@ -118,7 +118,7 @@ const getAvailableDates = async (bbox, maxCloudCoverage) => {
         
         if (!catalogResponse.ok) {
             const error = await catalogResponse.text();
-            throw new Error(`Error al obtener datos del Catálogo: ${error}`);
+            throw new Error(`Error getting data from Catalog: ${error}`);
         }
         
         const catalogData = await catalogResponse.json();
@@ -129,7 +129,7 @@ const getAvailableDates = async (bbox, maxCloudCoverage) => {
             
         return availableDates;
     } catch (error) {
-        console.error('❌ Error en getAvailableDates:', error.message);
+        console.error('❌ Error in getAvailableDates:', error.message);
         return [];
     }
 };
