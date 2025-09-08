@@ -88,51 +88,61 @@ const getAccessToken = async () => {
     return tokenData.access_token;
 };
 
-// Función auxiliar para obtener fechas disponibles del catálogo (se agrega el parámetro de nubosidad)
-// Función auxiliar para obtener fechas disponibles del catálogo (se agrega el parámetro de nubosidad)
-// Function to get available dates from the Sentinel-Hub Catalog API
-const getAvailableDates = async (bbox, maxCloudCoverage) => {
-    try {
-        const accessToken = await getAccessToken();
-        const catalogUrl = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search';
-        
-        // Use the working cql2-text filter format with the provided maxCloudCoverage
-        const payload = {
-            "bbox": bbox,
-            "datetime": "2020-01-01T00:00:00Z/2025-01-01T23:59:59Z",
-            "collections": ["sentinel-2-l2a"],
-            "limit": 100,
-            "filter": `eo:cloud_cover < ${maxCloudCoverage}` // ✅ Dynamic filter string
-        };
-        
-        console.log('Sending payload to catalog:', JSON.stringify(payload));
-        
-        const catalogResponse = await fetch(catalogUrl, {
-            method: 'POST', 
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${accessToken}`
-            },
-            body: JSON.stringify(payload)
-        });
-        
-        if (!catalogResponse.ok) {
-            const error = await catalogResponse.text();
-            throw new Error(`Error getting data from Catalog: ${error}`);
-        }
-        
-        const catalogData = await catalogResponse.json();
-        const availableDates = catalogData.features
-            .map(feature => feature.properties.datetime.split('T')[0])
-            .filter((value, index, self) => self.indexOf(value) === index)
-            .sort((a, b) => new Date(b) - new Date(a));
-            
-        return availableDates;
-    } catch (error) {
-        console.error('❌ Error in getAvailableDates:', error.message);
-        return [];
-    }
-};
+	// Función auxiliar para obtener fechas disponibles del catálogo (se agrega el parámetro de nubosidad)
+	// Función auxiliar para obtener fechas disponibles del catálogo (se agrega el parámetro de nubosidad)
+	// Function to get available dates from the Sentinel-Hub Catalog API
+	// Función auxiliar para obtener fechas disponibles del catálogo (se agrega el parámetro de nubosidad)
+	const getAvailableDates = async (bbox, maxCloudCoverage) => {
+		try {
+			const accessToken = await getAccessToken();
+			const catalogUrl = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search';
+			
+			// ✅ Obtener la fecha actual y la fecha de inicio (ej. 1 año atrás)
+			const now = new Date();
+			const oneYearAgo = new Date();
+			oneYearAgo.setFullYear(now.getFullYear() - 1);
+
+			const startDate = oneYearAgo.toISOString().split('T')[0];
+			const endDate = now.toISOString().split('T')[0];
+
+			// Usar un rango de fechas dinámico para obtener las imágenes más recientes
+			const payload = {
+				"bbox": bbox,
+				// ✅ Modificación del rango de fechas
+				"datetime": `${startDate}T00:00:00Z/${endDate}T23:59:59Z`,
+				"collections": ["sentinel-2-l2a"],
+				"limit": 100,
+				"filter": `eo:cloud_cover < ${maxCloudCoverage}`
+			};
+			
+			console.log('Sending payload to catalog:', JSON.stringify(payload));
+			
+			const catalogResponse = await fetch(catalogUrl, {
+				method: 'POST', 
+				headers: {
+					'Content-Type': 'application/json',
+					'Authorization': `Bearer ${accessToken}`
+				},
+				body: JSON.stringify(payload)
+			});
+			
+			if (!catalogResponse.ok) {
+				const error = await catalogResponse.text();
+				throw new Error(`Error getting data from Catalog: ${error}`);
+			}
+			
+			const catalogData = await catalogResponse.json();
+			const availableDates = catalogData.features
+				.map(feature => feature.properties.datetime.split('T')[0])
+				.filter((value, index, self) => self.indexOf(value) === index)
+				.sort((a, b) => new Date(b) - new Date(a));
+				
+			return availableDates;
+		} catch (error) {
+			console.error('❌ Error in getAvailableDates:', error.message);
+			return [];
+		}
+	};
 
 /**
  * Intenta obtener una imagen de Sentinel-Hub con reintentos.
@@ -145,7 +155,7 @@ const getAvailableDates = async (bbox, maxCloudCoverage) => {
  */
 const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) => {
     const accessToken = await getAccessToken();
-    const attemptDates = [date]; // Ya no se reintenta, el frontend ya envió una fecha válida
+    const attemptDates = [date];
     for (const attemptDate of attemptDates) {
         try {
             const payload = {
@@ -157,6 +167,7 @@ const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) 
                                 timeRange: { from: `${attemptDate}T00:00:00Z`, to: `${attemptDate}T23:59:59Z` },
                                 maxCloudCoverage: 100
                             },
+                            // ✅ Se cambian las bandas para incluir el Infrarrojo Cercano (B08) y el Rojo (B04)
                             type: "sentinel-2-l2a"
                         }
                     ]
@@ -171,13 +182,20 @@ const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) 
                 evalscript: `
                     //VERSION=3
                     function setup() {
-                      return {
-                        input: [{ bands: ["B04", "B03", "B02"], units: "REFLECTANCE" }],
-                        output: { bands: 3, sampleType: "AUTO" }
-                      };
+                        return {
+                            // ✅ Se especifican las bandas B08 (NIR) y B04 (Rojo)
+                            input: [{ bands: ["B08", "B04"], units: "REFLECTANCE" }],
+                            output: { bands: 1, sampleType: "FLOAT32" } // El NDVI es un solo valor
+                        };
                     }
                     function evaluatePixel(samples) {
-                      return [2.5 * samples.B04, 2.5 * samples.B03, 2.5 * samples.B02];
+                        const nir = samples.B08;
+                        const red = samples.B04;
+                        // ✅ Se calcula el NDVI
+                        const ndvi = (nir - red) / (nir + red);
+                        // Se normaliza el valor para la imagen en escala de grises
+                        const normalizedNdvi = (ndvi + 1) / 2;
+                        return [normalizedNdvi];
                     }
                 `
             };
@@ -195,7 +213,6 @@ const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) 
             }
             const buffer = await imageResponse.arrayBuffer();
             const base64 = Buffer.from(buffer).toString('base64');
-            // ✅ Cambio aquí: se agrega el prefijo 'data:' a la URL
             const result = { url: `data:image/png;base64,${base64}`, usedDate: attemptDate };
             return result;
         } catch (error) {
