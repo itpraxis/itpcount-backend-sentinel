@@ -18,31 +18,29 @@ app.use(express.json());
 const port = process.env.PORT || 3001;
 
 // Función auxiliar para convertir polígono a bbox
+// Función auxiliar para convertir polígono a bbox
 const polygonToBbox = (coordinates) => {
-    // ✅ Validación mejorada para asegurar que el formato es correcto
-    if (!coordinates || coordinates.length === 0 || !Array.isArray(coordinates[0])) {
-        return null;
-    }
-    const polygonCoords = coordinates[0];
-    if (!Array.isArray(polygonCoords)) {
-        return null; // Retorna null si el primer elemento no es un array de coordenadas
-    }
-    let minLon = Infinity, minLat = Infinity, maxLon = -Infinity, maxLat = -Infinity;
-    polygonCoords.forEach(coord => {
-        // ✅ Asegura que cada 'coord' es un array de al menos 2 elementos
-        if (Array.isArray(coord) && coord.length >= 2) {
-            const [lon, lat] = coord;
-            minLon = Math.min(minLon, lon);
-            minLat = Math.min(minLat, lat);
-            maxLon = Math.max(maxLon, lon);
-            maxLat = Math.max(maxLat, lat);
-        }
-    });
-    // Si no se procesó ninguna coordenada válida, retorna null
-    if (minLon === Infinity) {
-        return null;
-    }
-    return [minLon, minLat, maxLon, maxLat];
+    if (!coordinates || coordinates.length === 0 || !Array.isArray(coordinates[0])) {
+        return null;
+    }
+    const polygonCoords = coordinates[0];
+    if (!Array.isArray(polygonCoords)) {
+        return null;
+    }
+    let minLon = Infinity, minLat = Infinity, maxLon = -Infinity, maxLat = -Infinity;
+    polygonCoords.forEach(coord => {
+        if (Array.isArray(coord) && coord.length >= 2) {
+            const [lon, lat] = coord;
+            minLon = Math.min(minLon, lon);
+            minLat = Math.min(minLat, lat);
+            maxLon = Math.max(maxLon, lon);
+            maxLat = Math.max(maxLat, lat);
+        }
+    });
+    if (minLon === Infinity) {
+        return null;
+    }
+    return [minLon, minLat, maxLon, maxLat];
 };
 
 // Función auxiliar para obtener fechas cercanas
@@ -156,10 +154,14 @@ const getAccessToken = async () => {
 const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) => {
     const accessToken = await getAccessToken();
     const attemptDates = [date];
+    // Se calcula el bbox final para retornarlo junto con la imagen
+    const finalBbox = geometryType === 'Polygon' ? polygonToBbox(geometry) : geometry;
+    
     for (const attemptDate of attemptDates) {
         try {
             const payload = {
                 input: {
+                    // Si el tipo es 'Polygon', se usa el objeto geometry directamente
                     bounds: geometryType === 'Polygon' ? { geometry: { type: "Polygon", coordinates: geometry } } : { bbox: geometry },
                     data: [
                         {
@@ -177,8 +179,6 @@ const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) 
                     format: "image/png",
                     upsampling: "NEAREST",
                     downsampling: "NEAREST",
-                    // ✅ Cambio: Usa 'AUTO' o 'UINT8' para la compatibilidad con PNG
-                    // El "bands" debe ser 1 para NDVI
                     bands: 1, 
                     sampleType: "AUTO" 
                 },
@@ -187,7 +187,6 @@ const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) 
                     function setup() {
                         return {
                             input: [{ bands: ["B08", "B04"], units: "REFLECTANCE" }],
-                            // La salida es una sola banda
                             output: { bands: 1, sampleType: "AUTO" }
                         };
                     }
@@ -195,12 +194,7 @@ const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) 
                         const nir = samples.B08;
                         const red = samples.B04;
                         const ndvi = (nir - red) / (nir + red);
-                        
-                        // Los valores de NDVI van de -1 a 1.
-                        // Para mostrar como imagen en escala de grises, hay que mapearlos
-                        // a un rango de 0 a 1. Luego el sistema los convierte a 0-255.
                         const normalizedNdvi = (ndvi + 1) / 2;
-                        
                         return [normalizedNdvi];
                     }
                 `
@@ -215,13 +209,16 @@ const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) 
             });
             if (!imageResponse.ok) {
                 const error = await imageResponse.text();
-                // Si hay un error, lo imprimimos para depurar
                 console.error('❌ Error de la API de Sentinel-Hub:', error);
                 throw new Error(`Error en la imagen para ${attemptDate}: ${error}`);
             }
             const buffer = await imageResponse.arrayBuffer();
             const base64 = Buffer.from(buffer).toString('base64');
-            const result = { url: `data:image/png;base64,${base64}`, usedDate: attemptDate };
+            const result = { 
+                url: `data:image/png;base64,${base64}`, 
+                usedDate: attemptDate,
+                bbox: finalBbox // ✅ Se agrega el bbox final al resultado
+            };
             return result;
         } catch (error) {
             console.warn(`⚠️ Falló con la fecha: ${attemptDate} - ${error.message}`);
@@ -229,8 +226,6 @@ const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) 
     }
     throw new Error("No se encontraron datos de imagen para estas coordenadas en ninguna de las fechas intentadas.");
 };
-
-
 
 
 // ==============================================
@@ -328,6 +323,7 @@ app.post('/api/sentinel2simple', async (req, res) => {
         });
     }
 });
+
 
 app.post('/api/sentinel2simple2', async (req, res) => {
     const { coordinates, date } = req.body;
