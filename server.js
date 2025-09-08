@@ -334,7 +334,7 @@ app.post('/api/catalogo-coverage', async (req, res) => {
 });
 
 // ==============================================
-// ENDPOINT DE PRUEBA
+// ENDPOINT DE PRUEBA 2
 // ==============================================
 
 app.get('/api/sentinel-test', async (req, res) => {
