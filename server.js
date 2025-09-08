@@ -566,3 +566,112 @@ app.get('/api/sentinel-test', async (req, res) => {
     });
   }
 });
+
+
+// Endpoint simplificado para depuración
+app.post('/api/sentinel2simple', async (req, res) => {
+  const { coordinates, date } = req.body;
+
+  try {
+    const body = new URLSearchParams({
+        grant_type: 'client_credentials',
+        client_id: process.env.CLIENT_ID,
+        client_secret: process.env.CLIENT_SECRET
+    });
+
+    const tokenResponse = await fetch('https://services.sentinel-hub.com/oauth/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: body.toString()
+    });
+
+    if (!tokenResponse.ok) {
+      const error = await tokenResponse.text();
+      throw new Error(`Error al obtener token: ${error}`);
+    }
+
+    const tokenData = await tokenResponse.json();
+    const accessToken = tokenData.access_token;
+
+    const payload = {
+      input: {
+        bounds: {
+          geometry: {
+            type: "Polygon",
+            coordinates: coordinates // Usamos las coordenadas del polígono
+          }
+        },
+        data: [
+          {
+            dataFilter: {
+              timeRange: {
+                from: `${date}T00:00:00Z`,
+                to: `${date}T23:59:59Z`
+              },
+              maxCloudCoverage: 100
+            },
+            type: "sentinel-2-l2a"
+          }
+        ]
+      },
+      output: {
+        width: 512,
+        height: 512,
+        format: "image/png",
+        upsampling: "NEAREST",
+        downsampling: "NEAREST"
+      },
+      evalscript: `
+        //VERSION=3
+        function setup() {
+            return {
+                input: [{
+                    bands: ["B02", "B03", "B04"],
+                    units: "REFLECTANCE"
+                }],
+                output: {
+                    bands: 3,
+                    sampleType: "AUTO"
+                }
+            };
+        }
+        function evaluatePixel(samples) {
+            return [samples.B04, samples.B03, samples.B02];
+        }
+      `
+    };
+
+    const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${accessToken}`
+      },
+      body: JSON.stringify(payload)
+    });
+
+    if (!imageResponse.ok) {
+      const error = await imageResponse.text();
+      console.error(`❌ Error detallado de la API de Sentinel-Hub para el polígono:`, error);
+      return res.status(imageResponse.status).json({
+        error: `Error en la imagen: ${error}`,
+        statusCode: imageResponse.status
+      });
+    }
+
+    const buffer = await imageResponse.arrayBuffer();
+    const base64 = Buffer.from(buffer).toString('base64');
+    
+    return res.json({
+      url: `image/png;base64,${base64}`,
+      usedDate: date
+    });
+
+  } catch (error) {
+    console.error('❌ Error general:', error.message);
+    res.status(500).json({
+      error: error.message,
+      suggestion: "Verifica que las coordenadas del polígono sean válidas y que el área esté en tierra firme"
+    });
+  }
+});
