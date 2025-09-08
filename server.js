@@ -7,7 +7,7 @@ const cors = require('cors');
 const app = express();
 
 app.use(cors({
-    origin: 'https://itpraxis.cl',
+    origin: ['https://itpraxis.cl', 'https://www.itpraxis.cl'], // ✅ Aceptar ambos orígenes
     methods: ['POST', 'GET'],
     allowedHeaders: ['Content-Type'],
     credentials: true
