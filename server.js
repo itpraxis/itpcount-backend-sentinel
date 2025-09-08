@@ -167,7 +167,6 @@ const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) 
                                 timeRange: { from: `${attemptDate}T00:00:00Z`, to: `${attemptDate}T23:59:59Z` },
                                 maxCloudCoverage: 100
                             },
-                            // ✅ Se cambian las bandas para incluir el Infrarrojo Cercano (B08) y el Rojo (B04)
                             type: "sentinel-2-l2a"
                         }
                     ]
@@ -177,24 +176,31 @@ const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) 
                     height: 512,
                     format: "image/png",
                     upsampling: "NEAREST",
-                    downsampling: "NEAREST"
+                    downsampling: "NEAREST",
+                    // ✅ Cambio: Usa 'AUTO' o 'UINT8' para la compatibilidad con PNG
+                    // El "bands" debe ser 1 para NDVI
+                    bands: 1, 
+                    sampleType: "AUTO" 
                 },
                 evalscript: `
                     //VERSION=3
                     function setup() {
                         return {
-                            // ✅ Se especifican las bandas B08 (NIR) y B04 (Rojo)
                             input: [{ bands: ["B08", "B04"], units: "REFLECTANCE" }],
-                            output: { bands: 1, sampleType: "FLOAT32" } // El NDVI es un solo valor
+                            // La salida es una sola banda
+                            output: { bands: 1, sampleType: "AUTO" }
                         };
                     }
                     function evaluatePixel(samples) {
                         const nir = samples.B08;
                         const red = samples.B04;
-                        // ✅ Se calcula el NDVI
                         const ndvi = (nir - red) / (nir + red);
-                        // Se normaliza el valor para la imagen en escala de grises
+                        
+                        // Los valores de NDVI van de -1 a 1.
+                        // Para mostrar como imagen en escala de grises, hay que mapearlos
+                        // a un rango de 0 a 1. Luego el sistema los convierte a 0-255.
                         const normalizedNdvi = (ndvi + 1) / 2;
+                        
                         return [normalizedNdvi];
                     }
                 `
@@ -209,6 +215,8 @@ const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) 
             });
             if (!imageResponse.ok) {
                 const error = await imageResponse.text();
+                // Si hay un error, lo imprimimos para depurar
+                console.error('❌ Error de la API de Sentinel-Hub:', error);
                 throw new Error(`Error en la imagen para ${attemptDate}: ${error}`);
             }
             const buffer = await imageResponse.arrayBuffer();
