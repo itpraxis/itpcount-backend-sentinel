@@ -96,13 +96,28 @@ const getAvailableDates = async (bbox, maxCloudCoverage) => {
         const timeRange = "2020-01-01T00:00:00Z/2025-01-01T23:59:59Z";
         const collectionId = "sentinel-2-l2a";
         
-        // ✅ Se crea el objeto JSON del filtro
-        const filter = { "op": "<=", "field": "eo:cloud_cover", "value": maxCloudCoverage };
-        // ✅ Se convierte a string y se codifica para la URL
-        const filterString = encodeURIComponent(JSON.stringify(filter));
+        // ✅ Se construye el objeto del filtro
+        const filter = {
+            "op": "<=",
+            "field": "eo:cloud_cover",
+            "value": maxCloudCoverage
+        };
         
-        // ✅ Se inserta el string codificado en la URL
-        const catalogUrl = `https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search?bbox=${bboxString}&datetime=${timeRange}&collections=${collectionId}&limit=100&filter=${filterString}`;
+        // ✅ Se convierte el objeto a una cadena JSON
+        const filterJSON = JSON.stringify(filter);
+
+        // ✅ Se utiliza URLSearchParams para manejar la codificación de forma segura
+        const params = new URLSearchParams({
+            "bbox": bboxString,
+            "datetime": timeRange,
+            "collections": collectionId,
+            "limit": 100,
+            "filter": filterJSON
+        });
+        
+        const catalogUrl = `https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search?${params.toString()}`;
+        
+        console.log(`URL de catálogo generada: ${catalogUrl}`); // Esto te ayudará a depurar en el futuro
         
         const catalogResponse = await fetch(catalogUrl, {
             method: 'GET',
@@ -129,6 +144,7 @@ const getAvailableDates = async (bbox, maxCloudCoverage) => {
         return [];
     }
 };
+
 
 /**
  * Intenta obtener una imagen de Sentinel-Hub con reintentos.
@@ -218,6 +234,31 @@ app.post('/api/sentinel2', async (req, res) => {
             error: error.message,
             suggestion: "Verifica que las coordenadas del polígono sean válidas y que el área esté en tierra firme"
         });
+    }
+});
+
+app.post('/api/get-valid-dates', async (req, res) => {
+    // Coordenadas de prueba para Londres
+    const testBbox = [-0.161, 51.488, 0.057, 51.52];
+
+    try {
+        let availableDates = await getAvailableDates(testBbox, 10);
+        if (availableDates.length === 0) {
+            availableDates = await getAvailableDates(testBbox, 100);
+        }
+
+        if (availableDates.length === 0) {
+            return res.json({ hasCoverage: false, message: "No se encontraron imágenes para esta ubicación en el rango de fechas." });
+        }
+        res.json({
+            hasCoverage: true,
+            totalDates: availableDates.length,
+            availableDates: availableDates.slice(0, 30),
+            message: `Se encontraron ${availableDates.length} fechas con datos disponibles`
+        });
+    } catch (error) {
+        console.error('❌ Error al verificar cobertura:', error.message);
+        res.status(500).json({ error: error.message, suggestion: "Verifica que las coordenadas sean válidas y el área esté en tierra firme." });
     }
 });
 
@@ -455,63 +496,6 @@ app.get('/api/sentinel-test', async (req, res) => {
         res.status(500).json({ error: `Error en la prueba de API: ${error.message}`, suggestion: 'Verifica la conexión o contacta a soporte de Sentinel-Hub.' });
     }
 });
-
-// Función auxiliar para obtener fechas disponibles del catálogo (se agrega el parámetro de nubosidad)
-const getAvailableDates = async (bbox, maxCloudCoverage) => {
-    try {
-        const accessToken = await getAccessToken();
-        const bboxString = bbox.join(',');
-        const timeRange = "2020-01-01T00:00:00Z/2025-01-01T23:59:59Z";
-        const collectionId = "sentinel-2-l2a";
-        
-        // ✅ Se construye el objeto del filtro
-        const filter = {
-            "op": "<=",
-            "field": "eo:cloud_cover",
-            "value": maxCloudCoverage
-        };
-        
-        // ✅ Se convierte el objeto a una cadena JSON
-        const filterJSON = JSON.stringify(filter);
-
-        // ✅ Se utiliza URLSearchParams para manejar la codificación de forma segura
-        const params = new URLSearchParams({
-            "bbox": bboxString,
-            "datetime": timeRange,
-            "collections": collectionId,
-            "limit": 100,
-            "filter": filterJSON
-        });
-        
-        const catalogUrl = `https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search?${params.toString()}`;
-        
-        console.log(`URL de catálogo generada: ${catalogUrl}`); // Esto te ayudará a depurar en el futuro
-        
-        const catalogResponse = await fetch(catalogUrl, {
-            method: 'GET',
-            headers: {
-                'Content-Type': 'application/geo+json',
-                'Authorization': `Bearer ${accessToken}`
-            }
-        });
-        
-        if (!catalogResponse.ok) {
-            const error = await catalogResponse.text();
-            throw new Error(`Error al obtener datos del Catálogo: ${error}`);
-        }
-        
-        const catalogData = await catalogResponse.json();
-        const availableDates = catalogData.features
-            .map(feature => feature.properties.datetime.split('T')[0])
-            .filter((value, index, self) => self.indexOf(value) === index)
-            .sort((a, b) => new Date(b) - new Date(a));
-            
-        return availableDates;
-    } catch (error) {
-        console.error('❌ Error en getAvailableDates:', error.message);
-        return [];
-    }
-};
 
 app.listen(port, '0.0.0.0', () => {
     console.log(`✅ Backend listo en http://localhost:${port}`);
