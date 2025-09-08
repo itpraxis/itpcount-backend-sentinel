@@ -77,14 +77,14 @@ const getAccessToken = async () => {
     return tokenData.access_token;
 };
 
-// Función auxiliar para obtener fechas disponibles del catálogo
-const getAvailableDates = async (bbox) => {
+// Función auxiliar para obtener fechas disponibles del catálogo (se agrega el parámetro de nubosidad)
+const getAvailableDates = async (bbox, maxCloudCoverage) => {
     try {
         const accessToken = await getAccessToken();
         const bboxString = bbox.join(',');
         const timeRange = "2020-01-01T00:00:00Z/2025-01-01T23:59:59Z";
         const collectionId = "sentinel-2-l2a";
-        const catalogUrl = `https://services.sentinel-hub.com/api/v1/catalog/search?bbox=${bboxString}&datetime=${timeRange}&collections=${collectionId}&limit=100&query={"eo:cloud_cover": {"lte": 10}}`; // Baja nubosidad
+        const catalogUrl = `https://services.sentinel-hub.com/api/v1/catalog/search?bbox=${bboxString}&datetime=${timeRange}&collections=${collectionId}&limit=100&query={"eo:cloud_cover": {"lte": ${maxCloudCoverage}}}`;
         
         const catalogResponse = await fetch(catalogUrl, {
             method: 'GET',
@@ -214,9 +214,15 @@ app.post('/api/get-valid-dates', async (req, res) => {
         return res.status(400).json({ error: 'Formato de coordenadas de polígono inválido.' });
     }
     try {
-        const availableDates = await getAvailableDates(bbox);
+        // Intento 1: Buscar fechas con baja nubosidad (<= 10%)
+        let availableDates = await getAvailableDates(bbox, 10);
         if (availableDates.length === 0) {
-            return res.json({ hasCoverage: false, message: "No hay fechas con imágenes de baja nubosidad para esta ubicación." });
+            // Intento 2: Si no se encuentran, buscar con alta nubosidad (<= 100%)
+            availableDates = await getAvailableDates(bbox, 100);
+        }
+
+        if (availableDates.length === 0) {
+            return res.json({ hasCoverage: false, message: "No se encontraron imágenes para esta ubicación en el rango de fechas." });
         }
         res.json({
             hasCoverage: true,
