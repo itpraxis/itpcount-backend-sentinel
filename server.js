@@ -195,7 +195,8 @@ const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) 
             }
             const buffer = await imageResponse.arrayBuffer();
             const base64 = Buffer.from(buffer).toString('base64');
-            const result = { url: `image/png;base64,${base64}`, usedDate: attemptDate };
+            // ✅ Cambio aquí: se agrega el prefijo 'data:' a la URL
+            const result = { url: `data:image/png;base64,${base64}`, usedDate: attemptDate };
             return result;
         } catch (error) {
             console.warn(`⚠️ Falló con la fecha: ${attemptDate} - ${error.message}`);
@@ -203,6 +204,9 @@ const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) 
     }
     throw new Error("No se encontraron datos de imagen para estas coordenadas en ninguna de las fechas intentadas.");
 };
+
+
+
 
 // ==============================================
 // ENDPOINTS DE IMÁGENES CON LÓGICA DE REINTENTO
