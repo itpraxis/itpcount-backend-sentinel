@@ -84,12 +84,14 @@ const getAvailableDates = async (bbox, maxCloudCoverage) => {
         const bboxString = bbox.join(',');
         const timeRange = "2020-01-01T00:00:00Z/2025-01-01T23:59:59Z";
         const collectionId = "sentinel-2-l2a";
-        const catalogUrl = `https://services.sentinel-hub.com/api/v1/catalog/search?bbox=${bboxString}&datetime=${timeRange}&collections=${collectionId}&limit=100&query={"eo:cloud_cover": {"lte": ${maxCloudCoverage}}}`;
+        
+        // ✅ Se utiliza la nueva URL y el parámetro 'filter' de la versión 1.0.0
+        const catalogUrl = `https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search?bbox=${bboxString}&datetime=${timeRange}&collections=${collectionId}&limit=100&filter={"op":"<=","field":"eo:cloud_cover","value":${maxCloudCoverage}}`;
         
         const catalogResponse = await fetch(catalogUrl, {
             method: 'GET',
             headers: {
-                'Content-Type': 'application/json',
+                'Content-Type': 'application/geo+json', // ✅ Se actualiza el Content-Type para la nueva API
                 'Authorization': `Bearer ${accessToken}`
             }
         });
@@ -354,11 +356,14 @@ app.post('/api/catalogo-coverage', async (req, res) => {
         const bboxString = bbox.join(',');
         const timeRange = "2020-01-01T00:00:00Z/2025-01-01T23:59:59Z";
         const collectionId = "sentinel-2-l2a";
-        const catalogUrl = `https://services.sentinel-hub.com/api/v1/catalog/search?bbox=${bboxString}&datetime=${timeRange}&collections=${collectionId}&limit=100&query={"eo:cloud_cover": {"gte": 0, "lte": 100}}`;
+        
+        // ✅ Se utiliza la nueva URL y el parámetro 'filter' de la versión 1.0.0
+        const catalogUrl = `https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search?bbox=${bboxString}&datetime=${timeRange}&collections=${collectionId}&limit=100&filter={"op":"<=","field":"eo:cloud_cover","value":100}`;
+        
         const catalogResponse = await fetch(catalogUrl, {
             method: 'GET',
             headers: {
-                'Content-Type': 'application/json',
+                'Content-Type': 'application/geo+json', // ✅ Se actualiza el Content-Type para la nueva API
                 'Authorization': `Bearer ${accessToken}`
             }
         });
