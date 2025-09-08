@@ -453,8 +453,8 @@ app.post('/api/catalogo-coverage', async (req, res) => {
 
 // NUEVO ENDPOINT DE PRUEBA:
 app.get('/api/sentinel-test', async (req, res) => {
-  const testBbox = [13.0, 45.0, 14.0, 46.0]; // Coordenadas de prueba en Europa
-  const testDate = '2024-03-25'; // Fecha de prueba
+  const testBbox = [13.0, 45.0, 14.0, 46.0];
+  const testDate = '2024-03-25';
 
   console.log('--- Iniciando prueba de API simple ---');
 
@@ -545,14 +545,18 @@ app.get('/api/sentinel-test', async (req, res) => {
     }
 
     const buffer = await imageResponse.arrayBuffer();
-    const base64 = Buffer.from(buffer).toString('base64');
+    // const base64 = Buffer.from(buffer).toString('base64'); // This line is not needed for the GET endpoint
 
     console.log(`✅ Prueba exitosa: Imagen de ${buffer.byteLength} bytes recibida.`);
     console.log('--- Prueba finalizada con éxito ---');
 
+    // CONVERSIÓN NECESARIA: Convertir ArrayBuffer a Buffer antes de enviar la respuesta
+    const nodeBuffer = Buffer.from(buffer);
+
     // Devolver la imagen para su visualización en el navegador
     res.set('Content-Type', 'image/jpeg');
-    res.end(buffer);
+    res.send(nodeBuffer); // ✅ Cambio de res.end a res.send para mayor compatibilidad
+    
 
   } catch (error) {
     console.error('❌ Error en la prueba de API:', error.message);
