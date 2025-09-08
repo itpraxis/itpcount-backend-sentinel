@@ -92,39 +92,30 @@ const getAccessToken = async () => {
 const getAvailableDates = async (bbox, maxCloudCoverage) => {
     try {
         const accessToken = await getAccessToken();
-        const bboxString = bbox.join(',');
-        const timeRange = "2020-01-01T00:00:00Z/2025-01-01T23:59:59Z";
-        const collectionId = "sentinel-2-l2a";
+        const catalogUrl = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search';
         
-        // ✅ Se construye el objeto del filtro
-        const filter = {
-            "op": "<=",
-            "field": "eo:cloud_cover",
-            "value": maxCloudCoverage
-        };
-        
-        // ✅ Se convierte el objeto a una cadena JSON
-        const filterJSON = JSON.stringify(filter);
-
-        // ✅ Se utiliza URLSearchParams para manejar la codificación de forma segura
-        const params = new URLSearchParams({
-            "bbox": bboxString,
-            "datetime": timeRange,
-            "collections": collectionId,
+        // ✅ Se construye el cuerpo de la solicitud como un objeto JSON
+        const payload = {
+            "bbox": bbox,
+            "datetime": "2020-01-01T00:00:00Z/2025-01-01T23:59:59Z",
+            "collections": ["sentinel-2-l2a"],
             "limit": 100,
-            "filter": filterJSON
-        });
-        
-        const catalogUrl = `https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search?${params.toString()}`;
-        
-        console.log(`URL de catálogo generada: ${catalogUrl}`); // Esto te ayudará a depurar en el futuro
+            "filter": {
+                "op": "<=",
+                "field": "eo:cloud_cover",
+                "value": maxCloudCoverage
+            }
+        };
+
+        console.log('Enviando payload al catálogo:', JSON.stringify(payload));
         
         const catalogResponse = await fetch(catalogUrl, {
-            method: 'GET',
+            method: 'POST', // ✅ Se cambia el método a POST
             headers: {
-                'Content-Type': 'application/geo+json',
+                'Content-Type': 'application/json', // ✅ Se cambia el Content-Type a application/json
                 'Authorization': `Bearer ${accessToken}`
-            }
+            },
+            body: JSON.stringify(payload) // ✅ Se envía el payload en el cuerpo de la solicitud
         });
         
         if (!catalogResponse.ok) {
@@ -144,7 +135,6 @@ const getAvailableDates = async (bbox, maxCloudCoverage) => {
         return [];
     }
 };
-
 
 /**
  * Intenta obtener una imagen de Sentinel-Hub con reintentos.
@@ -410,22 +400,30 @@ app.post('/api/catalogo-coverage', async (req, res) => {
     }
     try {
         const accessToken = await getAccessToken();
-        const bboxString = bbox.join(',');
-        const timeRange = "2020-01-01T00:00:00Z/2025-01-01T23:59:59Z";
-        const collectionId = "sentinel-2-l2a";
+        const catalogUrl = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search';
         
-        // ✅ Se codifica correctamente el filtro como un componente de URL
-        const filter = { "op": "<=", "field": "eo:cloud_cover", "value": 100 };
-        const filterString = encodeURIComponent(JSON.stringify(filter));
-        const catalogUrl = `https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search?bbox=${bboxString}&datetime=${timeRange}&collections=${collectionId}&limit=100&filter=${filterString}`;
-        
-        const catalogResponse = await fetch(catalogUrl, {
-            method: 'GET',
-            headers: {
-                'Content-Type': 'application/geo+json',
-                'Authorization': `Bearer ${accessToken}`
+        // ✅ Se construye el cuerpo de la solicitud como un objeto JSON
+        const payload = {
+            "bbox": bbox,
+            "datetime": "2020-01-01T00:00:00Z/2025-01-01T23:59:59Z",
+            "collections": ["sentinel-2-l2a"],
+            "limit": 100,
+            "filter": {
+                "op": "<=",
+                "field": "eo:cloud_cover",
+                "value": 100
             }
+        };
+
+        const catalogResponse = await fetch(catalogUrl, {
+            method: 'POST', // ✅ Se cambia el método a POST
+            headers: {
+                'Content-Type': 'application/json', // ✅ Se cambia el Content-Type a application/json
+                'Authorization': `Bearer ${accessToken}`
+            },
+            body: JSON.stringify(payload) // ✅ Se envía el payload en el cuerpo de la solicitud
         });
+        
         if (!catalogResponse.ok) {
             const error = await catalogResponse.text();
             throw new Error(`Error al obtener datos del Catálogo: ${error}`);
