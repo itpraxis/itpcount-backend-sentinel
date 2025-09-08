@@ -682,17 +682,20 @@ app.post('/api/sentinel2simple2', async (req, res) => {
   // Paso 1: Convertir el polígono a un bounding box (bbox)
   let minLon = Infinity, minLat = Infinity, maxLon = -Infinity, maxLat = -Infinity;
 
-  // Las coordenadas están anidadas en un array, por eso se usa coordinates[0]
-  if (coordinates && coordinates[0] && Array.isArray(coordinates[0])) {
-    coordinates[0].forEach(coord => {
-      const [lon, lat] = coord;
-      minLon = Math.min(minLon, lon);
-      minLat = Math.min(minLat, lat);
-      maxLon = Math.max(maxLon, lon);
-      maxLat = Math.max(maxLat, lat);
-    });
+  // El cambio está aquí: Las coordenadas están anidadas un nivel más
+  // La estructura correcta de GeoJSON para un polígono simple es [ [ [lon, lat], ... ] ]
+  // Por lo tanto, el polígono es coordinates[0].
+  if (coordinates && coordinates.length > 0 && Array.isArray(coordinates[0])) {
+      const polygonCoords = coordinates[0]; // Extrae el array de coordenadas del polígono
+      polygonCoords.forEach(coord => {
+        const [lon, lat] = coord;
+        minLon = Math.min(minLon, lon);
+        minLat = Math.min(minLat, lat);
+        maxLon = Math.max(maxLon, lon);
+        maxLat = Math.max(maxLat, lat);
+      });
   } else {
-    return res.status(400).json({ error: 'Formato de coordenadas de polígono inválido.' });
+      return res.status(400).json({ error: 'Formato de coordenadas de polígono inválido.' });
   }
 
   const bbox = [minLon, minLat, maxLon, maxLat];
