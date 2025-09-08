@@ -244,7 +244,13 @@ const getNdviAverage = async ({ geometry, date }) => {
             },
             output: {
                 resolution: 1500,
-                format: "application/json"
+                // ✅ CAMBIO CLAVE: Se eliminó 'format' aquí
+                responses: [
+                    {
+                        identifier: "default",
+                        format: { type: "application/json" }
+                    }
+                ]
             },
             evalscript: `
                 //VERSION=3
