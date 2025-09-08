@@ -100,15 +100,7 @@ const getAvailableDates = async (bbox, maxCloudCoverage) => {
             "bbox": bbox,
             "datetime": "2020-01-01T00:00:00Z/2025-01-01T23:59:59Z",
             "collections": ["sentinel-2-l2a"],
-            "limit": 100,
-            "filter": {
-                "op": "lte", // Nuevo formato: "lte" en lugar de "<="
-                "args": [
-                    { "property": "eo:cloud_cover" },
-                    maxCloudCoverage
-                ]
-            },
-            "filter-lang": "cql2-json" // Se agrega el idioma del filtro
+            "limit": 100
         };
 
         console.log('Enviando payload al catálogo:', JSON.stringify(payload));
