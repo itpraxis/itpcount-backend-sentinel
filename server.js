@@ -89,33 +89,37 @@ const getAccessToken = async () => {
 };
 
 // Función auxiliar para obtener fechas disponibles del catálogo (se agrega el parámetro de nubosidad)
+// Función auxiliar para obtener fechas disponibles del catálogo (se agrega el parámetro de nubosidad)
 const getAvailableDates = async (bbox, maxCloudCoverage) => {
     try {
         const accessToken = await getAccessToken();
         const catalogUrl = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search';
         
-        // ✅ Se construye el cuerpo de la solicitud como un objeto JSON
+        // Se construye el cuerpo de la solicitud con el filtro en formato CQL2-JSON
         const payload = {
             "bbox": bbox,
             "datetime": "2020-01-01T00:00:00Z/2025-01-01T23:59:59Z",
             "collections": ["sentinel-2-l2a"],
             "limit": 100,
             "filter": {
-                "op": "<=",
-                "field": "eo:cloud_cover",
-                "value": maxCloudCoverage
-            }
+                "op": "lte", // Nuevo formato: "lte" en lugar de "<="
+                "args": [
+                    { "property": "eo:cloud_cover" },
+                    maxCloudCoverage
+                ]
+            },
+            "filter-lang": "cql2-json" // Se agrega el idioma del filtro
         };
 
         console.log('Enviando payload al catálogo:', JSON.stringify(payload));
         
         const catalogResponse = await fetch(catalogUrl, {
-            method: 'POST', // ✅ Se cambia el método a POST
+            method: 'POST', 
             headers: {
-                'Content-Type': 'application/json', // ✅ Se cambia el Content-Type a application/json
+                'Content-Type': 'application/json',
                 'Authorization': `Bearer ${accessToken}`
             },
-            body: JSON.stringify(payload) // ✅ Se envía el payload en el cuerpo de la solicitud
+            body: JSON.stringify(payload)
         });
         
         if (!catalogResponse.ok) {
