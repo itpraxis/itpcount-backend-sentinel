@@ -17,15 +17,6 @@ app.use(express.json());
 
 const port = process.env.PORT || 3001;
 
-const CHILE_DATES = [
-    '2024-03-25',
-    '2023-09-15',
-    '2022-12-01',
-    '2023-03-15',
-    '2022-10-10',
-    '2023-06-21'
-];
-
 // Función auxiliar para convertir polígono a bbox
 const polygonToBbox = (coordinates) => {
     if (!coordinates || coordinates.length === 0 || !Array.isArray(coordinates[0])) {
@@ -86,6 +77,41 @@ const getAccessToken = async () => {
     return tokenData.access_token;
 };
 
+// Función auxiliar para obtener fechas disponibles del catálogo
+const getAvailableDates = async (bbox) => {
+    try {
+        const accessToken = await getAccessToken();
+        const bboxString = bbox.join(',');
+        const timeRange = "2020-01-01T00:00:00Z/2025-01-01T23:59:59Z";
+        const collectionId = "sentinel-2-l2a";
+        const catalogUrl = `https://services.sentinel-hub.com/api/v1/catalog/search?bbox=${bboxString}&datetime=${timeRange}&collections=${collectionId}&limit=100&query={"eo:cloud_cover": {"lte": 10}}`; // Baja nubosidad
+        
+        const catalogResponse = await fetch(catalogUrl, {
+            method: 'GET',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${accessToken}`
+            }
+        });
+        
+        if (!catalogResponse.ok) {
+            const error = await catalogResponse.text();
+            throw new Error(`Error al obtener datos del Catálogo: ${error}`);
+        }
+        
+        const catalogData = await catalogResponse.json();
+        const availableDates = catalogData.features
+            .map(feature => feature.properties.datetime.split('T')[0])
+            .filter((value, index, self) => self.indexOf(value) === index)
+            .sort((a, b) => new Date(b) - new Date(a));
+            
+        return availableDates;
+    } catch (error) {
+        console.error('❌ Error en getAvailableDates:', error.message);
+        return [];
+    }
+};
+
 /**
  * Intenta obtener una imagen de Sentinel-Hub con reintentos.
  * @param {object} params - Parámetros de la solicitud.
@@ -97,7 +123,7 @@ const getAccessToken = async () => {
  */
 const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) => {
     const accessToken = await getAccessToken();
-    const attemptDates = [date, ...getNearbyDates(date, 7)];
+    const attemptDates = [date]; // Ya no se reintenta, el frontend ya envió una fecha válida
     for (const attemptDate of attemptDates) {
         try {
             const payload = {
@@ -148,9 +174,6 @@ const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) 
             const buffer = await imageResponse.arrayBuffer();
             const base64 = Buffer.from(buffer).toString('base64');
             const result = { url: `image/png;base64,${base64}`, usedDate: attemptDate };
-            if (attemptDate !== date) {
-                result.warning = `No se encontraron datos para la fecha solicitada (${date}). Se utilizó la fecha ${attemptDate}.`;
-            }
             return result;
         } catch (error) {
             console.warn(`⚠️ Falló con la fecha: ${attemptDate} - ${error.message}`);
@@ -177,6 +200,33 @@ app.post('/api/sentinel2', async (req, res) => {
             error: error.message,
             suggestion: "Verifica que las coordenadas del polígono sean válidas y que el área esté en tierra firme"
         });
+    }
+});
+
+// Nuevo endpoint para obtener fechas disponibles
+app.post('/api/get-valid-dates', async (req, res) => {
+    const { coordinates } = req.body;
+    if (!coordinates) {
+        return res.status(400).json({ error: 'Faltan parámetros requeridos: coordinates' });
+    }
+    const bbox = polygonToBbox(coordinates);
+    if (!bbox) {
+        return res.status(400).json({ error: 'Formato de coordenadas de polígono inválido.' });
+    }
+    try {
+        const availableDates = await getAvailableDates(bbox);
+        if (availableDates.length === 0) {
+            return res.json({ hasCoverage: false, message: "No hay fechas con imágenes de baja nubosidad para esta ubicación." });
+        }
+        res.json({
+            hasCoverage: true,
+            totalDates: availableDates.length,
+            availableDates: availableDates.slice(0, 30), // Retornar las 30 más recientes
+            message: `Se encontraron ${availableDates.length} fechas con datos disponibles`
+        });
+    } catch (error) {
+        console.error('❌ Error al verificar cobertura:', error.message);
+        res.status(500).json({ error: error.message, suggestion: "Verifica que las coordenadas sean válidas y el área esté en tierra firme." });
     }
 });
 
@@ -334,7 +384,7 @@ app.post('/api/catalogo-coverage', async (req, res) => {
 });
 
 // ==============================================
-// ENDPOINT DE PRUEBA 2
+// ENDPOINT DE PRUEBA
 // ==============================================
 
 app.get('/api/sentinel-test', async (req, res) => {
