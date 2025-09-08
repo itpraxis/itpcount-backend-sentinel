@@ -17,6 +17,15 @@ app.use(express.json());
 
 const port = process.env.PORT || 3001;
 
+const CHILE_DATES = [
+    '2024-03-25',
+    '2023-09-15',
+    '2022-12-01',
+    '2023-03-15',
+    '2022-10-10',
+    '2023-06-21'
+];
+
 // Función auxiliar para convertir polígono a bbox
 const polygonToBbox = (coordinates) => {
     if (!coordinates || coordinates.length === 0 || !Array.isArray(coordinates[0])) {
@@ -32,6 +41,21 @@ const polygonToBbox = (coordinates) => {
         maxLat = Math.max(maxLat, lat);
     });
     return [minLon, minLat, maxLon, maxLat];
+};
+
+// Función auxiliar para obtener fechas cercanas
+const getNearbyDates = (baseDate, days) => {
+    const dates = [];
+    const d = new Date(baseDate);
+    for (let i = 0; i <= days; i++) {
+        const checkDate = new Date(d);
+        checkDate.setDate(d.getDate() - i);
+        const dateString = checkDate.toISOString().split('T')[0];
+        if (dateString !== baseDate) {
+            dates.push(dateString);
+        }
+    }
+    return dates;
 };
 
 // ==============================================
@@ -63,48 +87,6 @@ const getAccessToken = async () => {
 };
 
 /**
- * Consulta el catálogo de Sentinel para obtener fechas disponibles.
- * @param {array} bbox - El bounding box del área.
- * @param {string} date - La fecha solicitada.
- * @returns {array} Una lista de fechas disponibles ordenadas por proximidad a la fecha solicitada.
- */
-const getAvailableDates = async (bbox, date) => {
-    try {
-        const accessToken = await getAccessToken();
-        const bboxString = bbox.join(',');
-        const timeRange = "2020-01-01T00:00:00Z/2025-01-01T23:59:59Z"; // Rango amplio
-        const collectionId = "sentinel-2-l2a";
-        const catalogUrl = `https://services.sentinel-hub.com/api/v1/catalog/search?bbox=${bboxString}&datetime=${timeRange}&collections=${collectionId}&limit=100&query={"eo:cloud_cover": {"lte": 100}}`;
-        const catalogResponse = await fetch(catalogUrl, {
-            method: 'GET',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${accessToken}`
-            }
-        });
-
-        if (!catalogResponse.ok) {
-            const error = await catalogResponse.text();
-            throw new Error(`Error al obtener datos del Catálogo: ${error}`);
-        }
-        const catalogData = await catalogResponse.json();
-        const availableDates = catalogData.features
-            .map(feature => feature.properties.datetime.split('T')[0])
-            .filter((value, index, self) => self.indexOf(value) === index)
-            .sort((a, b) => {
-                const dateA = new Date(a);
-                const dateB = new Date(b);
-                const requestedDate = new Date(date);
-                return Math.abs(dateA - requestedDate) - Math.abs(dateB - requestedDate);
-            });
-        return availableDates;
-    } catch (error) {
-        console.error('❌ Error en getAvailableDates:', error.message);
-        return [];
-    }
-};
-
-/**
  * Intenta obtener una imagen de Sentinel-Hub con reintentos.
  * @param {object} params - Parámetros de la solicitud.
  * @param {array} params.geometry - Coordenadas del polígono o bbox.
@@ -115,81 +97,66 @@ const getAvailableDates = async (bbox, date) => {
  */
 const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) => {
     const accessToken = await getAccessToken();
-    
-    let bbox = geometry;
-    if (geometryType === 'Polygon') {
-        bbox = polygonToBbox(geometry);
-    }
-    
-    // Obtener la fecha más cercana del catálogo
-    const availableDates = await getAvailableDates(bbox, date);
-    if (availableDates.length === 0) {
-        throw new Error("No se encontraron fechas disponibles en el catálogo para esta ubicación.");
-    }
-    
-    const attemptDate = availableDates[0];
-
-    try {
-        const payload = {
-            input: {
-                bounds: geometryType === 'Polygon' ? { geometry: { type: "Polygon", coordinates: geometry } } : { bbox: geometry },
-                data: [
-                    {
-                        dataFilter: {
-                            timeRange: { from: `${attemptDate}T00:00:00Z`, to: `${attemptDate}T23:59:59Z` },
-                            maxCloudCoverage: 100
-                        },
-                        type: "sentinel-2-l2a"
+    const attemptDates = [date, ...getNearbyDates(date, 7)];
+    for (const attemptDate of attemptDates) {
+        try {
+            const payload = {
+                input: {
+                    bounds: geometryType === 'Polygon' ? { geometry: { type: "Polygon", coordinates: geometry } } : { bbox: geometry },
+                    data: [
+                        {
+                            dataFilter: {
+                                timeRange: { from: `${attemptDate}T00:00:00Z`, to: `${attemptDate}T23:59:59Z` },
+                                maxCloudCoverage: 100
+                            },
+                            type: "sentinel-2-l2a"
+                        }
+                    ]
+                },
+                output: {
+                    width: 512,
+                    height: 512,
+                    format: "image/png",
+                    upsampling: "NEAREST",
+                    downsampling: "NEAREST"
+                },
+                evalscript: `
+                    //VERSION=3
+                    function setup() {
+                      return {
+                        input: [{ bands: ["B04", "B03", "B02"], units: "REFLECTANCE" }],
+                        output: { bands: 3, sampleType: "AUTO" }
+                      };
                     }
-                ]
-            },
-            output: {
-                width: 512,
-                height: 512,
-                format: "image/png",
-                upsampling: "NEAREST",
-                downsampling: "NEAREST"
-            },
-            evalscript: `
-                //VERSION=3
-                function setup() {
-                  return {
-                    input: [{ bands: ["B04", "B03", "B02"], units: "REFLECTANCE" }],
-                    output: { bands: 3, sampleType: "AUTO" }
-                  };
-                }
-                function evaluatePixel(samples) {
-                  return [2.5 * samples.B04, 2.5 * samples.B03, 2.5 * samples.B02];
-                }
-            `
-        };
-        
-        const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${accessToken}`
-            },
-            body: JSON.stringify(payload)
-        });
-
-        if (!imageResponse.ok) {
-            const error = await imageResponse.text();
-            throw new Error(`Error en la imagen para ${attemptDate}: ${error}`);
+                    function evaluatePixel(samples) {
+                      return [2.5 * samples.B04, 2.5 * samples.B03, 2.5 * samples.B02];
+                    }
+                `
+            };
+            const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${accessToken}`
+                },
+                body: JSON.stringify(payload)
+            });
+            if (!imageResponse.ok) {
+                const error = await imageResponse.text();
+                throw new Error(`Error en la imagen para ${attemptDate}: ${error}`);
+            }
+            const buffer = await imageResponse.arrayBuffer();
+            const base64 = Buffer.from(buffer).toString('base64');
+            const result = { url: `image/png;base64,${base64}`, usedDate: attemptDate };
+            if (attemptDate !== date) {
+                result.warning = `No se encontraron datos para la fecha solicitada (${date}). Se utilizó la fecha ${attemptDate}.`;
+            }
+            return result;
+        } catch (error) {
+            console.warn(`⚠️ Falló con la fecha: ${attemptDate} - ${error.message}`);
         }
-        
-        const buffer = await imageResponse.arrayBuffer();
-        const base64 = Buffer.from(buffer).toString('base64');
-        const result = { url: `image/png;base64,${base64}`, usedDate: attemptDate };
-        if (attemptDate !== date) {
-            result.warning = `No se encontraron datos para la fecha solicitada (${date}). Se utilizó la fecha más cercana disponible: ${attemptDate}.`;
-        }
-        return result;
-
-    } catch (error) {
-        console.warn(`⚠️ Falló con la fecha: ${attemptDate} - ${error.message}`);
-        throw new Error("No se pudo obtener la imagen con la fecha disponible. Intente con otro rango de fechas.");
     }
+    throw new Error("No se encontraron datos de imagen para estas coordenadas en ninguna de las fechas intentadas.");
 };
 
 // ==============================================
@@ -263,7 +230,45 @@ app.post('/api/check-coverage', async (req, res) => {
         return res.status(400).json({ error: 'Formato de coordenadas de polígono inválido.' });
     }
     try {
-        const availableDates = await getAvailableDates(bbox, req.body.date);
+        const accessToken = await getAccessToken();
+        const metadataPayload = {
+            input: {
+                bounds: {
+                    bbox: bbox,
+                    properties: { crs: "http://www.opengis.net/def/crs/OGC/1.3/CRS84" }
+                },
+                data: [{
+                    dataFilter: {
+                        timeRange: { from: "2020-01-01T00:00:00Z", to: "2025-01-01T23:59:59Z" },
+                        maxCloudCoverage: 100
+                    },
+                    type: "sentinel-2-l2a"
+                }]
+            },
+            output: {
+                width: 50,
+                height: 50,
+                format: "application/json"
+            },
+            evalscript: `// VERSION=3\nfunction setup() { return { input: ["B04"], output: { bands: 1 } }; }\nfunction evaluatePixel(sample) { return [1]; }`,
+            meta: { "availableDates": true }
+        };
+        const metadataResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${accessToken}`
+            },
+            body: JSON.stringify(metadataPayload)
+        });
+        if (!metadataResponse.ok) {
+            const error = await metadataResponse.text();
+            throw new Error(`Error al obtener metadatos: ${error}`);
+        }
+        const metadata = await metadataResponse.json();
+        const availableDates = metadata.metadata && metadata.metadata.availableDates ?
+            metadata.metadata.availableDates.map(date => date.split('T')[0]).sort((a, b) => new Date(b) - new Date(a)) :
+            [];
         if (availableDates.length === 0) {
             return res.json({ hasCoverage: false, message: "No hay datos disponibles para este área en el periodo de tiempo especificado." });
         }
@@ -289,7 +294,27 @@ app.post('/api/catalogo-coverage', async (req, res) => {
         return res.status(400).json({ error: 'Formato de coordenadas de polígono inválido.' });
     }
     try {
-        const availableDates = await getAvailableDates(bbox, req.body.date);
+        const accessToken = await getAccessToken();
+        const bboxString = bbox.join(',');
+        const timeRange = "2020-01-01T00:00:00Z/2025-01-01T23:59:59Z";
+        const collectionId = "sentinel-2-l2a";
+        const catalogUrl = `https://services.sentinel-hub.com/api/v1/catalog/search?bbox=${bboxString}&datetime=${timeRange}&collections=${collectionId}&limit=100&query={"eo:cloud_cover": {"gte": 0, "lte": 100}}`;
+        const catalogResponse = await fetch(catalogUrl, {
+            method: 'GET',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${accessToken}`
+            }
+        });
+        if (!catalogResponse.ok) {
+            const error = await catalogResponse.text();
+            throw new Error(`Error al obtener datos del Catálogo: ${error}`);
+        }
+        const catalogData = await catalogResponse.json();
+        const availableDates = catalogData.features
+            .map(feature => feature.properties.datetime.split('T')[0])
+            .filter((value, index, self) => self.indexOf(value) === index)
+            .sort((a, b) => new Date(b) - new Date(a));
         if (availableDates.length === 0) {
             return res.json({ hasCoverage: false, message: "No hay datos de imagen disponibles para este área en el periodo de tiempo especificado." });
         }
