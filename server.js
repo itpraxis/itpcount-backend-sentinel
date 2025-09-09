@@ -230,7 +230,7 @@ const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) 
  */
 // ✅ FUNCIÓN CORREGIDA
 // ✅ FUNCIÓN CORREGIDA Y REVISADA
-const getNdviAverage = async ({ geometry, date }) => {
+const getNdviAverage2 = async ({ geometry, date }) => {
     const accessToken = await getAccessToken();
     try {
         const payload = {
@@ -303,7 +303,7 @@ const getNdviAverage = async ({ geometry, date }) => {
         console.log(`✅ NDVI promedio para ${date}: ${averageNdvi}`);
         return averageNdvi;
     } catch (error) {
-        console.error('❌ Error en getNdviAverage:', error.message);
+        console.error('❌ Error en getNdviAverage2:', error.message);
         throw error;
     }
 };
@@ -434,8 +434,8 @@ app.post('/api/get-ndvi-averages', async (req, res) => {
     }
     try {
         const [avg1, avg2] = await Promise.all([
-            getNdviAverage({ geometry: coordinates, date: dates[0] }),
-            getNdviAverage({ geometry: coordinates, date: dates[1] })
+            getNdviAverage2({ geometry: coordinates, date: dates[0] }),
+            getNdviAverage2({ geometry: coordinates, date: dates[1] })
         ]);
 
         res.json({
