@@ -228,13 +228,14 @@ const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) 
  * @throws {Error} Si no se puede obtener el valor.
  * 
  */
+// ✅ FUNCIÓN CORREGIDA
 const getNdviAverage = async ({ geometry, date }) => {
     const accessToken = await getAccessToken();
     try {
         const payload = {
             input: {
                 bounds: { geometry: { type: "Polygon", coordinates: geometry } },
-                 data: [
+                data: [
                     {
                         dataFilter: {
                             timeRange: { from: `${date}T00:00:00Z`, to: `${date}T23:59:59Z` },
@@ -254,32 +255,27 @@ const getNdviAverage = async ({ geometry, date }) => {
                 ]
             },
             evalscript: `
-                //VERSION=3
-                function setup() {
-                    return {
-                        input: [{ bands: ["B08", "B04", "dataMask"], units: "REFLECTANCE" }],
-                        output: { bands: 1 }
-                    };
-                }
-                function evaluatePixel(samples) {
-                    if (samples.dataMask === 0) {
-                        return NaN;
-                    }
-                    const nir = samples.B08;
-                    const red = samples.B04;
-                    const ndvi = (nir - red) / (nir + red);
-                    return ndvi;
-                }
+//VERSION=3
+function setup() {
+  return {
+    input: [{ bands: ["B08", "B04", "dataMask"], units: "REFLECTANCE" }],
+    output: { bands: 1 }
+  };
+}
+function evaluatePixel(samples) {
+  if (samples.dataMask === 0) {
+    return NaN;
+  }
+  const nir = samples.B08;
+  const red = samples.B04;
+  const ndvi = (nir - red) / (nir + red);
+  return ndvi;
+}
             `,
             process: {
                 mode: "STATS"
             }
         };
-
-        console.log('--- Payload enviado a Sentinel-Hub ---');
-        console.log(JSON.stringify(payload, null, 2)); // Esto mostrará el JSON con formato
-        console.log('-------------------------------------');
-
 
         const response = await fetch('https://services.sentinel-hub.com/api/v1/process', {
             method: 'POST',
@@ -289,6 +285,7 @@ const getNdviAverage = async ({ geometry, date }) => {
             },
             body: JSON.stringify(payload)
         });
+
         if (!response.ok) {
             const error = await response.text();
             throw new Error(`Error en la API de Sentinel-Hub: ${error}`);
