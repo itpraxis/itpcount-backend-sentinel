@@ -257,26 +257,24 @@ const getNdviAverage2 = async ({ geometry, date }) => {
             },
             evalscript: `
                 //VERSION=3
-// Evalscript corregido para el modo STATS
-function setup() {
-  return {
-    input: [{ bands: ["B08", "B04", "dataMask"], units: "REFLECTANCE" }],
-    output: {
-      id: "default",
-      bands: 1,
-      sampleType: "FLOAT32" // **IMPORTANTE: Define el tipo de dato de salida**
-    }
-  };
-}
-function evaluatePixel(samples) {
-  if (samples.dataMask === 0) {
-    return [NaN]; // Retorna NaN (Not a Number) para enmascarar píxeles sin datos
-  }
-  const nir = samples.B08;
-  const red = samples.B04;
-  const ndvi = (nir - red) / (nir + red);
-  return [ndvi];
-}
+				function setup() {
+				  return {
+					input: [{ bands: ["B08", "B04", "dataMask"], units: "REFLECTANCE" }],
+					output: {
+					  id: "default",
+					  bands: 1
+					}
+				  };
+				}
+				function evaluatePixel(samples) {
+				  if (samples.dataMask === 0) {
+					return [NaN]; 
+				  }
+				  const nir = samples.B08;
+				  const red = samples.B04;
+				  const ndvi = (nir - red) / (nir + red);
+				  return [ndvi];
+				}
             `,
             process: {
                 mode: "STATS"
@@ -577,6 +575,30 @@ app.post('/api/catalogo-coverage', async (req, res) => {
         res.status(500).json({
             error: error.message,
             suggestion: "Verifica que las coordenadas estén en formato [longitud, latitud] y que el área esté en tierra firme"
+        });
+    }
+});
+
+// ==============================================
+// ✅ NUEVO ENDPOINT PARA PRUEBAS (POSTMAN)
+// ==============================================
+app.post('/api/test-ndvi', async (req, res) => {
+    const { coordinates, date } = req.body;
+    if (!coordinates || !date) {
+        return res.status(400).json({ error: 'Faltan parámetros: coordinates y date.' });
+    }
+    try {
+        const ndviAverage = await getNdviAverage({ geometry: coordinates, date });
+        res.json({
+            date: date,
+            avgNdvi: ndviAverage,
+            message: "NDVI average retrieved successfully."
+        });
+    } catch (error) {
+        console.error('❌ Error en el endpoint /test-ndvi:', error.message);
+        res.status(500).json({
+            error: error.message,
+            suggestion: "Verifica que las coordenadas y la fecha sean correctas."
         });
     }
 });
