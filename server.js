@@ -229,6 +229,7 @@ const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) 
  * 
  */
 // ✅ FUNCIÓN CORREGIDA
+// ✅ FUNCIÓN CORREGIDA Y REVISADA
 const getNdviAverage = async ({ geometry, date }) => {
     const accessToken = await getAccessToken();
     try {
@@ -254,43 +255,35 @@ const getNdviAverage = async ({ geometry, date }) => {
                     }
                 ]
             },
-// ✅ Final corrected evalscript
-// ✅ Versión Final y Corregida del evalscript
-// ✅ Correct evalscript for STATS mode
-// ✅ Correct evalscript for STATS mode with a proper output block
-// ✅ Correct evalscript for STATS mode
-// ✅ Correct JavaScript syntax for the evalscript string
-// ✅ Correct evalscript for STATS mode
-evalscript: `
-function setup() {
-  return {
-    input: [{ bands: ["B08", "B04", "dataMask"], units: "REFLECTANCE" }],
-    output: {
-      id: "default",
-      bands: 1
-    }
-  };
-}
-function evaluatePixel(samples) {
-  // El cálculo de NDVI sigue siendo necesario para que el modo STATS pueda procesar los valores.
-  if (samples.dataMask === 0) {
-    return [0];
-  }
-  const nir = samples.B08;
-  const red = samples.B04;
-  const ndvi = (nir - red) / (nir + red);
-  return [ndvi];
-}
-`,
+            evalscript: `
+                //VERSION=3
+                function setup() {
+                    return {
+                        input: [{ bands: ["B08", "B04", "dataMask"], units: "REFLECTANCE" }],
+                        output: {
+                            id: "default",
+                            bands: 1
+                        }
+                    };
+                }
+                function evaluatePixel(samples) {
+                    if (samples.dataMask === 0) {
+                        return [0];
+                    }
+                    const nir = samples.B08;
+                    const red = samples.B04;
+                    const ndvi = (nir - red) / (nir + red);
+                    return [ndvi];
+                }
+            `,
             process: {
                 mode: "STATS"
             }
         };
 
         console.log('--- Payload enviado a Sentinel-Hub ---');
-        console.log(JSON.stringify(payload, null, 2)); // Esto mostrará el JSON con formato
+        console.log(JSON.stringify(payload, null, 2));
         console.log('-------------------------------------');
-
 
         const response = await fetch('https://services.sentinel-hub.com/api/v1/process', {
             method: 'POST',
