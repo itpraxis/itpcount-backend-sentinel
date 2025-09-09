@@ -256,8 +256,7 @@ const getNdviAverage = async ({ geometry, date }) => {
                 //VERSION=3
                 function setup() {
                     return {
-                        input: [{ bands: ["B08", "B04", "dataMask"], units: "REFLECTANCE" }],
-                        // ✅ ESTA ES LA LÍNEA CRÍTICA: NO ESPECIFICA sampleType
+                        input: [{ bands: ["B08", "B04", "dataMask"], units: "REFLECTANCE" }]
                         output: { bands: 1 }
                     };
                 }
