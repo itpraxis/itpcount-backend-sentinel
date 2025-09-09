@@ -169,7 +169,8 @@ const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) 
                     format: "image/png",
                     upsampling: "NEAREST",
                     downsampling: "NEAREST",
-                    bands: 1
+                    bands: 1, 
+                    sampleType: "AUTO" // <-- CORRECTO AQUÍ para imágenes	
                 },
                 evalscript: `
 				//VERSION=3
@@ -177,7 +178,7 @@ const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) 
 					return {
 						input: [{ bands: ["B08", "B04"], units: "REFLECTANCE" }],
 						// ✅ Corrige esta línea:
-						output: { bands: 1 }
+						output: { bands: 1 }					
 					};
 				}
 				function evaluatePixel(samples) {
