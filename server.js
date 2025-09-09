@@ -569,50 +569,6 @@ app.post('/api/catalogo-coverage', async (req, res) => {
     }
 });
 
-// ==============================================
-// ENDPOINT DE PRUEBA
-// ==============================================
-
-app.get('/api/sentinel-test', async (req, res) => {
-    const testBbox = [13.0, 45.0, 14.0, 46.0];
-    const testDate = '2024-03-25';
-    console.log('--- Iniciando prueba de API simple ---');
-    try {
-        const accessToken = await getAccessToken();
-        const payload = {
-            input: {
-                bounds: { bbox: testBbox, properties: { crs: "http://www.opengis.net/def/crs/OGC/1.3/CRS84" } },
-                data: [{ dataFilter: { timeRange: { from: `${testDate}T00:00:00Z`, to: `${testDate}T23:59:59Z` } }, type: "sentinel-2-l2a" }]
-            },
-            output: {
-                width: 512,
-                height: 512,
-                responses: [{ identifier: "default", format: { type: "image/jpeg" } }]
-            },
-            evalscript: `//VERSION=3\nfunction setup() { return { input: [{ bands: ["B04", "B03", "B02"], units: "REFLECTANCE" }], output: { bands: 3, sampleType: "AUTO" } }; }\nfunction evaluatePixel(samples) { return [samples.B04, samples.B03, samples.B02]; }`
-        };
-        const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${accessToken}` },
-            body: JSON.stringify(payload)
-        });
-        if (!imageResponse.ok) {
-            const error = await imageResponse.text();
-            console.error('❌ Error detallado de la API de Sentinel-Hub:', error);
-            throw new Error(`Error en la solicitud de prueba: ${error}`);
-        }
-        const buffer = await imageResponse.arrayBuffer();
-        const nodeBuffer = Buffer.from(buffer);
-        console.log(`✅ Prueba exitosa: Imagen de ${nodeBuffer.byteLength} bytes recibida.`);
-        console.log('--- Prueba finalizada con éxito ---');
-        res.set('Content-Type', 'image/jpeg');
-        res.send(nodeBuffer);
-    } catch (error) {
-        console.error('❌ Error en la prueba de API:', error.message);
-        res.status(500).json({ error: `Error en la prueba de API: ${error.message}`, suggestion: 'Verifica la conexión o contacta a soporte de Sentinel-Hub.' });
-    }
-});
-
 app.listen(port, '0.0.0.0', () => {
     console.log(`✅ Backend listo en http://localhost:${port}`);
 });
