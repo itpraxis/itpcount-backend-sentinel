@@ -172,7 +172,6 @@ const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) 
                     upsampling: "NEAREST",
                     downsampling: "NEAREST",
                     bands: 1
-					// ,                   sampleType: "AUTO" // <-- CORRECTO AQUÍ para imágenes	
                 },
                 evalscript: `
 				//VERSION=3
