@@ -588,7 +588,7 @@ app.post('/api/test-ndvi', async (req, res) => {
         return res.status(400).json({ error: 'Faltan parámetros: coordinates y date.' });
     }
     try {
-        const ndviAverage = await getNdviAverage({ geometry: coordinates, date });
+        const ndviAverage = await getNdviAverage2({ geometry: coordinates, date });
         res.json({
             date: date,
             avgNdvi: ndviAverage,
