@@ -233,7 +233,7 @@ const getNdviAverage = async ({ geometry, date }) => {
         const payload = {
             input: {
                 bounds: { geometry: { type: "Polygon", coordinates: geometry } },
-                data: [
+                 [
                     {
                         dataFilter: {
                             timeRange: { from: `${date}T00:00:00Z`, to: `${date}T23:59:59Z` },
@@ -256,7 +256,7 @@ const getNdviAverage = async ({ geometry, date }) => {
                 //VERSION=3
                 function setup() {
                     return {
-                        input: [{ bands: ["B08", "B04", "dataMask"], units: "REFLECTANCE" }]
+                        input: [{ bands: ["B08", "B04", "dataMask"], units: "REFLECTANCE" }],
                         output: { bands: 1 }
                     };
                 }
