@@ -254,12 +254,11 @@ const getNdviAverage = async ({ geometry, date }) => {
                     }
                 ]
             },
-            evalscript: `
+evalscript: `
 //VERSION=3
 function setup() {
   return {
-    input: [{ bands: ["B08", "B04", "dataMask"], units: "REFLECTANCE" }],
-    output: { bands: 1 }
+    input: [{ bands: ["B08", "B04", "dataMask"], units: "REFLECTANCE" }]
   };
 }
 function evaluatePixel(samples) {
@@ -271,7 +270,7 @@ function evaluatePixel(samples) {
   const ndvi = (nir - red) / (nir + red);
   return ndvi;
 }
-            `,
+`,
             process: {
                 mode: "STATS"
             }
