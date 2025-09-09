@@ -256,17 +256,18 @@ const getNdviAverage = async ({ geometry, date }) => {
                 function setup() {
                     return {
                         input: [{ bands: ["B08", "B04", "dataMask"], units: "REFLECTANCE" }],
-                        output: { bands: 1, sampleType: "FLOAT32", noDataValue: -999 }
+                        // El output del evalscript no necesita bands ni sampleType para STATS
+                        output: { bands: 1 } 
                     };
                 }
                 function evaluatePixel(samples) {
                     if (samples.dataMask === 0) {
-                        return [-999];
+                        return [NaN]; // Retorna NaN para valores no válidos
                     }
                     const nir = samples.B08;
                     const red = samples.B04;
-                    const ndvi = (nir - red) / (nir + red);
-                    return [ndvi];
+                    // El valor promedio se calculará sobre este valor
+                    return [(nir - red) / (nir + red)]; 
                 }
             `,
             process: {
