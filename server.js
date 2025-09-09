@@ -171,7 +171,8 @@ const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) 
                     format: "image/png",
                     upsampling: "NEAREST",
                     downsampling: "NEAREST",
-                    bands: 1
+                    bands: 1, 
+                    sampleType: "AUTO" // <-- CORRECTO AQUÍ para imágenes	
                 },
                 evalscript: `
 				//VERSION=3
@@ -256,24 +257,26 @@ const getNdviAverage2 = async ({ geometry, date }) => {
             },
             evalscript: `
                 //VERSION=3
-                function setup() {
-                    return {
-                        input: [{ bands: ["B08", "B04", "dataMask"], units: "REFLECTANCE" }],
-                        output: {
-                            id: "default",
-                            bands: 1
-                        }
-                    };
-                }
-                function evaluatePixel(samples) {
-                    if (samples.dataMask === 0) {
-                        return [0];
-                    }
-                    const nir = samples.B08;
-                    const red = samples.B04;
-                    const ndvi = (nir - red) / (nir + red);
-                    return [ndvi];
-                }
+// Evalscript corregido para el modo STATS
+function setup() {
+  return {
+    input: [{ bands: ["B08", "B04", "dataMask"], units: "REFLECTANCE" }],
+    output: {
+      id: "default",
+      bands: 1,
+      sampleType: "FLOAT32" // **IMPORTANTE: Define el tipo de dato de salida**
+    }
+  };
+}
+function evaluatePixel(samples) {
+  if (samples.dataMask === 0) {
+    return [NaN]; // Retorna NaN (Not a Number) para enmascarar píxeles sin datos
+  }
+  const nir = samples.B08;
+  const red = samples.B04;
+  const ndvi = (nir - red) / (nir + red);
+  return [ndvi];
+}
             `,
             process: {
                 mode: "STATS"
