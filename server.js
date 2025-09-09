@@ -254,11 +254,18 @@ const getNdviAverage = async ({ geometry, date }) => {
                     }
                 ]
             },
+// ✅ Final corrected evalscript
 evalscript: `
 //VERSION=3
 function setup() {
   return {
-    input: [{ bands: ["B08", "B04", "dataMask"], units: "REFLECTANCE" }]
+    input: [{ bands: ["B08", "B04", "dataMask"], units: "REFLECTANCE" }],
+    // This output block is required for STATS mode but must use a compatible sampleType
+    output: {
+      id: "default",
+      bands: 1,
+      sampleType: "FLOAT" // Using FLOAT is compatible with JSON STATS output
+    }
   };
 }
 function evaluatePixel(samples) {
@@ -268,7 +275,7 @@ function evaluatePixel(samples) {
   const nir = samples.B08;
   const red = samples.B04;
   const ndvi = (nir - red) / (nir + red);
-  return ndvi;
+  return [ndvi]; // Return as an array
 }
 `,
             process: {
