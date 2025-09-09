@@ -258,6 +258,7 @@ const getNdviAverage = async ({ geometry, date }) => {
 // ✅ Versión Final y Corregida del evalscript
 // ✅ Correct evalscript for STATS mode
 // ✅ Correct evalscript for STATS mode with a proper output block
+// ✅ Correct evalscript for STATS mode
 evalscript: `
 //VERSION=3
 function setup() {
@@ -265,6 +266,7 @@ function setup() {
     input: [{ bands: ["B08", "B04", "dataMask"], units: "REFLECTANCE" }],
     output: {
       id: "default",
+      bands: 1, // Corrected: `bands` property is required
       sampleType: "FLOAT32"
     }
   };
