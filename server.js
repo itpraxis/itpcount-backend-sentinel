@@ -426,8 +426,8 @@ app.post('/api/get-ndvi-averages', async (req, res) => {
         // Comentamos la carga de datos de Sentinel-Hub para evitar el error.
         // Se puede descomentar una vez que el problema se resuelva.
         const [avg1, avg2] = await Promise.all([
-            getNdviAverage({ geometry: coordinates, date: dates[0] }),
-            getNdviAverage({ geometry: coordinates, date: dates[1] })
+            // getNdviAverage({ geometry: coordinates, date: dates[0] }),
+            // getNdviAverage({ geometry: coordinates, date: dates[1] })
         ]);
 
         res.json({
