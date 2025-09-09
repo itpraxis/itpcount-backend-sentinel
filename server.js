@@ -227,73 +227,73 @@ const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) 
  * 
  */
 const getNdviAverage = async ({ geometry, date }) => {
-    const accessToken = await getAccessToken();
-    try {
-        const payload = {
-            input: {
-                bounds: { geometry: { type: "Polygon", coordinates: geometry } },
-                data: [
-                    {
-                        dataFilter: {
-                            timeRange: { from: `${date}T00:00:00Z`, to: `${date}T23:59:59Z` },
-                            maxCloudCoverage: 100
-                        },
-                        type: "sentinel-2-l2a"
-                    }
-                ]
-            },
-            **output**: {
-                resolution: 1500,
-                responses: [
-                    {
-                        identifier: "default",
-                        format: { type: "application/json" }
-                    }
-                ]
-            },
-            **evalscript**: `
-                //VERSION=3
-                function setup() {
-                    return {
-                        input: [{ bands: ["B08", "B04", "dataMask"], units: "REFLECTANCE" }],
-                        output: { bands: 1, sampleType: "FLOAT32", noDataValue: -999 }
-                    };
-                }
-                function evaluatePixel(samples) {
-                    if (samples.dataMask === 0) {
-                        return [-999];
-                    }
-                    const nir = samples.B08;
-                    const red = samples.B04;
-                    const ndvi = (nir - red) / (nir + red);
-                    return [ndvi];
-                }
-            `,
-            **process**: {
-                mode: "STATS"
-            }
-        };
+    const accessToken = await getAccessToken();
+    try {
+        const payload = {
+            input: {
+                bounds: { geometry: { type: "Polygon", coordinates: geometry } },
+                data: [
+                    {
+                        dataFilter: {
+                            timeRange: { from: `${date}T00:00:00Z`, to: `${date}T23:59:59Z` },
+                            maxCloudCoverage: 100
+                        },
+                        type: "sentinel-2-l2a"
+                    }
+                ]
+            },
+            output: {
+                resolution: 1500,
+                responses: [
+                    {
+                        identifier: "default",
+                        format: { type: "application/json" }
+                    }
+                ]
+            },
+            evalscript: `
+                //VERSION=3
+                function setup() {
+                    return {
+                        input: [{ bands: ["B08", "B04", "dataMask"], units: "REFLECTANCE" }],
+                        output: { bands: 1, sampleType: "FLOAT32", noDataValue: -999 }
+                    };
+                }
+                function evaluatePixel(samples) {
+                    if (samples.dataMask === 0) {
+                        return [-999];
+                    }
+                    const nir = samples.B08;
+                    const red = samples.B04;
+                    const ndvi = (nir - red) / (nir + red);
+                    return [ndvi];
+                }
+            `,
+            process: {
+                mode: "STATS"
+            }
+        };
 
-        const response = await fetch('https://services.sentinel-hub.com/api/v1/process', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${accessToken}`
-            },
-            body: JSON.stringify(payload)
-        });
-        if (!response.ok) {
-            const error = await response.text();
-            throw new Error(`Error en la API de Sentinel-Hub: ${error}`);
-        }
-        const data = await response.json();
-        const averageNdvi = data.gdal.bands[0].stats.mean;
-        console.log(`✅ NDVI promedio para ${date}: ${averageNdvi}`);
-        return averageNdvi;
-    } catch (error) {
-        console.error('❌ Error en getNdviAverage:', error.message);
-        throw error;
-    }
+        const response = await fetch('https://services.sentinel-hub.com/api/v1/process', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${accessToken}`
+            },
+            body: JSON.stringify(payload)
+        });
+        if (!response.ok) {
+            const error = await response.text();
+            throw new Error(`Error en la API de Sentinel-Hub: ${error}`);
+        }
+        const data = await response.json();
+        const averageNdvi = data.gdal.bands[0].stats.mean;
+        console.log(`✅ NDVI promedio para ${date}: ${averageNdvi}`);
+        return averageNdvi;
+    } catch (error) {
+        console.error('❌ Error en getNdviAverage:', error.message);
+        throw error;
+    }
 };
 
 
