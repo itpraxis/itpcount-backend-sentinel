@@ -1,16 +1,18 @@
+// server.js (versión definitiva - corregida y optimizada)
 require('dotenv').config();
 console.log('🔑 CLIENT_ID cargado:', process.env.CLIENT_ID ? '✅ Sí' : '❌ No');
 console.log('🔐 CLIENT_SECRET cargado:', process.env.CLIENT_SECRET ? '✅ Sí' : '❌ No');
 
 const express = require('express');
-const cors = require = require('cors');
+const cors = require('cors');
 const app = express();
 
+// ✅ Configuración CORS mejorada (sin espacios al final)
 app.use(cors({
-    origin: ['https://itpraxis.cl', 'https://www.itpraxis.cl'],
-    methods: ['POST', 'GET'],
-    allowedHeaders: ['Content-Type'],
-    credentials: true
+  origin: ['https://itpraxis.cl', 'https://www.itpraxis.cl'],
+  methods: ['POST', 'GET'],
+  allowedHeaders: ['Content-Type'],
+  credentials: true
 }));
 
 app.use(express.json());
@@ -177,7 +179,6 @@ const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) 
 				function setup() {
 					return {
 						input: [{ bands: ["B08", "B04"], units: "REFLECTANCE" }],
-						// ✅ Corrige esta línea:
 						output: { bands: 1 }					
 					};
 				}
@@ -233,7 +234,6 @@ const getNdviAverage = async ({ geometry, date }) => {
         const payload = {
             input: {
                 bounds: { geometry: { type: "Polygon", coordinates: geometry } },
-                // ✅ CORRECCIÓN: Cambiar data: [ por data: [
                 data: [
                     {
                         dataFilter: {
@@ -423,33 +423,17 @@ app.post('/api/get-ndvi-averages', async (req, res) => {
         return res.status(400).json({ error: 'Faltan parámetros: coordinates y al menos dos fechas en dates.' });
     }
     try {
-        // Comentamos la carga de datos de Sentinel-Hub para evitar el error.
-        // Se puede descomentar una vez que el problema se resuelva.
         const [avg1, avg2] = await Promise.all([
-            // getNdviAverage({ geometry: coordinates, date: dates[0] }),
-            // getNdviAverage({ geometry: coordinates, date: dates[1] })
+            getNdviAverage({ geometry: coordinates, date: dates[0] }),
+            getNdviAverage({ geometry: coordinates, date: dates[1] })
         ]);
 
         res.json({
             date1: dates[0],
-            avgNdvi1: 0.8,   //avg1,
+            avgNdvi1: avg1,
             date2: dates[1],
-            avgNdvi2: 0.3   //avg2
+            avgNdvi2: avg2
         });
-
-        /*
-        
-        // ** Respondiendo con datos simulados temporalmente **
-        // Esto permite que el cliente (tu aplicación web) siga funcionando
-        // mientras depuramos el problema de Sentinel-Hub.
-        res.json({
-            date1: dates[0],
-            avgNdvi1: 0.5, // Valor simulado
-            date2: dates[1],
-            avgNdvi2: 0.8  // Valor simulado
-        });
-        */
-        
     } catch (error) {
         console.error('❌ Error en el endpoint /get-ndvi-averages:', error.message);
         res.status(500).json({ error: error.message });
