@@ -276,6 +276,11 @@ const getNdviAverage = async ({ geometry, date }) => {
             }
         };
 
+        console.log('--- Payload enviado a Sentinel-Hub ---');
+        console.log(JSON.stringify(payload, null, 2)); // Esto mostrará el JSON con formato
+        console.log('-------------------------------------');
+
+
         const response = await fetch('https://services.sentinel-hub.com/api/v1/process', {
             method: 'POST',
             headers: {
