@@ -267,19 +267,19 @@ function setup() {
     input: [{ bands: ["B08", "B04", "dataMask"], units: "REFLECTANCE" }],
     output: {
       id: "default",
-      bands: 1,
-      sampleType: "INT16"
+      bands: 1
     }
   };
 }
 function evaluatePixel(samples) {
+  // El cálculo de NDVI sigue siendo necesario para que el modo STATS pueda procesar los valores.
   if (samples.dataMask === 0) {
     return [0];
   }
   const nir = samples.B08;
   const red = samples.B04;
   const ndvi = (nir - red) / (nir + red);
-  return [ndvi * 10000]; // Multiplicar por 10,000 para convertir a entero.
+  return [ndvi];
 }
 `,
             process: {
