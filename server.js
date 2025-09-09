@@ -423,7 +423,6 @@ app.post('/api/get-ndvi-averages', async (req, res) => {
         return res.status(400).json({ error: 'Faltan parámetros: coordinates y al menos dos fechas en dates.' });
     }
     try {
-        /*
         // Comentamos la carga de datos de Sentinel-Hub para evitar el error.
         // Se puede descomentar una vez que el problema se resuelva.
         const [avg1, avg2] = await Promise.all([
@@ -437,7 +436,8 @@ app.post('/api/get-ndvi-averages', async (req, res) => {
             date2: dates[1],
             avgNdvi2: avg2
         });
-        */
+
+        /*
         
         // ** Respondiendo con datos simulados temporalmente **
         // Esto permite que el cliente (tu aplicación web) siga funcionando
@@ -448,6 +448,7 @@ app.post('/api/get-ndvi-averages', async (req, res) => {
             date2: dates[1],
             avgNdvi2: 0.8  // Valor simulado
         });
+        */
         
     } catch (error) {
         console.error('❌ Error en el endpoint /get-ndvi-averages:', error.message);
