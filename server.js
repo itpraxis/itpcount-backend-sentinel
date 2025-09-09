@@ -264,7 +264,7 @@ function setup() {
     output: {
       id: "default",
       bands: 1,
-      sampleType: "FLOAT32" // Corregido: Usar FLOAT32 en lugar de FLOAT
+      sampleType: "FLOAT64" // Corregido: Usar FLOAT64 para compatibilidad total con STATS
     }
   };
 }
