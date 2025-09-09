@@ -269,18 +269,18 @@ function setup() {
     output: {
       id: "default",
       bands: 1,
-      sampleType: "AUTO" // Corrected: Using AUTO for JSON compatibility
+      sampleType: "INT16"
     }
   };
 }
 function evaluatePixel(samples) {
   if (samples.dataMask === 0) {
-    return NaN;
+    return [0];
   }
   const nir = samples.B08;
   const red = samples.B04;
   const ndvi = (nir - red) / (nir + red);
-  return [ndvi];
+  return [ndvi * 10000]; // Multiplicar por 10,000 para convertir a entero.
 }
 `,
             process: {
