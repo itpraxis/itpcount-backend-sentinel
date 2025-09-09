@@ -233,7 +233,8 @@ const getNdviAverage = async ({ geometry, date }) => {
         const payload = {
             input: {
                 bounds: { geometry: { type: "Polygon", coordinates: geometry } },
-                 [
+                // ✅ CORRECCIÓN: Cambiar data: [ por data: [
+                data: [
                     {
                         dataFilter: {
                             timeRange: { from: `${date}T00:00:00Z`, to: `${date}T23:59:59Z` },
