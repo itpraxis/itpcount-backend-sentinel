@@ -173,20 +173,21 @@ const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) 
                     sampleType: "AUTO" 
                 },
                 evalscript: `
-                    //VERSION=3
-                    function setup() {
-                        return {
-                            input: [{ bands: ["B08", "B04"], units: "REFLECTANCE" }],
-                            output: { bands: 1, sampleType: "AUTO" }
-                        };
-                    }
-                    function evaluatePixel(samples) {
-                        const nir = samples.B08;
-                        const red = samples.B04;
-                        const ndvi = (nir - red) / (nir + red);
-                        const normalizedNdvi = (ndvi + 1) / 2;
-                        return [normalizedNdvi];
-                    }
+				//VERSION=3
+				function setup() {
+					return {
+						input: [{ bands: ["B08", "B04"], units: "REFLECTANCE" }],
+						// ✅ Corrige esta línea:
+						output: { bands: 1 }
+					};
+				}
+				function evaluatePixel(samples) {
+					const nir = samples.B08;
+					const red = samples.B04;
+					const ndvi = (nir - red) / (nir + red);
+					const normalizedNdvi = (ndvi + 1) / 2;
+					return [normalizedNdvi];
+					}
                 `
             };
             const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
