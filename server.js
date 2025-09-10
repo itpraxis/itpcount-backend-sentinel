@@ -241,7 +241,6 @@ const getNdviAverage2 = async ({ geometry, date }) => {
                     {
                         identifier: "default",
                         format: { type: "application/json" }
-                        // ❌ LÍNEA ELIMINADA: 'sampleType' no es compatible aquí.
                     }
                 ]
             },
@@ -252,8 +251,8 @@ const getNdviAverage2 = async ({ geometry, date }) => {
                         input: [{ bands: ["B08", "B04", "dataMask"], units: "REFLECTANCE" }],
                         output: {
                             id: "default",
-                            bands: 1
-                            // ❌ LÍNEA ELIMINADA: 'sampleType' tampoco va aquí. La API lo infiere.
+                            bands: 1,
+                            sampleType: "FLOAT32" // ⬅️ Este es el único 'sampleType' necesario para la fórmula.
                         }
                     };
                 }
