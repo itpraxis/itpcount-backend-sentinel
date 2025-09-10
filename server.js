@@ -228,7 +228,7 @@ const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) 
  * @throws {Error} Si no se puede obtener el valor.
  * 
  */
-// ✅ FUNCIÓN CORREGIDA
+
 // ✅ FUNCIÓN CORREGIDA Y REVISADA
 const getNdviAverage2 = async ({ geometry, date }) => {
     const accessToken = await getAccessToken();
