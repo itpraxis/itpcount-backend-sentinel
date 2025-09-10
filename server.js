@@ -227,7 +227,7 @@ const getNdviAverage2 = async ({ geometry, date }) => {
                         coordinates: geometry
                     }
                 },
-                 [
+                data: [
                     {
                         dataFilter: {
                             timeRange: {
