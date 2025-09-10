@@ -214,11 +214,11 @@ const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) 
 };
 
 /**
- * ✅ FUNCIÓN CORREGIDA: Obtiene el valor promedio de NDVI para un polígono en una fecha.
+ * ✅ FUNCIÓN CORREGIDA: Obtiene el valor promedio de NDVI y porcentaje de cobertura vegetal
  * @param {object} params - Parámetros de la solicitud.
  * @param {array} params.geometry - Coordenadas del polígono.
  * @param {string} params.date - Fecha de la imagen.
- * @returns {number} El valor promedio de NDVI.
+ * @returns {object} Objeto con NDVI promedio y porcentaje de cobertura
  * @throws {Error} Si no se puede obtener el valor.
  */
 const getNdviAverage2 = async ({ geometry, date }) => {
@@ -264,8 +264,13 @@ function evaluatePixel(samples) {
   const nir = samples.B08;
   const red = samples.B04;
   const ndvi = (nir - red) / (nir + red);
-  const normalizedNdvi = (ndvi + 1) / 2;  // Normaliza de [-1,1] a [0,1]
-  return [normalizedNdvi * 255];  // Escala a [0,255] para UINT8
+  
+  // Clasificación simple de vegetación
+  if (ndvi > 0.3) {
+    return [255]; // Vegetación
+  } else {
+    return [0]; // No vegetación
+  }
 }`
         };
 
@@ -288,17 +293,36 @@ function evaluatePixel(samples) {
         
         let sum = 0;
         let count = 0;
+        let vegetationPixels = 0;
+        let totalPixels = 0;
         
         for (let i = 0; i < imageData.length; i += 4) {
-            const normalizedValue = imageData[i] / 255.0;  // Convierte de [0,255] a [0,1]
-            const ndvi = (normalizedValue * 2) - 1;  // Convierte de [0,1] a [-1,1]
-            if (!isNaN(ndvi)) {
+            const value = imageData[i];
+            if (value !== 0) { // Pixel válido (no fondo)
+                totalPixels++;
+                
+                // Calcular NDVI real para el promedio
+                const normalizedValue = value / 255.0;
+                const ndvi = (normalizedValue * 2) - 1;
                 sum += ndvi;
                 count++;
+                
+                // Contar píxeles con vegetación (valor > 0)
+                if (value > 0) {
+                    vegetationPixels++;
+                }
             }
         }
         
-        return count > 0 ? sum / count : null;
+        const avgNdvi = count > 0 ? sum / count : null;
+        const vegetationPercentage = totalPixels > 0 ? (vegetationPixels / totalPixels) * 100 : 0;
+        
+        return {
+            avgNdvi: avgNdvi,
+            vegetationPercentage: vegetationPercentage,
+            vegetationPixels: vegetationPixels,
+            totalPixels: totalPixels
+        };
     } catch (error) {
         console.error('❌ Error en getNdviAverage2:', error.message);
         throw error;
