@@ -230,13 +230,56 @@ const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) 
  */
 // ✅ FUNCIÓN CORREGIDA
 // ✅ FUNCIÓN CORREGIDA Y REVISADA
-// ✅ FUNCIÓN CORREGIDA Y MEJORADA PARA DEPURACIÓN
 const getNdviAverage2 = async ({ geometry, date }) => {
     const accessToken = await getAccessToken();
     try {
-        // ... (el payload es el mismo)
         const payload = {
-            // ...
+            input: {
+                bounds: { geometry: { type: "Polygon", coordinates: geometry } },
+                data: [
+                    {
+                        dataFilter: {
+                            timeRange: { from: `${date}T00:00:00Z`, to: `${date}T23:59:59Z` },
+                            maxCloudCoverage: 100
+                        },
+                        type: "sentinel-2-l2a"
+                    }
+                ]
+            },
+            output: {
+                resolution: 1500,
+                responses: [
+                    {
+                        identifier: "default",
+                        format: { type: "application/json" },
+						"sampleType": "FLOAT32" // <-- ¡Aquí va!
+                    }
+                ]
+            },
+            evalscript: `
+                //VERSION=3
+				function setup() {
+				  return {
+					input: [{ bands: ["B08", "B04", "dataMask"], units: "REFLECTANCE" }],
+					output: {
+					  id: "default",
+					  bands: 1
+					}
+				  };
+				}
+				function evaluatePixel(samples) {
+				  if (samples.dataMask === 0) {
+					return [NaN]; 
+				  }
+				  const nir = samples.B08;
+				  const red = samples.B04;
+				  const ndvi = (nir - red) / (nir + red);
+				  return [ndvi];
+				}
+            `,
+            process: {
+                mode: "STATS"
+            }
         };
 
         console.log('--- Payload enviado a Sentinel-Hub ---');
