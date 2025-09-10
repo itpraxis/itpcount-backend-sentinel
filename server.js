@@ -219,7 +219,6 @@ const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) 
 const getNdviAverage2 = async ({ geometry, date }) => {
     const accessToken = await getAccessToken();
     try {
-        // 1. Primero obtén la imagen como PNG con valores de NDVI
         const payload = {
             input: {
                 bounds: {
@@ -228,7 +227,7 @@ const getNdviAverage2 = async ({ geometry, date }) => {
                         coordinates: geometry
                     }
                 },
-                data: [
+                 [
                     {
                         dataFilter: {
                             timeRange: {
@@ -250,17 +249,18 @@ const getNdviAverage2 = async ({ geometry, date }) => {
 function setup() {
   return {
     input: [{ bands: ["B08", "B04", "dataMask"], units: "REFLECTANCE" }],
-    output: { bands: 1, sampleType: "FLOAT32" }
+    output: { bands: 1, sampleType: "UINT8" }  // ⬅️ CAMBIADO DE FLOAT32 A UINT8
   };
 }
 function evaluatePixel(samples) {
   if (samples.dataMask === 0) {
-    return [NaN];
+    return [0];  // ⬅️ Cambiado de NaN a 0 para UINT8
   }
   const nir = samples.B08;
   const red = samples.B04;
   const ndvi = (nir - red) / (nir + red);
-  return [ndvi];
+  const normalizedNdvi = (ndvi + 1) / 2;  // Normaliza de [-1,1] a [0,1]
+  return [normalizedNdvi * 255];  // Escala a [0,255] para UINT8
 }`
         };
 
@@ -278,16 +278,15 @@ function evaluatePixel(samples) {
             throw new Error(`Error en la API de Sentinel-Hub: ${error}`);
         }
 
-        // 2. Procesa la imagen para calcular el NDVI promedio
         const buffer = await response.arrayBuffer();
         const imageData = new Uint8Array(buffer);
         
         let sum = 0;
         let count = 0;
         
-        // Procesa cada píxel (asumiendo que es una imagen en escala de grises)
         for (let i = 0; i < imageData.length; i += 4) {
-            const ndvi = imageData[i] / 255.0; // Convierte de 0-255 a 0-1
+            const normalizedValue = imageData[i] / 255.0;  // Convierte de [0,255] a [0,1]
+            const ndvi = (normalizedValue * 2) - 1;  // Convierte de [0,1] a [-1,1]
             if (!isNaN(ndvi)) {
                 sum += ndvi;
                 count++;
