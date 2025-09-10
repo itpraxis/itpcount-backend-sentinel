@@ -241,6 +241,7 @@ const getNdviAverage2 = async ({ geometry, date }) => {
                     {
                         identifier: "default",
                         format: { type: "application/json" }
+                        // ❌ LÍNEA ELIMINADA: 'sampleType' no es compatible aquí.
                     }
                 ]
             },
@@ -251,8 +252,8 @@ const getNdviAverage2 = async ({ geometry, date }) => {
                         input: [{ bands: ["B08", "B04", "dataMask"], units: "REFLECTANCE" }],
                         output: {
                             id: "default",
-                            bands: 1,
-							sampleType: SampleType.FLOAT32,
+                            bands: 1
+                            // ❌ LÍNEA ELIMINADA: 'sampleType' tampoco va aquí. La API lo infiere.
                         }
                     };
                 }
@@ -270,6 +271,7 @@ const getNdviAverage2 = async ({ geometry, date }) => {
                 mode: "STATS"
             }
         };
+
         const response = await fetch('https://services.sentinel-hub.com/api/v1/process', {
             method: 'POST',
             headers: {
@@ -278,10 +280,12 @@ const getNdviAverage2 = async ({ geometry, date }) => {
             },
             body: JSON.stringify(payload)
         });
+
         if (!response.ok) {
             const error = await response.text();
             throw new Error(`Error en la API de Sentinel-Hub: ${error}`);
         }
+
         const data = await response.json();
         const averageNdvi = data.gdal.bands[0].stats.mean;
         return averageNdvi;
