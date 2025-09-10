@@ -263,8 +263,7 @@ const getNdviAverage2 = async ({ geometry, date }) => {
 					input: [{ bands: ["B08", "B04", "dataMask"], units: "REFLECTANCE" }],
 					output: {
 					  id: "default",
-					  bands: 1,
-                      sampleType: "FLOAT32" // <-- LA AGREGAMOS AQUÍ
+					  bands: 1
 					}
 				  };
 				}
