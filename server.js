@@ -251,58 +251,39 @@ const getNdviAverage2 = async ({ geometry, date }) => {
                 responses: [
                     {
                         identifier: "default",
-                        format: { type: "application/json" },
-						"sampleType": "FLOAT32" // <-- ¡Aquí va!
+                        format: { type: "application/json" }
+                        // REMOVEMOS LA LÍNEA sampleType DE AQUÍ
                     }
                 ]
             },
             evalscript: `
                 //VERSION=3
-				function setup() {
-				  return {
-					input: [{ bands: ["B08", "B04", "dataMask"], units: "REFLECTANCE" }],
-					output: {
-					  id: "default",
-					  bands: 1
-					}
-				  };
-				}
-				function evaluatePixel(samples) {
-				  if (samples.dataMask === 0) {
-					return [NaN]; 
-				  }
-				  const nir = samples.B08;
-				  const red = samples.B04;
-				  const ndvi = (nir - red) / (nir + red);
-				  return [ndvi];
-				}
+                function setup() {
+                    return {
+                        input: [{ bands: ["B08", "B04", "dataMask"], units: "REFLECTANCE" }],
+                        output: {
+                            id: "default",
+                            bands: 1,
+                            sampleType: "FLOAT32" // <-- LA AGREGAMOS AQUÍ
+                        }
+                    };
+                }
+                function evaluatePixel(samples) {
+                    if (samples.dataMask === 0) {
+                        return [NaN]; 
+                    }
+                    const nir = samples.B08;
+                    const red = samples.B04;
+                    const ndvi = (nir - red) / (nir + red);
+                    return [ndvi];
+                }
             `,
             process: {
                 mode: "STATS"
             }
         };
 
-        console.log('--- Payload enviado a Sentinel-Hub ---');
-        console.log(JSON.stringify(payload, null, 2));
-        console.log('-------------------------------------');
-
-        const response = await fetch('https://services.sentinel-hub.com/api/v1/process', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${accessToken}`
-            },
-            body: JSON.stringify(payload)
-        });
-
-        if (!response.ok) {
-            const error = await response.text();
-            throw new Error(`Error en la API de Sentinel-Hub: ${error}`);
-        }
-        const data = await response.json();
-        const averageNdvi = data.gdal.bands[0].stats.mean;
-        console.log(`✅ NDVI promedio para ${date}: ${averageNdvi}`);
-        return averageNdvi;
+        // ... (el resto de la función es igual)
     } catch (error) {
         console.error('❌ Error en getNdviAverage2:', error.message);
         throw error;
