@@ -417,15 +417,15 @@ app.post('/api/get-ndvi-averages', async (req, res) => {
     }
     try {
         const [avg1, avg2] = await Promise.all([
-            getNdviAverage2({ geometry: coordinates, date: dates[0] }),
-            getNdviAverage2({ geometry: coordinates, date: dates[1] })
+            // getNdviAverage2({ geometry: coordinates, date: dates[0] }),
+            // getNdviAverage2({ geometry: coordinates, date: dates[1] })
         ]);
 
         res.json({
             date1: dates[0],
-            avgNdvi1: avg1,
+            avgNdvi1: 0.5,   // avg1,
             date2: dates[1],
-            avgNdvi2: avg2
+            avgNdvi2: 0.8    //avg2
         });
     } catch (error) {
         console.error('❌ Error en el endpoint /get-ndvi-averages:', error.message);
