@@ -125,9 +125,14 @@ const getAvailableDates = async (bbox, maxCloudCoverage) => {
         
         const catalogData = await catalogResponse.json();
         const availableDates = catalogData.features
-            .map(feature => feature.properties.datetime.split('T')[0])
-            .filter((value, index, self) => self.indexOf(value) === index)
-            .sort((a, b) => new Date(b) - new Date(a));
+            .map(feature => ({
+                date: feature.properties.datetime.split('T')[0],
+                cloudCover: feature.properties['eo:cloud_cover']
+            }))
+            .filter((value, index, self) => 
+                self.findIndex(f => f.date === value.date) === index
+            )
+            .sort((a, b) => new Date(b.date) - new Date(a.date));
             
         return availableDates;
     } catch (error) {
