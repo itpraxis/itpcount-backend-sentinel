@@ -251,27 +251,28 @@ const getNdviAverage2 = async ({ geometry, date }) => {
                 format: "image/png"
             },
             evalscript: `//VERSION=3
-function setup() {
-  return {
-    input: [{ bands: ["B08", "B04", "dataMask"], units: "REFLECTANCE" }],
-    output: { bands: 1, sampleType: "UINT8" }  // ⬅️ CAMBIADO DE FLOAT32 A UINT8
-  };
-}
-function evaluatePixel(samples) {
-  if (samples.dataMask === 0) {
-    return [0];  // ⬅️ Cambiado de NaN a 0 para UINT8
-  }
-  const nir = samples.B08;
-  const red = samples.B04;
-  const ndvi = (nir - red) / (nir + red);
-  
-  // Clasificación simple de vegetación
-  if (ndvi > 0.3) {
-    return [255]; // Vegetación
-  } else {
-    return [0]; // No vegetación
-  }
-}`
+			function setup() {
+			  return {
+				input: [{ bands: ["B08", "B04", "dataMask"], units: "REFLECTANCE" }],
+				output: { bands: 1, sampleType: "UINT8" }  // ⬅️ CAMBIADO DE FLOAT32 A UINT8
+			  };
+			}
+			function evaluatePixel(samples) {
+			  if (samples.dataMask === 0) {
+				return [0];  // ⬅️ Cambiado de NaN a 0 para UINT8
+			  }
+			  
+			  const nir = samples.B08;
+			  const red = samples.B04;
+			  const ndvi = (nir - red) / (nir + red);
+			  
+			  // Clasificación correcta de vegetación con umbral realista
+			  if (ndvi > 0.3) {
+				return [255]; // Vegetación significativa
+			  } else {
+				return [0]; // No vegetación o vegetación mínima
+			  }
+			}`
         };
 
         const response = await fetch('https://services.sentinel-hub.com/api/v1/process', {
@@ -307,8 +308,8 @@ function evaluatePixel(samples) {
                 sum += ndvi;
                 count++;
                 
-                // Contar píxeles con vegetación (valor > 0)
-                if (value > 0) {
+                // Contar píxeles con vegetación significativa
+                if (value === 255) {
                     vegetationPixels++;
                 }
             }
