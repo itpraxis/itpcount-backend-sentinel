@@ -1,4 +1,4 @@
-// server.js (versión definitiva - corregida y optimizada)
+// server.js (versión corregida - obtención de NDVI promedio)
 require('dotenv').config();
 console.log('🔑 CLIENT_ID cargado:', process.env.CLIENT_ID ? '✅ Sí' : '❌ No');
 console.log('🔐 CLIENT_SECRET cargado:', process.env.CLIENT_SECRET ? '✅ Sí' : '❌ No');
@@ -209,26 +209,32 @@ const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) 
 };
 
 /**
- * ✅ NUEVA FUNCIÓN: Obtiene el valor promedio de NDVI para un polígono en una fecha.
+ * ✅ FUNCIÓN CORREGIDA: Obtiene el valor promedio de NDVI para un polígono en una fecha.
  * @param {object} params - Parámetros de la solicitud.
  * @param {array} params.geometry - Coordenadas del polígono.
  * @param {string} params.date - Fecha de la imagen.
  * @returns {number} El valor promedio de NDVI.
  * @throws {Error} Si no se puede obtener el valor.
- * 
  */
-
-// ✅ FUNCIÓN CORREGIDA Y REVISADA
 const getNdviAverage2 = async ({ geometry, date }) => {
     const accessToken = await getAccessToken();
     try {
+        // 1. Primero obtén la imagen como PNG con valores de NDVI
         const payload = {
             input: {
-                bounds: { geometry: { type: "Polygon", coordinates: geometry } },
+                bounds: {
+                    geometry: {
+                        type: "Polygon",
+                        coordinates: geometry
+                    }
+                },
                 data: [
                     {
                         dataFilter: {
-                            timeRange: { from: `${date}T00:00:00Z`, to: `${date}T23:59:59Z` },
+                            timeRange: {
+                                from: `${date}T00:00:00Z`,
+                                to: `${date}T23:59:59Z`
+                            },
                             maxCloudCoverage: 100
                         },
                         type: "sentinel-2-l2a"
@@ -236,39 +242,26 @@ const getNdviAverage2 = async ({ geometry, date }) => {
                 ]
             },
             output: {
-                resolution: 1500,
-                responses: [
-                    {
-                        identifier: "default",
-                        format: { type: "application/json" }
-                    }
-                ]
+                width: 512,
+                height: 512,
+                format: "image/png"
             },
-            evalscript: `
-                //VERSION=3
-                function setup() {
-                    return {
-                        input: [{ bands: ["B08", "B04", "dataMask"], units: "REFLECTANCE" }],
-                        output: {
-                            id: "default",
-                            bands: 1,
-                            sampleType: "FLOAT32" // ⬅️ Este es el único 'sampleType' necesario para la fórmula.
-                        }
-                    };
-                }
-                function evaluatePixel(samples) {
-                    if (samples.dataMask === 0) {
-                        return [NaN];
-                    }
-                    const nir = samples.B08;
-                    const red = samples.B04;
-                    const ndvi = (nir - red) / (nir + red);
-                    return [ndvi];
-                }
-            `,
-            process: {
-                mode: "STATS"
-            }
+            evalscript: `//VERSION=3
+function setup() {
+  return {
+    input: [{ bands: ["B08", "B04", "dataMask"], units: "REFLECTANCE" }],
+    output: { bands: 1, sampleType: "FLOAT32" }
+  };
+}
+function evaluatePixel(samples) {
+  if (samples.dataMask === 0) {
+    return [NaN];
+  }
+  const nir = samples.B08;
+  const red = samples.B04;
+  const ndvi = (nir - red) / (nir + red);
+  return [ndvi];
+}`
         };
 
         const response = await fetch('https://services.sentinel-hub.com/api/v1/process', {
@@ -285,15 +278,28 @@ const getNdviAverage2 = async ({ geometry, date }) => {
             throw new Error(`Error en la API de Sentinel-Hub: ${error}`);
         }
 
-        const data = await response.json();
-        const averageNdvi = data.gdal.bands[0].stats.mean;
-        return averageNdvi;
+        // 2. Procesa la imagen para calcular el NDVI promedio
+        const buffer = await response.arrayBuffer();
+        const imageData = new Uint8Array(buffer);
+        
+        let sum = 0;
+        let count = 0;
+        
+        // Procesa cada píxel (asumiendo que es una imagen en escala de grises)
+        for (let i = 0; i < imageData.length; i += 4) {
+            const ndvi = imageData[i] / 255.0; // Convierte de 0-255 a 0-1
+            if (!isNaN(ndvi)) {
+                sum += ndvi;
+                count++;
+            }
+        }
+        
+        return count > 0 ? sum / count : null;
     } catch (error) {
         console.error('❌ Error en getNdviAverage2:', error.message);
         throw error;
     }
 };
-
 
 // ==============================================
 // ENDPOINTS DE IMÁGENES CON LÓGICA DE REINTENTO
