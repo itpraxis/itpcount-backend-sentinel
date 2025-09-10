@@ -240,8 +240,7 @@ const getNdviAverage2 = async ({ geometry, date }) => {
                 responses: [
                     {
                         identifier: "default",
-                        format: { type: "application/json" },
-                        sampleType: "FLOAT32" // ⬅️ CORRECTO: El tipo de muestra es FLOAT32 para JSON
+                        format: { type: "application/json" }
                     }
                 ]
             },
