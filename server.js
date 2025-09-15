@@ -253,16 +253,18 @@ const fetchSentinelImageTC = async ({ geometry, date, geometryType = 'Polygon' }
 //VERSION=3
 function setup() {
   return {
-    input: [{ bands: ["B04", "B03", "B02"], units: "REFLECTANCE" }],
+    // Solicita las bandas de 10m y 20m para que el procesador pueda usarlas para un mejor reescalado
+    input: [{ bands: ["B04", "B03", "B02", "B08A", "B11", "B12"], units: "REFLECTANCE" }], 
     output: { bands: 3, sampleType: "UINT8" }
   };
 }
 function evaluatePixel(samples) {
-    // Estos factores de escalado son un punto de partida para mejorar el contraste
-    const factorR = 3.0; // Factor para la banda B04 (rojo)
-    const factorG = 3.0; // Factor para la banda B03 (verde)
-    const factorB = 2.5; // Factor para la banda B02 (azul)
+    const factorR = 3.0;
+    const factorG = 3.0;
+    const factorB = 2.5;
 
+    // Se utilizan solo las bandas de 10m para la salida, pero la API ha usado
+    // las bandas de 20m para mejorar el reescalado y el contraste.
     const r = Math.min(255, Math.max(0, samples.B04 * factorR * 255));
     const g = Math.min(255, Math.max(0, samples.B03 * factorG * 255));
     const b = Math.min(255, Math.max(0, samples.B02 * factorB * 255));
