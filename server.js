@@ -240,13 +240,14 @@ const fetchSentinelImageTC = async ({ geometry, date, geometryType = 'Polygon' }
             ]
         },
         output: {
-            width: 512,
-            height: 512,
-            format: "image/png",
-            upsampling: "NEAREST",
-            downsampling: "NEAREST",
-            bands: 3,
-            sampleType: "UINT8" // ⬅️ Importante: UINT8 para imágenes RGB
+        width: 512,
+        height: 512,
+        format: "image/png",
+        // ✅ Cambiar aquí para mejorar la calidad
+        upsampling: "BICUBIC", 
+        downsampling: "BICUBIC",
+        bands: 3,
+        sampleType: "UINT8"
         },
 		evalscript: `
 //VERSION=3
