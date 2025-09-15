@@ -264,7 +264,7 @@ const fetchSentinelImageTC = async ({ geometry, date, geometryType = 'Polygon' }
 		  const minVal = [0.04, 0.04, 0.04]; 
 		  const maxVal = [0.2, 0.2, 0.2];
 
-		  // La función `saturate` limita los valores para que estén dentro del rango especificado
+		  // La función saturate limita los valores para que estén dentro del rango especificado
 		  // y luego los escala de [minVal, maxVal] a [0, 1].
 		  function applyStretch(val, min, max) {
 			return Math.max(0, Math.min(1, (val - min) / (max - min)));
