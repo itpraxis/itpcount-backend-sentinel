@@ -624,6 +624,88 @@ app.post('/api/test-ndvi', async (req, res) => {
     }
 });
 
+app.post('/api/sentinel2truecolor', async (req, res) => {
+    const { coordinates, date } = req.body;
+    if (!coordinates || !date) {
+        return res.status(400).json({ error: 'Faltan parámetros: coordinates y date' });
+    }
+    try {
+        const accessToken = await getAccessToken();
+        const payload = {
+            input: {
+                bounds: {
+                    geometry: {
+                        type: "Polygon",
+                        coordinates: coordinates
+                    }
+                },
+                data: [
+                    {
+                        dataFilter: {
+                            timeRange: { from: `${date}T00:00:00Z`, to: `${date}T23:59:59Z` },
+                            maxCloudCoverage: 100
+                        },
+                        type: "sentinel-2-l2a"
+                    }
+                ]
+            },
+            output: {
+                width: 512,
+                height: 512,
+                format: "image/png",
+                bands: 3 // ⬅️ Importante: 3 bandas para RGB
+            },
+            evalscript: `
+                //VERSION=3
+                function setup() {
+                    return {
+                        input: [{ bands: ["B04", "B03", "B02"], units: "REFLECTANCE" }],
+                        output: { bands: 3, sampleType: "UINT8" }
+                    };
+                }
+                function evaluatePixel(samples) {
+                    // Escala los valores de reflectancia a 0-255
+                    const r = Math.min(255, Math.max(0, samples.B04 * 255));
+                    const g = Math.min(255, Math.max(0, samples.B03 * 255));
+                    const b = Math.min(255, Math.max(0, samples.B02 * 255));
+                    return [r, g, b];
+                }
+            `
+        };
+
+        const response = await fetch('https://services.sentinel-hub.com/api/v1/process', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${accessToken}`
+            },
+            body: JSON.stringify(payload)
+        });
+
+        if (!response.ok) {
+            const error = await response.text();
+            throw new Error(`Error en la API de Sentinel-Hub: ${error}`);
+        }
+
+        const buffer = await response.arrayBuffer();
+        const base64 = Buffer.from(buffer).toString('base64');
+        const url = `data:image/png;base64,${base64}`;
+
+        res.json({
+            url: url,
+            usedDate: date,
+            bbox: polygonToBbox(coordinates)
+        });
+    } catch (error) {
+        console.error('❌ Error en /sentinel2truecolor:', error.message);
+        res.status(500).json({
+            error: error.message,
+            suggestion: "Verifica que las coordenadas del polígono sean válidas."
+        });
+    }
+});
+
+
 app.listen(port, '0.0.0.0', () => {
     console.log(`✅ Backend listo en http://localhost:${port}`);
 });
