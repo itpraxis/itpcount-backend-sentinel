@@ -252,24 +252,22 @@ const fetchSentinelImageTC = async ({ geometry, date, geometryType = 'Polygon' }
 //VERSION=3
 function setup() {
   return {
-    input: [{ bands: ["B04", "B03", "B02", "B08"], units: "REFLECTANCE" }],
+    input: [{ bands: ["B04", "B03", "B02"], units: "REFLECTANCE" }],
     output: { bands: 3, sampleType: "UINT8" }
   };
 }
-
 function evaluatePixel(samples) {
-  // Coeficientes de contraste y gamma optimizados para vegetación
-  const red = Math.min(255, samples.B04 * 3.5 * 255);
-  const green = Math.min(255, samples.B08 * 3.5 * 255); // Usamos B08 (NIR) en el canal verde
-  const blue = Math.min(255, samples.B02 * 2.5 * 255);
+    // Estos factores de escalado son un punto de partida para mejorar el contraste
+    const factorR = 3.0; // Factor para la banda B04 (rojo)
+    const factorG = 3.0; // Factor para la banda B03 (verde)
+    const factorB = 2.5; // Factor para la banda B02 (azul)
 
-  // Escalar los valores para la salida
-  const r = Math.round(red);
-  const g = Math.round(green);
-  const b = Math.round(blue);
-
-  return [r, g, b];
-}		
+    const r = Math.min(255, Math.max(0, samples.B04 * factorR * 255));
+    const g = Math.min(255, Math.max(0, samples.B03 * factorG * 255));
+    const b = Math.min(255, Math.max(0, samples.B02 * factorB * 255));
+    
+    return [r, g, b];
+}	
 		`		
     };
 
