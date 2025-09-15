@@ -213,6 +213,80 @@ const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) 
     };
 };
 
+
+/**
+ * Intenta obtener una imagen de Sentinel-Hub con reintentos.
+ * @param {object} params - Parámetros de la solicitud.
+ * @param {array} params.geometry - Coordenadas del polígono o bbox.
+ * @param {string} params.date - Fecha inicial.
+ * @param {string} params.geometryType - 'Polygon' o 'bbox'.
+ * @returns {object} Un objeto con la URL de la imagen y la fecha utilizada.
+ * @throws {Error} Si no se encuentra una imagen después de todos los reintentos.
+ */
+const fetchSentinelImageTC = async ({ geometry, date, geometryType = 'Polygon' }) => {
+    const accessToken = await getAccessToken();
+    const payload = {
+        input: {
+            bounds: geometryType === 'Polygon' ? { geometry: { type: "Polygon", coordinates: geometry } } : { bbox: geometry },
+            data: [
+                {
+                    dataFilter: {
+                        timeRange: { from: `${date}T00:00:00Z`, to: `${date}T23:59:59Z` },
+                        maxCloudCoverage: 100
+                    },
+                    type: "sentinel-2-l2a"
+                }
+            ]
+        },
+        output: {
+			width: 512,
+			height: 512,
+			format: "image/png",
+            upsampling: "NEAREST",
+            downsampling: "NEAREST",
+			bands: 3, // ⬅️ Importante: 3 bandas para RGB			
+            sampleType: "UINT8" // ⬅️ CORRECCIÓN: Cambiado de AUTO a UINT8 para imágenes
+        },
+        evalscript: `
+            //VERSION=3
+            function setup() {
+                return {
+					input: [{ bands: ["B04", "B03", "B02"], units: "REFLECTANCE" }],
+                    output: { bands: 3 }
+                };
+            }
+            function evaluatePixel(samples) {
+				// Escala los valores de reflectancia a 0-255
+				const r = Math.min(255, Math.max(0, samples.B04 * 255));
+				const g = Math.min(255, Math.max(0, samples.B03 * 255));
+				const b = Math.min(255, Math.max(0, samples.B02 * 255));
+				return [r, g, b];
+            }
+        `
+    };
+    const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${accessToken}`
+        },
+        body: JSON.stringify(payload)
+    });
+    if (!imageResponse.ok) {
+        const error = await imageResponse.text();
+        console.error('❌ Error de la API de Sentinel-Hub:', error);
+        throw new Error(`Error en la imagen para ${date}: ${error}`);
+    }
+    const buffer = await imageResponse.arrayBuffer();
+    const base64 = Buffer.from(buffer).toString('base64');
+    return {
+        url: `data:image/png;base64,${base64}`,
+        usedDate: date,
+        bbox: geometryType === 'Polygon' ? polygonToBbox(geometry) : geometry
+    };
+};
+
+
 /**
  * ✅ FUNCIÓN CORREGIDA: Obtiene el valor promedio de NDVI y porcentaje de cobertura vegetal
  * @param {object} params - Parámetros de la solicitud.
@@ -630,77 +704,13 @@ app.post('/api/sentinel2truecolor', async (req, res) => {
         return res.status(400).json({ error: 'Faltan parámetros: coordinates y date' });
     }
     try {
-        const accessToken = await getAccessToken();
-        const payload = {
-            input: {
-                bounds: {
-                    geometry: {
-                        type: "Polygon",
-                        coordinates: coordinates
-                    }
-                },
-                data: [
-                    {
-                        dataFilter: {
-                            timeRange: { from: `${date}T00:00:00Z`, to: `${date}T23:59:59Z` },
-                            maxCloudCoverage: 100
-                        },
-                        type: "sentinel-2-l2a"
-                    }
-                ]
-            },
-            output: {
-                width: 512,
-                height: 512,
-                format: "image/png",
-                bands: 3 // ⬅️ Importante: 3 bandas para RGB
-            },
-            evalscript: `
-                //VERSION=3
-                function setup() {
-                    return {
-                        input: [{ bands: ["B04", "B03", "B02"], units: "REFLECTANCE" }],
-                        output: { bands: 3, sampleType: "UINT8" }
-                    };
-                }
-                function evaluatePixel(samples) {
-                    // Escala los valores de reflectancia a 0-255
-                    const r = Math.min(255, Math.max(0, samples.B04 * 255));
-                    const g = Math.min(255, Math.max(0, samples.B03 * 255));
-                    const b = Math.min(255, Math.max(0, samples.B02 * 255));
-                    return [r, g, b];
-                }
-            `
-        };
-
-        const response = await fetch('https://services.sentinel-hub.com/api/v1/process', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${accessToken}`
-            },
-            body: JSON.stringify(payload)
-        });
-
-        if (!response.ok) {
-            const error = await response.text();
-            throw new Error(`Error en la API de Sentinel-Hub: ${error}`);
-        }
-
-        const buffer = await response.arrayBuffer();
-        const base64 = Buffer.from(buffer).toString('base64');
-        const url = `data:image/png;base64,${base64}`;
-
-        res.json({
-            url: url,
-            usedDate: date,
-            bbox: polygonToBbox(coordinates)
-        });
+        const result = await fetchSentinelImageTC({ geometry: coordinates, date, geometryType: 'Polygon' });
+        res.json(result);
     } catch (error) {
         console.error('❌ Error en /sentinel2truecolor:', error.message);
         res.status(500).json({
             error: error.message,
-            suggestion: "Verifica que las coordenadas del polígono sean válidas."
+            suggestion: "Verifica que las coordenadas del polígono sean válidas y que el área esté en tierra firme"
         });
     }
 });
