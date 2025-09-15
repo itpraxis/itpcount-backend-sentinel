@@ -248,23 +248,22 @@ const fetchSentinelImageTC = async ({ geometry, date, geometryType = 'Polygon' }
             bands: 3,
             sampleType: "UINT8" // ⬅️ Importante: UINT8 para imágenes RGB
         },
-        evalscript: `
-			//VERSION=3
-			function setup() {
-				return {
-					input: [{ bands: ["B04", "B03", "B02"], units: "REFLECTANCE" }],
-					output: { bands: 3 }
-				};
-			}
-			function evaluatePixel(samples) {
-				// Escalar valores de reflectancia [0,1] a [0,255]
-				const r = Math.min(255, Math.max(0, samples.B04 * 255));
-				const g = Math.min(255, Math.max(0, samples.B03 * 255));
-				const b = Math.min(255, Math.max(0, samples.B02 * 255));
-				return [r, g, b];
-			}			
-			
-        `
+		evalscript: `
+		//VERSION=3
+		function setup() {
+			return {
+				input: [{ bands: ["B04", "B03", "B02"], units: "REFLECTANCE" }],
+				output: { bands: 3, sampleType: "UINT8" }
+			};
+		}
+		function evaluatePixel(samples) {
+			// Escalar los valores de reflectancia de [0,1] a [0,255]
+			const r = Math.min(255, Math.max(0, samples.B04 * 255));
+			const g = Math.min(255, Math.max(0, samples.B03 * 255));
+			const b = Math.min(255, Math.max(0, samples.B02 * 255));
+			return [r, g, b];
+		}
+		`		
     };
 
     const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
