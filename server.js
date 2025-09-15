@@ -251,18 +251,37 @@ const fetchSentinelImageTC = async ({ geometry, date, geometryType = 'Polygon' }
 		evalscript: `
 		//VERSION=3
 		function setup() {
-			return {
-				input: [{ bands: ["B04", "B03", "B02"], units: "REFLECTANCE" }],
-				output: { bands: 3, sampleType: "UINT8" }
-			};
+		  return {
+			input: [{ bands: ["B04", "B03", "B02"], units: "REFLECTANCE" }],
+			output: { bands: 3, sampleType: "UINT8" }
+		  };
 		}
+
 		function evaluatePixel(samples) {
-			// Escalar los valores de reflectancia de [0,1] a [0,255]
-			const r = Math.min(255, Math.max(0, samples.B04 * 255));
-			const g = Math.min(255, Math.max(0, samples.B03 * 255));
-			const b = Math.min(255, Math.max(0, samples.B02 * 255));
-			return [r, g, b];
-		}
+		  // Coeficientes para el ajuste de contraste, típicos para Sentinel-2.
+		  // Estos valores (percentiles 0.04 y 0.2) son puntos de corte
+		  // que ayudan a eliminar los valores de píxeles más extremos (oscuros y brillantes).
+		  const minVal = [0.04, 0.04, 0.04]; 
+		  const maxVal = [0.2, 0.2, 0.2];
+
+		  // La función `saturate` limita los valores para que estén dentro del rango especificado
+		  // y luego los escala de [minVal, maxVal] a [0, 1].
+		  function applyStretch(val, min, max) {
+			return Math.max(0, Math.min(1, (val - min) / (max - min)));
+		  }
+
+		  // Aplicar el estiramiento a cada banda
+		  const r = applyStretch(samples.B04, minVal[0], maxVal[0]);
+		  const g = applyStretch(samples.B03, minVal[1], maxVal[1]);
+		  const b = applyStretch(samples.B02, minVal[2], maxVal[2]);
+
+		  // Escalar los valores de [0,1] a [0,255] para la salida de la imagen
+		  const red = Math.round(r * 255);
+		  const green = Math.round(g * 255);
+		  const blue = Math.round(b * 255);
+		  
+		  return [red, green, blue];
+		}		
 		`		
     };
 
