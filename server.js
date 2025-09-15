@@ -166,8 +166,8 @@ const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) 
             ]
         },
         output: {
-            width: 512,
-            height: 512,
+            width: 1024,
+            height: 1024,
             format: "image/png",
             upsampling: "NEAREST",
             downsampling: "NEAREST",
@@ -240,8 +240,8 @@ const fetchSentinelImageTC = async ({ geometry, date, geometryType = 'Polygon' }
             ]
         },
         output: {
-        width: 512,
-        height: 512,
+        width: 1024,
+        height: 1024,
         format: "image/png",
         // ✅ Cambiar aquí para mejorar la calidad
         upsampling: "BICUBIC", 
@@ -331,8 +331,8 @@ const getNdviAverage2 = async ({ geometry, date }) => {
                 ]
             },
             output: {
-                width: 512,
-                height: 512,
+                width: 1024,
+                height: 1024,
                 format: "image/png"
             },
             evalscript: `//VERSION=3
