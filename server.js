@@ -225,6 +225,7 @@ const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) 
  */
 const fetchSentinelImageTC = async ({ geometry, date, geometryType = 'Polygon' }) => {
     const accessToken = await getAccessToken();
+    
     const payload = {
         input: {
             bounds: geometryType === 'Polygon' ? { geometry: { type: "Polygon", coordinates: geometry } } : { bbox: geometry },
@@ -239,31 +240,32 @@ const fetchSentinelImageTC = async ({ geometry, date, geometryType = 'Polygon' }
             ]
         },
         output: {
-			width: 512,
-			height: 512,
-			format: "image/png",
+            width: 512,
+            height: 512,
+            format: "image/png",
             upsampling: "NEAREST",
             downsampling: "NEAREST",
-			bands: 3 // ⬅️ Importante: 3 bandas para RGB			
-            // sampleType: "UINT8" // ⬅️ CORRECCIÓN: Cambiado de AUTO a UINT8 para imágenes
+            bands: 3,
+            sampleType: "UINT8" // ⬅️ Importante: UINT8 para imágenes RGB
         },
         evalscript: `
             //VERSION=3
             function setup() {
                 return {
-					input: [{ bands: ["B04", "B03", "B02"], units: "REFLECTANCE" }],
-                    output: { bands: 3 }
+                    input: [{ bands: ["B04", "B03", "B02"], units: "REFLECTANCE" }],
+                    output: { bands: 3, sampleType: "UINT8" }
                 };
             }
             function evaluatePixel(samples) {
-				// Escala los valores de reflectancia a 0-255
-				const r = Math.min(255, Math.max(0, samples.B04 * 255));
-				const g = Math.min(255, Math.max(0, samples.B03 * 255));
-				const b = Math.min(255, Math.max(0, samples.B02 * 255));
-				return [r, g, b];
+                // Escalar los valores de reflectancia de [0,1] a [0,255]
+                const r = Math.min(255, Math.max(0, samples.B04 * 255));
+                const g = Math.min(255, Math.max(0, samples.B03 * 255));
+                const b = Math.min(255, Math.max(0, samples.B02 * 255));
+                return [r, g, b];
             }
         `
     };
+
     const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
         method: 'POST',
         headers: {
@@ -272,13 +274,16 @@ const fetchSentinelImageTC = async ({ geometry, date, geometryType = 'Polygon' }
         },
         body: JSON.stringify(payload)
     });
+
     if (!imageResponse.ok) {
         const error = await imageResponse.text();
-        console.error('❌ Error de la API de Sentinel-Hub:', error);
+        console.error('❌ Error en la API de Sentinel-Hub:', error);
         throw new Error(`Error en la imagen para ${date}: ${error}`);
     }
+
     const buffer = await imageResponse.arrayBuffer();
     const base64 = Buffer.from(buffer).toString('base64');
+
     return {
         url: `data:image/png;base64,${base64}`,
         usedDate: date,
