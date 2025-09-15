@@ -252,24 +252,25 @@ const fetchSentinelImageTC = async ({ geometry, date, geometryType = 'Polygon' }
 		evalscript: `
 //VERSION=3
 function setup() {
+  // Ahora solicitamos la banda B08 de 10m en lugar de la B08A
   return {
-    // Solicita las bandas de 10m y 20m para que el procesador pueda usarlas para un mejor reescalado
-    input: [{ bands: ["B04", "B03", "B02", "B08A", "B11", "B12"], units: "REFLECTANCE" }], 
+    input: [{ bands: ["B04", "B03", "B02", "B08"], units: "REFLECTANCE" }],
     output: { bands: 3, sampleType: "UINT8" }
   };
 }
-function evaluatePixel(samples) {
-    const factorR = 3.0;
-    const factorG = 3.0;
-    const factorB = 2.5;
 
-    // Se utilizan solo las bandas de 10m para la salida, pero la API ha usado
-    // las bandas de 20m para mejorar el reescalado y el contraste.
-    const r = Math.min(255, Math.max(0, samples.B04 * factorR * 255));
-    const g = Math.min(255, Math.max(0, samples.B03 * factorG * 255));
-    const b = Math.min(255, Math.max(0, samples.B02 * factorB * 255));
-    
-    return [r, g, b];
+function evaluatePixel(samples) {
+  // Los factores de escalado siguen siendo los mismos
+  const factorR = 3.0; 
+  const factorG = 3.0; 
+  const factorB = 2.5; 
+
+  // Utilizamos las bandas B04, B03, B02 para la salida
+  const r = Math.min(255, Math.max(0, samples.B04 * factorR * 255));
+  const g = Math.min(255, Math.max(0, samples.B03 * factorG * 255));
+  const b = Math.min(255, Math.max(0, samples.B02 * factorB * 255));
+  
+  return [r, g, b];
 }	
 		`		
     };
