@@ -226,54 +226,54 @@ const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) 
 const fetchSentinelImageTC = async ({ geometry, date, geometryType = 'Polygon' }) => {
     const accessToken = await getAccessToken();
     
-    const payload = {
-        input: {
-            bounds: geometryType === 'Polygon' ? { geometry: { type: "Polygon", coordinates: geometry } } : { bbox: geometry },
-            data: [
-                {
-                    dataFilter: {
-                        timeRange: { from: `${date}T00:00:00Z`, to: `${date}T23:59:59Z` },
-                        maxCloudCoverage: 100
-                    },
-                    type: "sentinel-2-l2a"
-                }
-            ]
-        },
-        output: {
+const payload = {
+    input: {
+        bounds: geometryType === 'Polygon' 
+            ? { geometry: { type: "Polygon", coordinates: geometry } } 
+            : { bbox: geometry },
+        data: [
+            {
+                type: "sentinel-2-l2a",
+                dataFilter: {
+                    timeRange: { from: `${date}T00:00:00Z`, to: `${date}T23:59:59Z` },
+                    maxCloudCoverage: 20 // ⬅️ ¡Mejor!
+                },
+                mosaicking: "SCENE" // ⬅️ ¡Mejor!
+            }
+        ]
+    },
+    output: {
         width: 1024,
         height: 1024,
         format: "image/png",
-        // ✅ Cambiar aquí para mejorar la calidad
-        upsampling: "BICUBIC", 
+        upsampling: "BICUBIC",
         downsampling: "BICUBIC",
+        resx: 10, // ⬅️ ¡CRUCIAL!
+        resy: 10, // ⬅️ ¡CRUCIAL!
         bands: 3,
         sampleType: "UINT8"
-        },
-		evalscript: `
+    },
+    evalscript: `
 //VERSION=3
+
 function setup() {
-  // Ahora solicitamos la banda B08 de 10m en lugar de la B08A
   return {
-    input: [{ bands: ["B04", "B03", "B02", "B08"], units: "REFLECTANCE" }],
+    input: [{ bands: ["B04", "B03", "B02"], units: "REFLECTANCE" }],
     output: { bands: 3, sampleType: "UINT8" }
   };
 }
 
-function evaluatePixel(samples) {
-  // Los factores de escalado siguen siendo los mismos
-  const factorR = 3.0; 
-  const factorG = 3.0; 
-  const factorB = 2.5; 
+const minVal = 0.0;
+const maxVal = 0.3; // Ajusta según necesites
 
-  // Utilizamos las bandas B04, B03, B02 para la salida
-  const r = Math.min(255, Math.max(0, samples.B04 * factorR * 255));
-  const g = Math.min(255, Math.max(0, samples.B03 * factorG * 255));
-  const b = Math.min(255, Math.max(0, samples.B02 * factorB * 255));
-  
-  return [r, g, b];
-}	
-		`		
-    };
+function evaluatePixel(samples) {
+  let val = [samples.B04, samples.B03, samples.B02];
+  let imgVals = val.map(v => 255 * (v - minVal) / (maxVal - minVal));
+  imgVals = imgVals.map(v => Math.max(0, Math.min(255, v)));
+  return imgVals;
+}
+    `
+};
 
     const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
         method: 'POST',
