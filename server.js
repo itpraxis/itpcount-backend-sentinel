@@ -231,7 +231,7 @@ const payload = {
         bounds: geometryType === 'Polygon' 
             ? { geometry: { type: "Polygon", coordinates: geometry } } 
             : { bbox: geometry },
-        data: [  // ⚠️ ¡Faltaba "data:" en tu versión anterior!
+        data: [  // ⚠️ ¡No olvides "data:"!
             {
                 type: "sentinel-2-l2a",
                 dataFilter: {
@@ -243,13 +243,16 @@ const payload = {
         ]
     },
     output: {
-        resx: 10,           // ✅ Resolución fija: 10 metros por píxel
-        resy: 10,           // ✅ ¡Sin width/height!
-        format: "image/png",
-        upsampling: "BICUBIC",
-        downsampling: "BICUBIC",
-        bands: 3,
-        sampleType: "UINT8"
+		width: 1024,
+		height: 1024,
+		format: "image/png",
+		upsampling: "BICUBIC",
+		downsampling: "BICUBIC",
+		bands: 3,
+		sampleType: "UINT8",
+		renderingHints: {
+			gamma: 0.8 // Ajusta entre 0.7 y 1.2
+		}
     },
     evalscript: `
 //VERSION=3
@@ -261,14 +264,16 @@ function setup() {
   };
 }
 
+// Ajusta estos valores según la escena
 const minVal = 0.0;
 const maxVal = 0.3;
 
 function evaluatePixel(samples) {
-  let val = [samples.B04, samples.B03, samples.B02];
-  let imgVals = val.map(v => 255 * (v - minVal) / (maxVal - minVal));
-  imgVals = imgVals.map(v => Math.max(0, Math.min(255, v)));
-  return imgVals;
+  return [
+    Math.max(0, Math.min(255, 255 * (samples.B04 - minVal) / (maxVal - minVal))),
+    Math.max(0, Math.min(255, 255 * (samples.B03 - minVal) / (maxVal - minVal))),
+    Math.max(0, Math.min(255, 255 * (samples.B02 - minVal) / (maxVal - minVal)))
+  ];
 }
     `
 };
