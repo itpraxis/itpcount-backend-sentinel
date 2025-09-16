@@ -231,25 +231,23 @@ const payload = {
         bounds: geometryType === 'Polygon' 
             ? { geometry: { type: "Polygon", coordinates: geometry } } 
             : { bbox: geometry },
-        data: [
+        data: [  // ⚠️ ¡Faltaba "data:" en tu versión anterior!
             {
                 type: "sentinel-2-l2a",
                 dataFilter: {
                     timeRange: { from: `${date}T00:00:00Z`, to: `${date}T23:59:59Z` },
-                    maxCloudCoverage: 20 // ⬅️ ¡Mejor!
+                    maxCloudCoverage: 20
                 },
-                mosaicking: "SCENE" // ⬅️ ¡Mejor!
+                mosaicking: "SCENE"
             }
         ]
     },
     output: {
-        width: 1024,
-        height: 1024,
+        resx: 10,           // ✅ Resolución fija: 10 metros por píxel
+        resy: 10,           // ✅ ¡Sin width/height!
         format: "image/png",
         upsampling: "BICUBIC",
         downsampling: "BICUBIC",
-        resx: 10, // ⬅️ ¡CRUCIAL!
-        resy: 10, // ⬅️ ¡CRUCIAL!
         bands: 3,
         sampleType: "UINT8"
     },
@@ -264,7 +262,7 @@ function setup() {
 }
 
 const minVal = 0.0;
-const maxVal = 0.3; // Ajusta según necesites
+const maxVal = 0.3;
 
 function evaluatePixel(samples) {
   let val = [samples.B04, samples.B03, samples.B02];
