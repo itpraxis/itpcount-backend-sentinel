@@ -892,8 +892,9 @@ function calculateOptimalImageSize(areaInSquareMeters, resolutionInMeters) {
     // Calcular el número de píxeles necesarios para cubrir ese lado
     let sizeInPixels = Math.round(sideLengthInMeters / resolutionInMeters);
 
-    // Establecer límites para evitar imágenes demasiado grandes o pequeñas
-    sizeInPixels = Math.max(256, Math.min(2048, sizeInPixels));
+    // 🆕 AJUSTE CLAVE: Reducir el tamaño mínimo de 256 a 128 píxeles
+    // Esto permite que polígonos muy pequeños se soliciten con una resolución más adecuada
+    sizeInPixels = Math.max(128, Math.min(2048, sizeInPixels));
 
     return sizeInPixels;
 }
