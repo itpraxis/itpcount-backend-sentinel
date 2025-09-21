@@ -733,6 +733,132 @@ app.post('/api/sentinel2truecolor', async (req, res) => {
 });
 
 
+// ==============================================
+// ✅ NUEVO ENDPOINT: /api/sentinel2highlight - Highlight Optimized Natural Color
+// ==============================================
+
+/**
+ * Obtiene una imagen Sentinel-2 con visualización "Highlight Optimized Natural Color".
+ * @param {object} params - Parámetros de la solicitud.
+ * @param {array} params.geometry - Coordenadas del polígono o bbox.
+ * @param {string} params.date - Fecha de la imagen.
+ * @param {string} params.geometryType - 'Polygon' o 'bbox'.
+ * @returns {object} Un objeto con la URL de la imagen, la fecha utilizada y el bbox.
+ */
+const fetchSentinelImageHighlight = async ({ geometry, date, geometryType = 'Polygon' }) => {
+    const accessToken = await getAccessToken();
+    
+    const payload = {
+        input: {
+            bounds: geometryType === 'Polygon' 
+                ? { geometry: { type: "Polygon", coordinates: geometry } } 
+                : { bbox: geometry },
+            data: [
+                {
+                    type: "sentinel-2-l2a",
+                    dataFilter: {
+                        timeRange: { from: `${date}T00:00:00Z`, to: `${date}T23:59:59Z` },
+                        maxCloudCoverage: 20
+                    },
+                    mosaicking: "SCENE"
+                }
+            ]
+        },
+        output: {
+            width: 1024,
+            height: 1024,
+            format: "image/png",
+            upsampling: "BICUBIC",
+            downsampling: "BICUBIC",
+            bands: 4, // 3 bandas de color + 1 de máscara (alpha)
+            sampleType: "UINT8"
+        },
+        evalscript: `
+//VERSION=3
+function setup() {
+    return {
+        input: [{
+            bands: [
+                "B04", // Red
+                "B03", // Green
+                "B02", // Blue
+                "dataMask" // Para máscara de datos
+            ],
+            units: "REFLECTANCE"
+        }],
+        output: {
+            bands: 4, // 3 bandas de color + 1 de máscara (alpha)
+            sampleType: "UINT8"
+        }
+    };
+}
+
+// Función para aplicar el ajuste de rango dinámico (DRA) a un canal
+function evaluatePixel(sample) {
+    // Valores para el ajuste de rango dinámico (DRA) - Estos son valores típicos para EO Browser
+    let minVal = 0.0;
+    let maxVal = 0.4; // Este es el valor clave que controla el brillo. 0.4 es un buen punto de partida.
+
+    // Aplicar DRA a cada canal
+    let red = (sample.B04 - minVal) / (maxVal - minVal);
+    let green = (sample.B03 - minVal) / (maxVal - minVal);
+    let blue = (sample.B02 - minVal) / (maxVal - minVal);
+
+    // Recortar valores fuera del rango [0, 1]
+    red = Math.max(0, Math.min(1, red));
+    green = Math.max(0, Math.min(1, green));
+    blue = Math.max(0, Math.min(1, blue));
+
+    // Devolver el color RGB y la máscara de datos (para transparencia)
+    return [red * 255, green * 255, blue * 255, sample.dataMask * 255];
+}
+        `
+    };
+
+    const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${accessToken}`
+        },
+        body: JSON.stringify(payload)
+    });
+
+    if (!imageResponse.ok) {
+        const error = await imageResponse.text();
+        console.error('❌ Error en la API de Sentinel-Hub (Highlight):', error);
+        throw new Error(`Error en la imagen Highlight para ${date}: ${error}`);
+    }
+
+    const buffer = await imageResponse.arrayBuffer();
+    const base64 = Buffer.from(buffer).toString('base64');
+
+    return {
+        url: `data:image/png;base64,${base64}`,
+        usedDate: date,
+        bbox: geometryType === 'Polygon' ? polygonToBbox(geometry) : geometry
+    };
+};
+
+// Endpoint para el frontend
+app.post('/api/sentinel2highlight', async (req, res) => {
+    const { coordinates, date } = req.body;
+    if (!coordinates || !date) {
+        return res.status(400).json({ error: 'Faltan parámetros: coordinates y date' });
+    }
+    try {
+        const result = await fetchSentinelImageHighlight({ geometry: coordinates, date, geometryType: 'Polygon' });
+        res.json(result);
+    } catch (error) {
+        console.error('❌ Error en /sentinel2highlight:', error.message);
+        res.status(500).json({
+            error: error.message,
+            suggestion: "Verifica que las coordenadas del polígono sean válidas y que el área esté en tierra firme"
+        });
+    }
+});
+
+
 app.listen(port, '0.0.0.0', () => {
     console.log(`✅ Backend listo en http://localhost:${port}`);
 });
