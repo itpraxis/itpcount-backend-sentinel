@@ -142,6 +142,49 @@ const getAvailableDates = async (bbox, maxCloudCoverage) => {
 };
 
 /**
+ * ✅ NUEVA: Calcula el área aproximada de un polígono a partir de su bounding box.
+ * @param {array} bbox - [minLon, minLat, maxLon, maxLat]
+ * @returns {number} Área en metros cuadrados.
+ */
+function calculatePolygonArea(bbox) {
+    const [minLon, minLat, maxLon, maxLat] = bbox;
+
+    // Aproximación usando la fórmula del área de un rectángulo en la superficie de la Tierra.
+    // La precisión es suficiente para nuestro propósito de escalar la imagen.
+    const earthRadius = 6371000; // Radio de la Tierra en metros
+
+    const lat1Rad = minLat * Math.PI / 180;
+    const lat2Rad = maxLat * Math.PI / 180;
+    const deltaLat = (maxLat - minLat) * Math.PI / 180;
+    const deltaLon = (maxLon - minLon) * Math.PI / 180;
+
+    // Área = (R^2) * Δλ * (sin(φ2) - sin(φ1))
+    const area = Math.pow(earthRadius, 2) * deltaLon * (Math.sin(lat2Rad) - Math.sin(lat1Rad));
+
+    return Math.abs(area);
+}
+
+/**
+ * ✅ NUEVA: Calcula el tamaño óptimo de la imagen en píxeles.
+ * @param {number} areaInSquareMeters - Área del polígono en metros cuadrados.
+ * @param {number} resolutionInMeters - Resolución deseada en metros por píxel.
+ * @returns {number} Tamaño en píxeles (ancho y alto).
+ */
+function calculateOptimalImageSize(areaInSquareMeters, resolutionInMeters) {
+    // Calcular la longitud del lado de un cuadrado con el mismo área
+    const sideLengthInMeters = Math.sqrt(areaInSquareMeters);
+
+    // Calcular el número de píxeles necesarios para cubrir ese lado
+    let sizeInPixels = Math.round(sideLengthInMeters / resolutionInMeters);
+
+    // 🆕 AJUSTE CLAVE: Reducir el tamaño mínimo de 256 a 128 píxeles
+    // Esto permite que polígonos muy pequeños se soliciten con una resolución más adecuada
+    sizeInPixels = Math.max(128, Math.min(2048, sizeInPixels));
+
+    return sizeInPixels;
+}
+
+/**
  * Intenta obtener una imagen de Sentinel-Hub con reintentos.
  * @param {object} params - Parámetros de la solicitud.
  * @param {array} params.geometry - Coordenadas del polígono o bbox.
@@ -152,6 +195,15 @@ const getAvailableDates = async (bbox, maxCloudCoverage) => {
  */
 const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) => {
     const accessToken = await getAccessToken();
+    
+    // ✅ NUEVO: Calcular el bbox y el área para determinar el tamaño óptimo
+    const bbox = geometryType === 'Polygon' ? polygonToBbox(geometry) : geometry;
+    if (!bbox) {
+        throw new Error('No se pudo calcular el bounding box.');
+    }
+    const areaInSquareMeters = calculatePolygonArea(bbox);
+    const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10); // 10m de resolución
+
     const payload = {
         input: {
             bounds: geometryType === 'Polygon' ? { geometry: { type: "Polygon", coordinates: geometry } } : { bbox: geometry },
@@ -166,8 +218,8 @@ const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) 
             ]
         },
         output: {
-            width: 1024,
-            height: 1024,
+            width: sizeInPixels, // ✅ Tamaño adaptativo
+            height: sizeInPixels, // ✅ Tamaño adaptativo
             format: "image/png",
             upsampling: "NEAREST",
             downsampling: "NEAREST",
@@ -209,7 +261,7 @@ const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) 
     return {
         url: `data:image/png;base64,${base64}`,
         usedDate: date,
-        bbox: geometryType === 'Polygon' ? polygonToBbox(geometry) : geometry
+        bbox: bbox // ✅ Usamos el bbox calculado
     };
 };
 
@@ -226,35 +278,43 @@ const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) 
 const fetchSentinelImageTC = async ({ geometry, date, geometryType = 'Polygon' }) => {
     const accessToken = await getAccessToken();
     
-const payload = {
-    input: {
-        bounds: geometryType === 'Polygon' 
-            ? { geometry: { type: "Polygon", coordinates: geometry } } 
-            : { bbox: geometry },
-        data: [  // ⚠️ ¡No olvides "data:"!
-            {
-                type: "sentinel-2-l2a",
-                dataFilter: {
-                    timeRange: { from: `${date}T00:00:00Z`, to: `${date}T23:59:59Z` },
-                    maxCloudCoverage: 20
-                },
-                mosaicking: "SCENE"
+    // ✅ NUEVO: Calcular el bbox y el área para determinar el tamaño óptimo
+    const bbox = geometryType === 'Polygon' ? polygonToBbox(geometry) : geometry;
+    if (!bbox) {
+        throw new Error('No se pudo calcular el bounding box.');
+    }
+    const areaInSquareMeters = calculatePolygonArea(bbox);
+    const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10); // 10m de resolución
+
+    const payload = {
+        input: {
+            bounds: geometryType === 'Polygon' 
+                ? { geometry: { type: "Polygon", coordinates: geometry } } 
+                : { bbox: geometry },
+            data: [  // ⚠️ ¡No olvides "data:"!
+                {
+                    type: "sentinel-2-l2a",
+                    dataFilter: {
+                        timeRange: { from: `${date}T00:00:00Z`, to: `${date}T23:59:59Z` },
+                        maxCloudCoverage: 20
+                    },
+                    mosaicking: "SCENE"
+                }
+            ]
+        },
+        output: {
+            width: sizeInPixels, // ✅ Tamaño adaptativo
+            height: sizeInPixels, // ✅ Tamaño adaptativo
+            format: "image/png",
+            upsampling: "BICUBIC",
+            downsampling: "BICUBIC",
+            bands: 3,
+            sampleType: "UINT8",
+            renderingHints: {
+                gamma: 0.8 // Ajusta entre 0.7 y 1.2
             }
-        ]
-    },
-    output: {
-		width: 1024,
-		height: 1024,
-		format: "image/png",
-		upsampling: "BICUBIC",
-		downsampling: "BICUBIC",
-		bands: 3,
-		sampleType: "UINT8",
-		renderingHints: {
-			gamma: 0.8 // Ajusta entre 0.7 y 1.2
-		}
-    },
-    evalscript: `
+        },
+        evalscript: `
 //VERSION=3
 
 function setup() {
@@ -276,7 +336,7 @@ function evaluatePixel(samples) {
   return imgVals;
 }
     `
-};
+    };
 
     const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
         method: 'POST',
@@ -299,7 +359,7 @@ function evaluatePixel(samples) {
     return {
         url: `data:image/png;base64,${base64}`,
         usedDate: date,
-        bbox: geometryType === 'Polygon' ? polygonToBbox(geometry) : geometry
+        bbox: bbox // ✅ Usamos el bbox calculado
     };
 };
 
@@ -315,6 +375,14 @@ function evaluatePixel(samples) {
 const getNdviAverage2 = async ({ geometry, date }) => {
     const accessToken = await getAccessToken();
     try {
+        // ✅ NUEVO: Calcular el bbox y el área para determinar el tamaño óptimo
+        const bbox = polygonToBbox(geometry);
+        if (!bbox) {
+            throw new Error('No se pudo calcular el bounding box.');
+        }
+        const areaInSquareMeters = calculatePolygonArea(bbox);
+        const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10); // 10m de resolución
+
         const payload = {
             input: {
                 bounds: {
@@ -337,8 +405,8 @@ const getNdviAverage2 = async ({ geometry, date }) => {
                 ]
             },
             output: {
-                width: 1024,
-                height: 1024,
+                width: sizeInPixels, // ✅ Tamaño adaptativo
+                height: sizeInPixels, // ✅ Tamaño adaptativo
                 format: "image/png"
             },
             evalscript: `//VERSION=3
@@ -855,49 +923,6 @@ function evaluatePixel(sample) {
         bbox: bbox
     };
 };
-
-/**
- * ✅ NUEVA: Calcula el área aproximada de un polígono a partir de su bounding box.
- * @param {array} bbox - [minLon, minLat, maxLon, maxLat]
- * @returns {number} Área en metros cuadrados.
- */
-function calculatePolygonArea(bbox) {
-    const [minLon, minLat, maxLon, maxLat] = bbox;
-
-    // Aproximación usando la fórmula del área de un rectángulo en la superficie de la Tierra.
-    // La precisión es suficiente para nuestro propósito de escalar la imagen.
-    const earthRadius = 6371000; // Radio de la Tierra en metros
-
-    const lat1Rad = minLat * Math.PI / 180;
-    const lat2Rad = maxLat * Math.PI / 180;
-    const deltaLat = (maxLat - minLat) * Math.PI / 180;
-    const deltaLon = (maxLon - minLon) * Math.PI / 180;
-
-    // Área = (R^2) * Δλ * (sin(φ2) - sin(φ1))
-    const area = Math.pow(earthRadius, 2) * deltaLon * (Math.sin(lat2Rad) - Math.sin(lat1Rad));
-
-    return Math.abs(area);
-}
-
-/**
- * ✅ NUEVA: Calcula el tamaño óptimo de la imagen en píxeles.
- * @param {number} areaInSquareMeters - Área del polígono en metros cuadrados.
- * @param {number} resolutionInMeters - Resolución deseada en metros por píxel.
- * @returns {number} Tamaño en píxeles (ancho y alto).
- */
-function calculateOptimalImageSize(areaInSquareMeters, resolutionInMeters) {
-    // Calcular la longitud del lado de un cuadrado con el mismo área
-    const sideLengthInMeters = Math.sqrt(areaInSquareMeters);
-
-    // Calcular el número de píxeles necesarios para cubrir ese lado
-    let sizeInPixels = Math.round(sideLengthInMeters / resolutionInMeters);
-
-    // 🆕 AJUSTE CLAVE: Reducir el tamaño mínimo de 256 a 128 píxeles
-    // Esto permite que polígonos muy pequeños se soliciten con una resolución más adecuada
-    sizeInPixels = Math.max(128, Math.min(2048, sizeInPixels));
-
-    return sizeInPixels;
-}
 
 // Endpoint para el frontend
 app.post('/api/sentinel2highlight', async (req, res) => {
