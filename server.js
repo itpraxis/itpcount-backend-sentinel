@@ -9,7 +9,7 @@ const app = express();
 
 // ✅ Configuración CORS mejorada (sin espacios al final)
 app.use(cors({
-  origin: ['https://itpraxis.cl', 'https://www.itpraxis.cl'],
+  origin: ['https://itpraxis.cl', 'https://www.itpraxis.cl'], // ✅ ESPACIOS ELIMINADOS
   methods: ['POST', 'GET'],
   allowedHeaders: ['Content-Type'],
   credentials: true
@@ -734,30 +734,46 @@ app.post('/api/sentinel2truecolor', async (req, res) => {
 
 
 // ==============================================
-// ✅ NUEVO ENDPOINT: /api/sentinel2highlight - Highlight Optimized Natural Color
+// ✅ NUEVO ENDPOINT: /api/sentinel2highlight - Highlight Optimized Natural Color (MEJORADO)
 // ==============================================
 
 /**
  * Obtiene una imagen Sentinel-2 con visualización "Highlight Optimized Natural Color".
  * @param {object} params - Parámetros de la solicitud.
- * @param {array} params.geometry - Coordenadas del polígono o bbox.
+ * @param {array} params.geometry - Coordenadas del polígono.
  * @param {string} params.date - Fecha de la imagen.
- * @param {string} params.geometryType - 'Polygon' o 'bbox'.
+ * @param {array} params.bbox - Bounding box del polígono [minLon, minLat, maxLon, maxLat].
  * @returns {object} Un objeto con la URL de la imagen, la fecha utilizada y el bbox.
  */
-const fetchSentinelImageHighlight = async ({ geometry, date, geometryType = 'Polygon' }) => {
+const fetchSentinelImageHighlight = async ({ geometry, date, bbox }) => {
     const accessToken = await getAccessToken();
-    
+
+    // ✅ NUEVO: Calcular el área aproximada del polígono en metros cuadrados
+    const areaInSquareMeters = calculatePolygonArea(bbox);
+
+    // ✅ NUEVO: Definir la resolución objetivo en metros por píxel
+    // Sentinel-2 L2A tiene una resolución nativa de 10m para las bandas RGB.
+    const targetResolutionInMeters = 10;
+
+    // ✅ NUEVO: Calcular el tamaño de la imagen en píxeles basado en el área y la resolución
+    const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, targetResolutionInMeters);
+
     const payload = {
         input: {
-            bounds: geometryType === 'Polygon' 
-                ? { geometry: { type: "Polygon", coordinates: geometry } } 
-                : { bbox: geometry },
+            bounds: {
+                geometry: {
+                    type: "Polygon",
+                    coordinates: geometry
+                }
+            },
             data: [
                 {
                     type: "sentinel-2-l2a",
                     dataFilter: {
-                        timeRange: { from: `${date}T00:00:00Z`, to: `${date}T23:59:59Z` },
+                        timeRange: {
+                            from: `${date}T00:00:00Z`,
+                            to: `${date}T23:59:59Z`
+                        },
                         maxCloudCoverage: 20
                     },
                     mosaicking: "SCENE"
@@ -765,11 +781,11 @@ const fetchSentinelImageHighlight = async ({ geometry, date, geometryType = 'Pol
             ]
         },
         output: {
-            width: 1024,
-            height: 1024,
+            width: sizeInPixels,
+            height: sizeInPixels,
             format: "image/png",
-            upsampling: "BICUBIC",
-            downsampling: "BICUBIC",
+            upsampling: "BICUBIC", // Mejor para ampliar
+            downsampling: "BICUBIC", // Mejor para reducir
             bands: 4, // 3 bandas de color + 1 de máscara (alpha)
             sampleType: "UINT8"
         },
@@ -836,9 +852,51 @@ function evaluatePixel(sample) {
     return {
         url: `data:image/png;base64,${base64}`,
         usedDate: date,
-        bbox: geometryType === 'Polygon' ? polygonToBbox(geometry) : geometry
+        bbox: bbox
     };
 };
+
+/**
+ * ✅ NUEVA: Calcula el área aproximada de un polígono a partir de su bounding box.
+ * @param {array} bbox - [minLon, minLat, maxLon, maxLat]
+ * @returns {number} Área en metros cuadrados.
+ */
+function calculatePolygonArea(bbox) {
+    const [minLon, minLat, maxLon, maxLat] = bbox;
+
+    // Aproximación usando la fórmula del área de un rectángulo en la superficie de la Tierra.
+    // La precisión es suficiente para nuestro propósito de escalar la imagen.
+    const earthRadius = 6371000; // Radio de la Tierra en metros
+
+    const lat1Rad = minLat * Math.PI / 180;
+    const lat2Rad = maxLat * Math.PI / 180;
+    const deltaLat = (maxLat - minLat) * Math.PI / 180;
+    const deltaLon = (maxLon - minLon) * Math.PI / 180;
+
+    // Área = (R^2) * Δλ * (sin(φ2) - sin(φ1))
+    const area = Math.pow(earthRadius, 2) * deltaLon * (Math.sin(lat2Rad) - Math.sin(lat1Rad));
+
+    return Math.abs(area);
+}
+
+/**
+ * ✅ NUEVA: Calcula el tamaño óptimo de la imagen en píxeles.
+ * @param {number} areaInSquareMeters - Área del polígono en metros cuadrados.
+ * @param {number} resolutionInMeters - Resolución deseada en metros por píxel.
+ * @returns {number} Tamaño en píxeles (ancho y alto).
+ */
+function calculateOptimalImageSize(areaInSquareMeters, resolutionInMeters) {
+    // Calcular la longitud del lado de un cuadrado con el mismo área
+    const sideLengthInMeters = Math.sqrt(areaInSquareMeters);
+
+    // Calcular el número de píxeles necesarios para cubrir ese lado
+    let sizeInPixels = Math.round(sideLengthInMeters / resolutionInMeters);
+
+    // Establecer límites para evitar imágenes demasiado grandes o pequeñas
+    sizeInPixels = Math.max(256, Math.min(2048, sizeInPixels));
+
+    return sizeInPixels;
+}
 
 // Endpoint para el frontend
 app.post('/api/sentinel2highlight', async (req, res) => {
@@ -846,8 +904,20 @@ app.post('/api/sentinel2highlight', async (req, res) => {
     if (!coordinates || !date) {
         return res.status(400).json({ error: 'Faltan parámetros: coordinates y date' });
     }
+
     try {
-        const result = await fetchSentinelImageHighlight({ geometry: coordinates, date, geometryType: 'Polygon' });
+        // Calcular el bbox del polígono
+        const bbox = polygonToBbox(coordinates);
+        if (!bbox) {
+            throw new Error('No se pudo calcular el bounding box del polígono.');
+        }
+
+        const result = await fetchSentinelImageHighlight({
+            geometry: coordinates,
+            date: date,
+            bbox: bbox // ✅ Pasamos el bbox para el cálculo del área
+        });
+
         res.json(result);
     } catch (error) {
         console.error('❌ Error en /sentinel2highlight:', error.message);
