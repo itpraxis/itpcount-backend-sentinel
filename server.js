@@ -372,12 +372,35 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
     if (!bbox) {
         throw new Error('No se pudo calcular el bounding box del polígono.');
     }
-    try {
-        const areaInSquareMeters = calculatePolygonArea(bbox);
-        const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10);
-        // ✅ NUEVO: Rango de búsqueda de tres días
-        const fromDate = new Date(date);
-        fromDate.setDate(fromDate.getDate() - 2); // 2 días antes de la fecha solicitada
+
+    const fromDate = new Date(date);
+    fromDate.setDate(fromDate.getDate() - 7);
+    const fromDateISO = fromDate.toISOString().split('T')[0];
+
+    // ✅ CORRECCIÓN: Calcular el área del polígono una sola vez
+    const polygonAreaInMeters = calculatePolygonArea(bbox);
+
+    const tryRequest = async (polarization) => {
+        const evalscript = `//VERSION=3
+function setup() {
+  return {
+    input: [{ bands: ["${polarization}", "dataMask"], units: "LINEAR_POWER" }],
+    output: { bands: 1, sampleType: "UINT8", format: "image/png" }
+  };
+}
+function evaluatePixel(samples) {
+  const linearValue = samples.${polarization};
+  if (!linearValue || samples.dataMask === 0) {
+    return [0];
+  }
+  const dbValue = 10 * Math.log10(linearValue);
+  const minDb = -25;
+  const maxDb = 0;
+  let mappedValue = Math.round((dbValue - minDb) / (maxDb - minDb) * 255);
+  mappedValue = Math.max(0, Math.min(255, mappedValue));
+  return [mappedValue];
+}`;
+
         const payload = {
             input: {
                 bounds: {
@@ -390,47 +413,28 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
                     {
                         dataFilter: {
                             timeRange: {
-                                from: `${fromDate.toISOString().split('T')[0]}T00:00:00Z`, // Inicio del rango
-                                to: `${date}T23:59:59Z` // Fin del rango
+                                from: `${fromDateISO}T00:00:00Z`,
+                                to: `${date}T23:59:59Z`
                             },
-                            polarization: "VH",
-                            // ✅ Eliminamos orbitDirection para ser más flexibles
+                            polarization: polarization
                         },
-                        type: "sentinel-1-grd",
-                        // ✅ CORRECCIÓN CLAVE: Usar mosaicking ORBIT
-                        mosaicking: "ORBIT"
+                        processing: {
+                            mosaicking: "ORBIT"
+                        },
+                        type: "sentinel-1-grd"
                     }
                 ]
             },
             output: {
-                width: sizeInPixels,
-                height: sizeInPixels,
+                // ✅ CORRECCIÓN CLAVE: Usamos la variable de área calculada
+                width: calculateOptimalImageSize(polygonAreaInMeters, 10),
+                height: calculateOptimalImageSize(polygonAreaInMeters, 10),
                 format: "image/png",
                 sampleType: "UINT8"
             },
-            evalscript: `//VERSION=3
-function setup() {
-  return {
-    input: [{ bands: ["VH", "dataMask"], units: "LINEAR_POWER" }],
-    output: { bands: 1, sampleType: "UINT8", format: "image/png" }
-  };
-}
-function evaluatePixel(samples) {
-  if (samples.dataMask === 0) {
-    return [0];
-  }
-  const vh_linear = samples.VH;
-  const vh_db = 10 * Math.log10(vh_linear);
-  // ✅ CORRECCIÓN: Ajustar el rango de mapeo a valores más realistas para tierra
-  const minDb = -25; // Valor mínimo típico para áreas terrestres
-  const maxDb = 0;   // Valor máximo típico para áreas terrestres
-  // Mapear el valor de dB al rango 0-255
-  let mappedValue = Math.round((vh_db - minDb) / (maxDb - minDb) * 255);
-  // Asegurar que el valor esté dentro del rango [0, 255]
-  mappedValue = Math.max(0, Math.min(255, mappedValue));
-  return [mappedValue];
-}`
+            evalscript: evalscript
         };
+
         const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
             method: 'POST',
             headers: {
@@ -439,20 +443,37 @@ function evaluatePixel(samples) {
             },
             body: JSON.stringify(payload)
         });
+
         if (!imageResponse.ok) {
-            const error = await imageResponse.text();
-            throw new Error(`Error en la imagen Sentinel-1 para ${date}: ${error}`);
+            throw new Error(`Solicitud con polarización ${polarization} falló.`);
         }
-        const buffer = await imageResponse.arrayBuffer();
+        return imageResponse;
+    };
+
+    try {
+        const responseVH = await tryRequest("VH");
+        const buffer = await responseVH.arrayBuffer();
         const base64 = Buffer.from(buffer).toString('base64');
         return {
             url: `data:image/png;base64,${base64}`,
             usedDate: date,
             bbox: bbox
         };
-    } catch (error) {
-        console.error('❌ Error en la imagen Sentinel-1:', error.message);
-        throw error;
+    } catch (vhError) {
+        console.log("⚠️ No se encontraron datos VH. Reintentando con VV...");
+        try {
+            const responseVV = await tryRequest("VV");
+            const buffer = await responseVV.arrayBuffer();
+            const base64 = Buffer.from(buffer).toString('base64');
+            return {
+                url: `data:image/png;base64,${base64}`,
+                usedDate: date,
+                bbox: bbox
+            };
+        } catch (vvError) {
+            console.error('❌ Ambos intentos de polarización fallaron:', vvError.message);
+            throw new Error(`Error al obtener imagen para ${date}: ${vvError.message}`);
+        }
     }
 };
 
