@@ -366,9 +366,6 @@ function evaluatePixel(samples) {
 // ==============================================
 // ✅ FUNCIÓN CORREGIDA: Obtiene la imagen de Sentinel-1 para el frontend
 // ==============================================
-// ==============================================
-// ✅ FUNCIÓN FINAL: Obtiene la mejor imagen de Sentinel-1 para el frontend
-// ==============================================
 const fetchSentinel1Radar = async ({ geometry, date }) => {
     const accessToken = await getAccessToken();
     const bbox = polygonToBbox(geometry);
@@ -377,9 +374,10 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
     }
 
     const fromDate = new Date(date);
-    fromDate.setDate(fromDate.getDate() - 7); // ✅ Buscamos en un rango de 8 días
+    fromDate.setDate(fromDate.getDate() - 7);
     const fromDateISO = fromDate.toISOString().split('T')[0];
 
+    // Función para realizar la solicitud a la API con una polarización específica
     const tryRequest = async (polarization) => {
         const evalscript = `//VERSION=3
 function setup() {
@@ -419,11 +417,8 @@ function evaluatePixel(samples) {
                             polarization: polarization
                         },
                         processing: {
-                            // ✅ LÓGICA CLAVE: Usamos el parámetro maxcc para obtener la mejor imagen
-                            // La API seleccionará la mejor escena dentro del rango de fechas
-                            // Si no hay imágenes en el rango, devolverá una imagen transparente
-                            // o un error explícito.
-                            maxcc: 100
+                            // ✅ LÓGICA CLAVE: Forzamos la selección de la mejor escena
+                            mosaicking: "ORBIT"
                         },
                         type: "sentinel-1-grd"
                     }
