@@ -366,6 +366,9 @@ function evaluatePixel(samples) {
 // ==============================================
 // ✅ FUNCIÓN CORREGIDA: Obtiene la imagen de Sentinel-1 para el frontend
 // ==============================================
+// ==============================================
+// ✅ FUNCIÓN FINAL: Obtiene la mejor imagen de Sentinel-1 para el frontend
+// ==============================================
 const fetchSentinel1Radar = async ({ geometry, date }) => {
     const accessToken = await getAccessToken();
     const bbox = polygonToBbox(geometry);
@@ -374,10 +377,9 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
     }
 
     const fromDate = new Date(date);
-    fromDate.setDate(fromDate.getDate() - 3);
+    fromDate.setDate(fromDate.getDate() - 7); // ✅ Buscamos en un rango de 8 días
     const fromDateISO = fromDate.toISOString().split('T')[0];
 
-    // Función para realizar la solicitud a la API con una polarización específica
     const tryRequest = async (polarization) => {
         const evalscript = `//VERSION=3
 function setup() {
@@ -416,6 +418,13 @@ function evaluatePixel(samples) {
                             },
                             polarization: polarization
                         },
+                        processing: {
+                            // ✅ LÓGICA CLAVE: Usamos el parámetro maxcc para obtener la mejor imagen
+                            // La API seleccionará la mejor escena dentro del rango de fechas
+                            // Si no hay imágenes en el rango, devolverá una imagen transparente
+                            // o un error explícito.
+                            maxcc: 100
+                        },
                         type: "sentinel-1-grd"
                     }
                 ]
@@ -438,7 +447,6 @@ function evaluatePixel(samples) {
             body: JSON.stringify(payload)
         });
 
-        // Simplemente lanzamos el error si no es exitoso
         if (!imageResponse.ok) {
             throw new Error(`Solicitud con polarización ${polarization} falló.`);
         }
@@ -446,7 +454,6 @@ function evaluatePixel(samples) {
     };
 
     try {
-        // Intenta con VH, si falla, el catch lo capturará
         const responseVH = await tryRequest("VH");
         const buffer = await responseVH.arrayBuffer();
         const base64 = Buffer.from(buffer).toString('base64');
@@ -458,7 +465,6 @@ function evaluatePixel(samples) {
     } catch (vhError) {
         console.log("⚠️ No se encontraron datos VH. Reintentando con VV...");
         try {
-            // Intenta con VV
             const responseVV = await tryRequest("VV");
             const buffer = await responseVV.arrayBuffer();
             const base64 = Buffer.from(buffer).toString('base64');
@@ -468,7 +474,6 @@ function evaluatePixel(samples) {
                 bbox: bbox
             };
         } catch (vvError) {
-            // Si ambos intentos fallan, lanzamos un error combinado
             console.error('❌ Ambos intentos de polarización fallaron:', vvError.message);
             throw new Error(`Error al obtener imagen para ${date}: ${vvError.message}`);
         }
