@@ -364,7 +364,7 @@ function evaluatePixel(samples) {
 };
 
 // ==============================================
-// ✅ FUNCIÓN: Obtiene la imagen de Sentinel-1 para el frontend (CORREGIDA)
+// ✅ FUNCIÓN: Obtiene la imagen de Sentinel-1 para el frontend
 // ==============================================
 const fetchSentinel1Radar = async ({ geometry, date }) => {
     const accessToken = await getAccessToken();
@@ -377,9 +377,8 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
         const areaInSquareMeters = calculatePolygonArea(bbox);
         const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10);
         
-        // Formateo de fechas más robusto
         const fromDate = new Date(date);
-        fromDate.setDate(fromDate.getDate() - 3); // Buscamos en un rango de 4 días
+        fromDate.setDate(fromDate.getDate() - 3);
         const fromDateISO = fromDate.toISOString().split('T')[0];
 
         const payload = {
@@ -397,7 +396,7 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
                                 from: `${fromDateISO}T00:00:00Z`,
                                 to: `${date}T23:59:59Z`
                             },
-                            // ✅ Quitamos la polarización y la órbita para ser más flexibles
+                            polarization: "VH VV" // ✅ CAMBIO CRUCIAL: Pedimos ambas polarizaciones
                         },
                         type: "sentinel-1-grd"
                     }
@@ -418,21 +417,20 @@ function setup() {
 }
 
 function evaluatePixel(samples) {
-  if (samples.dataMask === 0 || !samples.VH) {
-    return [0]; // Filtra datos nulos o fondo
+  // ✅ CAMBIO CRUCIAL: Usamos VH si existe, si no, usamos VV.
+  const linearValue = samples.VH || samples.VV;
+  
+  if (!linearValue || samples.dataMask === 0) {
+    return [0];
   }
   
-  const vh_linear = samples.VH;
-  const vh_db = 10 * Math.log10(vh_linear);
+  const dbValue = 10 * Math.log10(linearValue);
 
-  // Rangos ajustados para mapear a una escala de grises
   const minDb = -25;
   const maxDb = 0;
   
-  // Mapeamos el valor de dB al rango 0-255
-  let mappedValue = Math.round((vh_db - minDb) / (maxDb - minDb) * 255);
+  let mappedValue = Math.round((dbValue - minDb) / (maxDb - minDb) * 255);
   
-  // Aseguramos que el valor esté dentro del rango [0, 255]
   mappedValue = Math.max(0, Math.min(255, mappedValue));
   
   return [mappedValue];
