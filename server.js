@@ -958,3 +958,142 @@ app.post('/api/sentinel2highlight', async (req, res) => {
 app.listen(port, '0.0.0.0', () => {
     console.log(`✅ Backend listo en http://localhost:${port}`);
 });
+
+// ==============================================
+// ✅ NUEVA FUNCIÓN: Obtiene el valor de retrodispersión promedio de Sentinel-1
+// ==============================================
+
+/**
+ * Obtiene el valor de retrodispersión promedio de Sentinel-1 (banda VH)
+ * para una fecha y geometría específicas.
+ * @param {object} params - Parámetros de la solicitud.
+ * @param {array} params.geometry - Coordenadas del polígono.
+ * @param {string} params.date - Fecha de la imagen.
+ * @returns {object} Objeto con el promedio de retrodispersión.
+ * @throws {Error} Si no se puede obtener el valor.
+ */
+const getSentinel1Biomass = async ({ geometry, date }) => {
+    const accessToken = await getAccessToken();
+    try {
+        const bbox = polygonToBbox(geometry);
+        if (!bbox) {
+            throw new Error('No se pudo calcular el bounding box.');
+        }
+        const areaInSquareMeters = calculatePolygonArea(bbox);
+        const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10); // 10m de resolución
+
+        const payload = {
+            input: {
+                bounds: {
+                    geometry: {
+                        type: "Polygon",
+                        coordinates: geometry
+                    }
+                },
+                data: [
+                    {
+                        dataFilter: {
+                            timeRange: {
+                                from: `${date}T00:00:00Z`,
+                                to: `${date}T23:59:59Z`
+                            },
+                            polarization: "VH",
+                            orbitDirection: "ASCENDING"
+                        },
+                        type: "sentinel-1-grd"
+                    }
+                ]
+            },
+            output: {
+                width: sizeInPixels,
+                height: sizeInPixels,
+                format: "image/tiff", // Usamos TIFF para valores flotantes sin compresión
+                sampleType: "FLOAT32"
+            },
+            evalscript: `//VERSION=3
+function setup() {
+  return {
+    input: [{ bands: ["VH", "dataMask"], units: "DN" }],
+    output: { bands: 1, sampleType: "FLOAT32" }
+  };
+}
+function evaluatePixel(samples) {
+  if (samples.dataMask === 0) {
+    return [0]; // Fondo/No datos
+  }
+  
+  const vh_linear = samples.VH; // Valor lineal de retrodispersión
+  const vh_db = 10 * Math.log10(vh_linear); // Conversión a decibelios (dB)
+
+  return [vh_db];
+}`
+        };
+
+        const response = await fetch('https://services.sentinel-hub.com/api/v1/process', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${accessToken}`
+            },
+            body: JSON.stringify(payload)
+        });
+
+        if (!response.ok) {
+            const error = await response.text();
+            throw new Error(`Error en la API de Sentinel-Hub: ${error}`);
+        }
+
+        const buffer = await response.arrayBuffer();
+        const float32Array = new Float32Array(buffer);
+        
+        let sum = 0;
+        let count = 0;
+        
+        for (let i = 0; i < float32Array.length; i++) {
+            const value = float32Array[i];
+            if (!isNaN(value) && value !== 0) { // Excluye el fondo y los valores no numéricos
+                sum += value;
+                count++;
+            }
+        }
+        
+        const avgBiomassProxy = count > 0 ? sum / count : null;
+        
+        return {
+            avgBiomassProxy: avgBiomassProxy,
+            totalPixels: float32Array.length,
+            validPixels: count
+        };
+
+    } catch (error) {
+        console.error('❌ Error en getSentinel1Biomass:', error.message);
+        throw error;
+    }
+};
+
+// ==============================================
+// ✅ NUEVO ENDPOINT: /api/get-s1-averages
+// ==============================================
+
+app.post('/api/get-s1-averages', async (req, res) => {
+    const { coordinates, dates } = req.body;
+    if (!coordinates || !dates || dates.length < 2) {
+        return res.status(400).json({ error: 'Faltan parámetros: coordinates y al menos dos fechas en dates.' });
+    }
+    try {
+        const [avg1, avg2] = await Promise.all([
+            getSentinel1Biomass({ geometry: coordinates, date: dates[0] }),
+            getSentinel1Biomass({ geometry: coordinates, date: dates[1] })
+        ]);
+
+        res.json({
+            date1: dates[0],
+            avgBiomass1: avg1,
+            date2: dates[1],
+            avgBiomass2: avg2
+        });
+    } catch (error) {
+        console.error('❌ Error en el endpoint /get-s1-averages:', error.message);
+        res.status(500).json({ error: error.message });
+    }
+});
