@@ -366,6 +366,9 @@ function evaluatePixel(samples) {
 // ==============================================
 // ✅ FUNCIÓN FINAL: Obtiene la mejor imagen de Sentinel-1 para el frontend Gemini
 // ==============================================
+// ==============================================
+// ✅ FUNCIÓN FINAL: Obtiene la mejor imagen de Sentinel-1 para el frontend
+// ==============================================
 const fetchSentinel1Radar = async ({ geometry, date }) => {
     const accessToken = await getAccessToken();
     const bbox = polygonToBbox(geometry);
@@ -417,7 +420,8 @@ function evaluatePixel(samples) {
                                 from: `${fromDateISO}T00:00:00Z`,
                                 to: `${date}T23:59:59Z`
                             },
-                            polarization: polarization
+                            polarization: polarization,
+                            orbitDirection: "ASCENDING"
                         },
                         processing: {
                             mosaicking: "ORBIT"
