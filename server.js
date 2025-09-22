@@ -363,15 +363,6 @@ function evaluatePixel(samples) {
     };
 };
 
-
-// ==============================================
-// ✅ FUNCIÓN: Obtiene la imagen de Sentinel-1 para el frontend
-// ==============================================
-
-// ==============================================
-// ✅ FUNCIÓN: Obtiene la imagen de Sentinel-1 para el frontend
-// ==============================================
-
 // ==============================================
 // ✅ FUNCIÓN: Obtiene la imagen de Sentinel-1 para el frontend (CORREGIDA)
 // ==============================================
