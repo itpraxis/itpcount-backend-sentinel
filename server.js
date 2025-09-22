@@ -364,15 +364,6 @@ function evaluatePixel(samples) {
 };
 
 // ==============================================
-// ✅ FUNCIÓN: Obtiene la imagen de Sentinel-1 para el frontend
-// ==============================================
-// ==============================================
-// ✅ FUNCIÓN CORREGIDA: Obtiene la imagen de Sentinel-1 para el frontend con fallback
-// ==============================================
-// ==============================================
-// ✅ FUNCIÓN: Obtiene la imagen de Sentinel-1 para el frontend (CORREGIDA)
-// ==============================================
-// ==============================================
 // ✅ FUNCIÓN CORREGIDA: Obtiene la imagen de Sentinel-1 para el frontend
 // ==============================================
 const fetchSentinel1Radar = async ({ geometry, date }) => {
@@ -386,8 +377,8 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
     fromDate.setDate(fromDate.getDate() - 3);
     const fromDateISO = fromDate.toISOString().split('T')[0];
 
+    // Función para realizar la solicitud a la API con una polarización específica
     const tryRequest = async (polarization) => {
-        // ✅ CORRECCIÓN: El evalscript ahora es dinámico y usa solo la banda solicitada
         const evalscript = `//VERSION=3
 function setup() {
   return {
@@ -447,15 +438,15 @@ function evaluatePixel(samples) {
             body: JSON.stringify(payload)
         });
 
+        // Simplemente lanzamos el error si no es exitoso
         if (!imageResponse.ok) {
-            const errorText = await imageResponse.text();
-            throw new Error(errorText);
+            throw new Error(`Solicitud con polarización ${polarization} falló.`);
         }
-
         return imageResponse;
     };
 
     try {
+        // Intenta con VH, si falla, el catch lo capturará
         const responseVH = await tryRequest("VH");
         const buffer = await responseVH.arrayBuffer();
         const base64 = Buffer.from(buffer).toString('base64');
@@ -464,25 +455,22 @@ function evaluatePixel(samples) {
             usedDate: date,
             bbox: bbox
         };
-    } catch (error) {
-        if (error.message.includes("RENDERER_S1_MISSING_POLARIZATION")) {
-            console.log("⚠️ No se encontraron datos VH. Reintentando con VV...");
-            try {
-                const responseVV = await tryRequest("VV");
-                const buffer = await responseVV.arrayBuffer();
-                const base64 = Buffer.from(buffer).toString('base64');
-                return {
-                    url: `data:image/png;base64,${base64}`,
-                    usedDate: date,
-                    bbox: bbox
-                };
-            } catch (fallbackError) {
-                console.error('❌ Error en el reintento con VV:', fallbackError.message);
-                throw new Error(`Error en la imagen Sentinel-1 para ${date} después de reintento: ${fallbackError.message}`);
-            }
-        } else {
-            console.error('❌ Error en la imagen Sentinel-1:', error.message);
-            throw new Error(`Error en la imagen Sentinel-1 para ${date}: ${error.message}`);
+    } catch (vhError) {
+        console.log("⚠️ No se encontraron datos VH. Reintentando con VV...");
+        try {
+            // Intenta con VV
+            const responseVV = await tryRequest("VV");
+            const buffer = await responseVV.arrayBuffer();
+            const base64 = Buffer.from(buffer).toString('base64');
+            return {
+                url: `data:image/png;base64,${base64}`,
+                usedDate: date,
+                bbox: bbox
+            };
+        } catch (vvError) {
+            // Si ambos intentos fallan, lanzamos un error combinado
+            console.error('❌ Ambos intentos de polarización fallaron:', vvError.message);
+            throw new Error(`Error al obtener imagen para ${date}: ${vvError.message}`);
         }
     }
 };
