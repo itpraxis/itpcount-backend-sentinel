@@ -978,7 +978,8 @@ const getSentinel1Biomass = async ({ geometry, date }) => {
         const areaInSquareMeters = calculatePolygonArea(bbox);
         const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10); // 10m de resolución
 
-        const payload = {
+        // ✅ NUEVO: Definir el payload principal
+        const mainPayload = {
             input: {
                 bounds: {
                     geometry: {
@@ -1017,23 +1018,57 @@ function evaluatePixel(samples) {
   if (samples.dataMask === 0) {
     return [0]; // Fondo/No datos
   }
-  
   const vh_linear = samples.VH;
   const vh_db = 10 * Math.log10(vh_linear);
-
   return [vh_db];
 }`
         };
 
-        const response = await fetch('https://services.sentinel-hub.com/api/v1/process', {
+        // ✅ NUEVO: Definir un payload de respaldo (fallback) con un comentario diferente
+        // Esto puede "resetear" el estado interno de la API si hay un bug.
+        const fallbackPayload = {
+            ...mainPayload,
+            evalscript: `//VERSION=3 - FALLBACK REQUEST
+function setup() {
+  return {
+    input: [{ bands: ["VH", "dataMask"], units: "LINEAR_POWER" }],
+    output: { bands: 1, sampleType: "FLOAT32" }
+  };
+}
+function evaluatePixel(samples) {
+  if (samples.dataMask === 0) {
+    return [0];
+  }
+  const vh_linear = samples.VH;
+  const vh_db = 10 * Math.log10(vh_linear);
+  return [vh_db];
+}`
+        };
+
+        // ✅ NUEVO: Intentar primero con el payload principal
+        let response = await fetch('https://services.sentinel-hub.com/api/v1/process', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
                 'Authorization': `Bearer ${accessToken}`
             },
-            body: JSON.stringify(payload)
+            body: JSON.stringify(mainPayload)
         });
 
+        // ✅ NUEVO: Si falla, intentar con el payload de respaldo
+        if (!response.ok) {
+            console.warn('⚠️ La primera solicitud a Sentinel-1 falló. Intentando con payload de respaldo...');
+            response = await fetch('https://services.sentinel-hub.com/api/v1/process', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${accessToken}`
+                },
+                body: JSON.stringify(fallbackPayload)
+            });
+        }
+
+        // Si aún falla, lanzar el error
         if (!response.ok) {
             const error = await response.text();
             throw new Error(`Error en la API de Sentinel-Hub: ${error}`);
