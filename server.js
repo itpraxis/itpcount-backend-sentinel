@@ -1013,7 +1013,7 @@ const getSentinel1Biomass = async ({ geometry, date }) => {
             evalscript: `//VERSION=3
 function setup() {
   return {
-    input: [{ bands: ["VH", "dataMask"], units: "DN" }],
+    input: [{ bands: ["VH", "dataMask"], units: "LINEAR_POWER" }],
     output: { bands: 1, sampleType: "FLOAT32" }
   };
 }
