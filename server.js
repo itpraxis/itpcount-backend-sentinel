@@ -978,8 +978,7 @@ const getSentinel1Biomass = async ({ geometry, date }) => {
         const areaInSquareMeters = calculatePolygonArea(bbox);
         const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10); // 10m de resolución
 
-        // ✅ NUEVO: Definir el payload principal
-        const mainPayload = {
+        const payload = {
             input: {
                 bounds: {
                     geometry: {
@@ -1004,85 +1003,60 @@ const getSentinel1Biomass = async ({ geometry, date }) => {
             output: {
                 width: sizeInPixels,
                 height: sizeInPixels,
-                format: "image/tiff", // ✅ Correcto para datos FLOAT32
-                sampleType: "FLOAT32"
+                format: "image/tiff",
+                sampleType: "UINT16" // ✅ CAMBIO A UINT16
             },
             evalscript: `//VERSION=3
 function setup() {
   return {
-    input: [{ bands: ["VH", "dataMask"], units: "LINEAR_POWER" }], // ✅ Correcto para Sentinel-1
-    output: { bands: 1, sampleType: "FLOAT32" }
+    input: [{ bands: ["VH", "dataMask"], units: "LINEAR_POWER" }],
+    output: { bands: 1, sampleType: "UINT16" }
   };
 }
 function evaluatePixel(samples) {
   if (samples.dataMask === 0) {
-    return [0]; // Fondo/No datos
-  }
-  const vh_linear = samples.VH;
-  const vh_db = 10 * Math.log10(vh_linear);
-  return [vh_db];
-}`
-        };
-
-        // ✅ NUEVO: Definir un payload de respaldo (fallback) con un evalscript radicalmente diferente
-        // Esto "reseteará" el estado interno de la API si hay un bug.
-        const fallbackPayload = {
-            ...mainPayload,
-            evalscript: `//VERSION=3 - FALLBACK REQUEST - VH_BAND_ONLY
-function setup() {
-  return {
-    input: [{ bands: ["VH"], units: "LINEAR_POWER" }],
-    output: { bands: 1, sampleType: "FLOAT32" }
-  };
-}
-function evaluatePixel(samples) {
-  const vh_linear = samples.VH;
-  if (vh_linear <= 0) {
     return [0];
   }
-  return [10 * Math.log10(vh_linear)];
+  
+  const vh_linear = samples.VH;
+  const vh_db = 10 * Math.log10(vh_linear);
+
+  const minDb = -20;
+  const maxDb = 5;
+  const mappedValue = Math.round((vh_db - minDb) / (maxDb - minDb) * 65535);
+
+  return [mappedValue];
 }`
         };
 
-        // ✅ NUEVO: Intentar primero con el payload principal
-        let response = await fetch('https://services.sentinel-hub.com/api/v1/process', {
+        const response = await fetch('https://services.sentinel-hub.com/api/v1/process', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
                 'Authorization': `Bearer ${accessToken}`
             },
-            body: JSON.stringify(mainPayload)
+            body: JSON.stringify(payload)
         });
 
-        // ✅ NUEVO: Si falla, intentar con el payload de respaldo
-        if (!response.ok) {
-            console.warn('⚠️ La primera solicitud a Sentinel-1 falló. Intentando con payload de respaldo...');
-            response = await fetch('https://services.sentinel-hub.com/api/v1/process', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${accessToken}`
-                },
-                body: JSON.stringify(fallbackPayload)
-            });
-        }
-
-        // Si aún falla, lanzar el error
         if (!response.ok) {
             const error = await response.text();
             throw new Error(`Error en la API de Sentinel-Hub: ${error}`);
         }
 
         const buffer = await response.arrayBuffer();
-        const float32Array = new Float32Array(buffer);
+        const uint16Array = new Uint16Array(buffer); // ✅ CAMBIO A Uint16Array
         
         let sum = 0;
         let count = 0;
+        const minDb = -20;
+        const maxDb = 5;
         
-        for (let i = 0; i < float32Array.length; i++) {
-            const value = float32Array[i];
-            if (!isNaN(value) && value !== 0) {
-                sum += value;
+        for (let i = 0; i < uint16Array.length; i++) {
+            const value = uint16Array[i];
+            if (value > 0) { // ✅ Verificamos que no sea el valor de fondo
+                // Desescalamos el valor de regreso a decibelios
+                const deScaledValue = (value / 65535) * (maxDb - minDb) + minDb;
+                sum += deScaledValue;
                 count++;
             }
         }
@@ -1091,7 +1065,7 @@ function evaluatePixel(samples) {
         
         return {
             avgBiomassProxy: avgBiomassProxy,
-            totalPixels: float32Array.length,
+            totalPixels: uint16Array.length,
             validPixels: count
         };
 
