@@ -364,7 +364,7 @@ function evaluatePixel(samples) {
 };
 
 // ==============================================
-// ✅ FUNCIÓN: Obtiene la imagen de Sentinel-1 para el frontend (CON LOGS DE DEBUG)
+// ✅ FUNCIÓN: Obtiene la imagen de Sentinel-1 para el frontend (CORREGIDA)
 // ==============================================
 const fetchSentinel1Radar = async ({ geometry, date }) => {
     const accessToken = await getAccessToken();
@@ -375,9 +375,9 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
     try {
         const areaInSquareMeters = calculatePolygonArea(bbox);
         const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10);
-        // ✅ NUEVO: Rango de búsqueda de tres días
+        // ✅ CORRECCIÓN: Ampliar el rango de búsqueda a 15 días
         const fromDate = new Date(date);
-        fromDate.setDate(fromDate.getDate() - 2); // 2 días antes de la fecha solicitada
+        fromDate.setDate(fromDate.getDate() - 14); // 14 días antes de la fecha solicitada (rango total de 15 días)
         const payload = {
             input: {
                 bounds: {
@@ -386,7 +386,7 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
                         coordinates: geometry
                     }
                 },
-                 data: [
+                data: [
                     {
                         dataFilter: {
                             timeRange: {
