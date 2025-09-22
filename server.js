@@ -369,23 +369,21 @@ function evaluatePixel(samples) {
 // ==============================================
 // ✅ FUNCIÓN CORREGIDA: Obtiene la imagen de Sentinel-1 para el frontend con fallback
 // ==============================================
+// ==============================================
+// ✅ FUNCIÓN: Obtiene la imagen de Sentinel-1 para el frontend (CORREGIDA)
+// ==============================================
 const fetchSentinel1Radar = async ({ geometry, date }) => {
     const accessToken = await getAccessToken();
     const bbox = polygonToBbox(geometry);
     if (!bbox) {
         throw new Error('No se pudo calcular el bounding box del polígono.');
     }
-
-    // Formateo de fechas más robusto
-    const fromDate = new Date(date);
-    fromDate.setDate(fromDate.getDate() - 3); // Buscamos en un rango de 4 días
-    const fromDateISO = fromDate.toISOString().split('T')[0];
-
-    // Primero, intenta con la banda VH
-    const bandsToRequest = ["VH"];
-    let imageResponse;
-
     try {
+        const areaInSquareMeters = calculatePolygonArea(bbox);
+        const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10);
+        // ✅ NUEVO: Rango de búsqueda de tres días
+        const fromDate = new Date(date);
+        fromDate.setDate(fromDate.getDate() - 2); // 2 días antes de la fecha solicitada
         const payload = {
             input: {
                 bounds: {
@@ -398,50 +396,50 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
                     {
                         dataFilter: {
                             timeRange: {
-                                from: `${fromDateISO}T00:00:00Z`,
-                                to: `${date}T23:59:59Z`
+                                from: `${fromDate.toISOString().split('T')[0]}T00:00:00Z`, // Inicio del rango
+                                to: `${date}T23:59:59Z` // Fin del rango
                             },
-                            polarization: bandsToRequest[0] // ✅ Intenta con VH
+                            polarization: "VH",
+                            // ✅ Eliminamos orbitDirection para ser más flexibles
                         },
                         type: "sentinel-1-grd"
                     }
                 ]
             },
             output: {
-                width: calculateOptimalImageSize(calculatePolygonArea(bbox), 10),
-                height: calculateOptimalImageSize(calculatePolygonArea(bbox), 10),
+                width: sizeInPixels,
+                height: sizeInPixels,
                 format: "image/png",
                 sampleType: "UINT8"
             },
             evalscript: `//VERSION=3
 function setup() {
   return {
-    input: [{ bands: ["VH", "VV", "dataMask"], units: "LINEAR_POWER" }],
+    input: [{ bands: ["VH", "dataMask"], units: "LINEAR_POWER" }],
     output: { bands: 1, sampleType: "UINT8", format: "image/png" }
   };
 }
-
 function evaluatePixel(samples) {
-  const linearValue = samples.VH || samples.VV;
-  
-  if (!linearValue || samples.dataMask === 0) {
+  if (samples.dataMask === 0) {
     return [0];
   }
-  
-  const dbValue = 10 * Math.log10(linearValue);
-
-  const minDb = -25;
-  const maxDb = 0;
-  
-  let mappedValue = Math.round((dbValue - minDb) / (maxDb - minDb) * 255);
-  
+  const vh_linear = samples.VH;
+  // ✅ CORRECCIÓN: Manejar valores no válidos
+  if (vh_linear <= 0 || !isFinite(vh_linear)) {
+    return [0];
+  }
+  const vh_db = 10 * Math.log10(vh_linear);
+  // ✅ CORRECCIÓN: Ajustar el rango de mapeo a valores más realistas para tierra
+  const minDb = -25; // Valor mínimo típico para áreas terrestres
+  const maxDb = 0;   // Valor máximo típico para áreas terrestres
+  // Mapear el valor de dB al rango 0-255
+  let mappedValue = Math.round((vh_db - minDb) / (maxDb - minDb) * 255);
+  // Asegurar que el valor esté dentro del rango [0, 255]
   mappedValue = Math.max(0, Math.min(255, mappedValue));
-  
   return [mappedValue];
 }`
         };
-
-        imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
+        const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -449,46 +447,12 @@ function evaluatePixel(samples) {
             },
             body: JSON.stringify(payload)
         });
-
-        // Si la primera solicitud falla por falta de banda, intenta de nuevo con VV
         if (!imageResponse.ok) {
-            const errorText = await imageResponse.text();
-            if (errorText.includes("RENDERER_S1_MISSING_POLARIZATION")) {
-                console.log("⚠️ No se encontraron datos VH. Reintentando con VV...");
-                
-                // Crea un nuevo payload para la banda VV
-                const fallbackPayload = {
-                    ...payload,
-                    data: [{
-                        ...payload.data[0],
-                        dataFilter: {
-                            ...payload.data[0].dataFilter,
-                            polarization: "VV" // ✅ Intenta con VV
-                        }
-                    }]
-                };
-
-                imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${accessToken}`
-                    },
-                    body: JSON.stringify(fallbackPayload)
-                });
-
-                if (!imageResponse.ok) {
-                     const fallbackErrorText = await imageResponse.text();
-                     throw new Error(`Error en la imagen Sentinel-1 para ${date} con banda VV: ${fallbackErrorText}`);
-                }
-            } else {
-                throw new Error(`Error en la imagen Sentinel-1 para ${date}: ${errorText}`);
-            }
+            const error = await imageResponse.text();
+            throw new Error(`Error en la imagen Sentinel-1 para ${date}: ${error}`);
         }
-
         const buffer = await imageResponse.arrayBuffer();
         const base64 = Buffer.from(buffer).toString('base64');
-
         return {
             url: `data:image/png;base64,${base64}`,
             usedDate: date,
