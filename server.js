@@ -1091,7 +1091,7 @@ const getSentinel1Biomass = async ({ geometry, date }) => {
                                 to: `${date}T23:59:59Z`
                             },
                             polarization: "VH",
-                            orbitDirection: "ASCENDING"
+                            orbitDirection: "DESCENDING"    // ASCENDING
                         },
                         type: "sentinel-1-grd"
                     }
