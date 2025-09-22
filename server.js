@@ -366,9 +366,6 @@ function evaluatePixel(samples) {
 // ==============================================
 // ✅ FUNCIÓN: Obtiene la imagen de Sentinel-1 para el frontend (CORREGIDA)
 // ==============================================
-// ==============================================
-// ✅ FUNCIÓN: Obtiene la imagen de Sentinel-1 para el frontend (CORREGIDA)
-// ==============================================
 const fetchSentinel1Radar = async ({ geometry, date }) => {
     const accessToken = await getAccessToken();
     const bbox = polygonToBbox(geometry);
@@ -378,9 +375,9 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
     try {
         const areaInSquareMeters = calculatePolygonArea(bbox);
         const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10);
-        // ✅ CORRECCIÓN: Ampliar el rango de búsqueda a 60 días
+        // ✅ NUEVO: Rango de búsqueda de tres días
         const fromDate = new Date(date);
-        fromDate.setDate(fromDate.getDate() - 60); // 60 días antes de la fecha solicitada
+        fromDate.setDate(fromDate.getDate() - 2); // 2 días antes de la fecha solicitada
         const payload = {
             input: {
                 bounds: {
@@ -389,7 +386,7 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
                         coordinates: geometry
                     }
                 },
-                 data: [
+                data: [
                     {
                         dataFilter: {
                             timeRange: {
@@ -397,7 +394,7 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
                                 to: `${date}T23:59:59Z` // Fin del rango
                             },
                             polarization: "VH",
-                            orbitDirection: "ASCENDING" // ✅ CORRECCIÓN: Usar ASCENDING
+                            // ✅ CORRECCIÓN: Eliminamos orbitDirection para ser más flexibles
                         },
                         type: "sentinel-1-grd"
                     }
@@ -432,11 +429,6 @@ function evaluatePixel(samples) {
   return [mappedValue];
 }`
         };
-
-        // 🐞 LOG DE DEBUG: Imprimir el payload que se está enviando
-        console.log('🐞 DEBUG - Payload enviado a Sentinel Hub para Sentinel-1:');
-        console.log(JSON.stringify(payload, null, 2));
-
         const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
             method: 'POST',
             headers: {
@@ -445,27 +437,12 @@ function evaluatePixel(samples) {
             },
             body: JSON.stringify(payload)
         });
-
-        // 🐞 LOG DE DEBUG: Imprimir el estado y headers de la respuesta
-        console.log('🐞 DEBUG - Respuesta de Sentinel Hub:');
-        console.log(`Status: ${imageResponse.status} ${imageResponse.statusText}`);
-        console.log('Headers:', Object.fromEntries(imageResponse.headers.entries()));
-
         if (!imageResponse.ok) {
             const error = await imageResponse.text();
             throw new Error(`Error en la imagen Sentinel-1 para ${date}: ${error}`);
         }
-
         const buffer = await imageResponse.arrayBuffer();
-        
-        // 🐞 LOG DE DEBUG: Imprimir el tamaño del buffer recibido
-        console.log(`🐞 DEBUG - Tamaño del buffer recibido: ${buffer.byteLength} bytes`);
-
         const base64 = Buffer.from(buffer).toString('base64');
-
-        // 🐞 LOG DE DEBUG: Imprimir un fragmento del base64 para ver si es una imagen válida
-        console.log(`🐞 DEBUG - Fragmento del base64: ${base64.substring(0, 100)}...`);
-
         return {
             url: `data:image/png;base64,${base64}`,
             usedDate: date,
