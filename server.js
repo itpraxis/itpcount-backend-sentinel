@@ -1007,13 +1007,13 @@ const getSentinel1Biomass = async ({ geometry, date }) => {
             output: {
                 width: sizeInPixels,
                 height: sizeInPixels,
-                format: "image/tiff", // Usamos TIFF para valores flotantes sin compresión
+                format: "image/tiff", // ✅ Correcto para datos FLOAT32
                 sampleType: "FLOAT32"
             },
             evalscript: `//VERSION=3
 function setup() {
   return {
-    input: [{ bands: ["VH", "dataMask"], units: "LINEAR_POWER" }],
+    input: [{ bands: ["VH", "dataMask"], units: "LINEAR_POWER" }], // ✅ Correcto para Sentinel-1
     output: { bands: 1, sampleType: "FLOAT32" }
   };
 }
@@ -1022,8 +1022,8 @@ function evaluatePixel(samples) {
     return [0]; // Fondo/No datos
   }
   
-  const vh_linear = samples.VH; // Valor lineal de retrodispersión
-  const vh_db = 10 * Math.log10(vh_linear); // Conversión a decibelios (dB)
+  const vh_linear = samples.VH;
+  const vh_db = 10 * Math.log10(vh_linear);
 
   return [vh_db];
 }`
@@ -1051,7 +1051,7 @@ function evaluatePixel(samples) {
         
         for (let i = 0; i < float32Array.length; i++) {
             const value = float32Array[i];
-            if (!isNaN(value) && value !== 0) { // Excluye el fondo y los valores no numéricos
+            if (!isNaN(value) && value !== 0) {
                 sum += value;
                 count++;
             }
