@@ -1024,24 +1024,23 @@ function evaluatePixel(samples) {
 }`
         };
 
-        // ✅ NUEVO: Definir un payload de respaldo (fallback) con un comentario diferente
-        // Esto puede "resetear" el estado interno de la API si hay un bug.
+        // ✅ NUEVO: Definir un payload de respaldo (fallback) con un evalscript radicalmente diferente
+        // Esto "reseteará" el estado interno de la API si hay un bug.
         const fallbackPayload = {
             ...mainPayload,
-            evalscript: `//VERSION=3 - FALLBACK REQUEST
+            evalscript: `//VERSION=3 - FALLBACK REQUEST - VH_BAND_ONLY
 function setup() {
   return {
-    input: [{ bands: ["VH", "dataMask"], units: "LINEAR_POWER" }],
+    input: [{ bands: ["VH"], units: "LINEAR_POWER" }],
     output: { bands: 1, sampleType: "FLOAT32" }
   };
 }
 function evaluatePixel(samples) {
-  if (samples.dataMask === 0) {
+  const vh_linear = samples.VH;
+  if (vh_linear <= 0) {
     return [0];
   }
-  const vh_linear = samples.VH;
-  const vh_db = 10 * Math.log10(vh_linear);
-  return [vh_db];
+  return [10 * Math.log10(vh_linear)];
 }`
         };
 
