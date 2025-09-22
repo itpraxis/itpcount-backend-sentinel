@@ -364,6 +364,103 @@ function evaluatePixel(samples) {
 };
 
 
+// ==============================================
+// ✅ FUNCIÓN: Obtiene la imagen de Sentinel-1 para el frontend
+// ==============================================
+
+const fetchSentinel1Radar = async ({ geometry, date }) => {
+    const accessToken = await getAccessToken();
+    const bbox = polygonToBbox(geometry);
+    if (!bbox) {
+        throw new Error('No se pudo calcular el bounding box del polígono.');
+    }
+
+    try {
+        const areaInSquareMeters = calculatePolygonArea(bbox);
+        const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10);
+
+        const payload = {
+            input: {
+                bounds: {
+                    geometry: {
+                        type: "Polygon",
+                        coordinates: geometry
+                    }
+                },
+                data: [
+                    {
+                        dataFilter: {
+                            timeRange: {
+                                from: `${date}T00:00:00Z`,
+                                to: `${date}T23:59:59Z`
+                            },
+                            polarization: "VH",
+                            orbitDirection: "ASCENDING"
+                        },
+                        type: "sentinel-1-grd"
+                    }
+                ]
+            },
+            output: {
+                width: sizeInPixels,
+                height: sizeInPixels,
+                format: "image/png",
+                sampleType: "UINT8"
+            },
+            evalscript: `//VERSION=3
+function setup() {
+  return {
+    input: [{ bands: ["VH", "dataMask"], units: "LINEAR_POWER" }],
+    output: { bands: 1, sampleType: "UINT8", format: "image/png" }
+  };
+}
+
+function evaluatePixel(samples) {
+  if (samples.dataMask === 0) {
+    return [0];
+  }
+  
+  const vh_linear = samples.VH;
+  const vh_db = 10 * Math.log10(vh_linear);
+
+  const minDb = -20;
+  const maxDb = 5;
+  const mappedValue = Math.round((vh_db - minDb) / (maxDb - minDb) * 255);
+
+  return [mappedValue];
+}`
+        };
+
+        const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${accessToken}`
+            },
+            body: JSON.stringify(payload)
+        });
+
+        if (!imageResponse.ok) {
+            const error = await imageResponse.text();
+            throw new Error(`Error en la imagen Sentinel-1 para ${date}: ${error}`);
+        }
+
+        const buffer = await imageResponse.arrayBuffer();
+        const base64 = Buffer.from(buffer).toString('base64');
+
+        return {
+            url: `data:image/png;base64,${base64}`,
+            usedDate: date,
+            bbox: bbox
+        };
+
+    } catch (error) {
+        console.error('❌ Error en la imagen Sentinel-1:', error.message);
+        throw error;
+    }
+};
+
+
 /**
  * ✅ FUNCIÓN CORREGIDA: Obtiene el valor promedio de NDVI y porcentaje de cobertura vegetal
  * @param {object} params - Parámetros de la solicitud.
@@ -1098,6 +1195,23 @@ app.post('/api/get-s1-averages', async (req, res) => {
         });
     } catch (error) {
         console.error('❌ Error en el endpoint /get-s1-averages:', error.message);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// ==============================================
+// ✅ NUEVO ENDPOINT: /api/sentinel1radar
+// ==============================================
+app.post('/api/sentinel1radar', async (req, res) => {
+    const { coordinates, date } = req.body;
+    if (!coordinates || !date) {
+        return res.status(400).json({ error: 'Faltan parámetros: coordinates y date' });
+    }
+    try {
+        const result = await fetchSentinel1Radar({ geometry: coordinates, date: date });
+        res.json(result);
+    } catch (error) {
+        console.error('❌ Error en /sentinel1radar:', error.message);
         res.status(500).json({ error: error.message });
     }
 });
