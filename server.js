@@ -372,12 +372,16 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
     if (!bbox) {
         throw new Error('No se pudo calcular el bounding box del polígono.');
     }
+
     try {
         const areaInSquareMeters = calculatePolygonArea(bbox);
         const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10);
-        // ✅ NUEVO: Rango de búsqueda de tres días
+        
+        // Formateo de fechas más robusto
         const fromDate = new Date(date);
-        fromDate.setDate(fromDate.getDate() - 2); // 2 días antes de la fecha solicitada
+        fromDate.setDate(fromDate.getDate() - 3); // Buscamos en un rango de 4 días
+        const fromDateISO = fromDate.toISOString().split('T')[0];
+
         const payload = {
             input: {
                 bounds: {
@@ -390,11 +394,10 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
                     {
                         dataFilter: {
                             timeRange: {
-                                from: `${fromDate.toISOString().split('T')[0]}T00:00:00Z`, // Inicio del rango
-                                to: `${date}T23:59:59Z` // Fin del rango
+                                from: `${fromDateISO}T00:00:00Z`,
+                                to: `${date}T23:59:59Z`
                             },
-                            polarization: "VH",
-                            // ✅ CORRECCIÓN: Eliminamos orbitDirection para ser más flexibles
+                            // ✅ Quitamos la polarización y la órbita para ser más flexibles
                         },
                         type: "sentinel-1-grd"
                     }
@@ -409,26 +412,33 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
             evalscript: `//VERSION=3
 function setup() {
   return {
-    input: [{ bands: ["VH", "dataMask"], units: "LINEAR_POWER" }],
+    input: [{ bands: ["VH", "VV", "dataMask"], units: "LINEAR_POWER" }],
     output: { bands: 1, sampleType: "UINT8", format: "image/png" }
   };
 }
+
 function evaluatePixel(samples) {
-  if (samples.dataMask === 0) {
-    return [0];
+  if (samples.dataMask === 0 || !samples.VH) {
+    return [0]; // Filtra datos nulos o fondo
   }
+  
   const vh_linear = samples.VH;
   const vh_db = 10 * Math.log10(vh_linear);
-  // ✅ CORRECCIÓN: Ajustar el rango de mapeo a valores más realistas para tierra
-  const minDb = -25; // Valor mínimo típico para áreas terrestres
-  const maxDb = 0;   // Valor máximo típico para áreas terrestres
-  // Mapear el valor de dB al rango 0-255
+
+  // Rangos ajustados para mapear a una escala de grises
+  const minDb = -25;
+  const maxDb = 0;
+  
+  // Mapeamos el valor de dB al rango 0-255
   let mappedValue = Math.round((vh_db - minDb) / (maxDb - minDb) * 255);
-  // Asegurar que el valor esté dentro del rango [0, 255]
+  
+  // Aseguramos que el valor esté dentro del rango [0, 255]
   mappedValue = Math.max(0, Math.min(255, mappedValue));
+  
   return [mappedValue];
 }`
         };
+
         const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
             method: 'POST',
             headers: {
@@ -437,17 +447,21 @@ function evaluatePixel(samples) {
             },
             body: JSON.stringify(payload)
         });
+
         if (!imageResponse.ok) {
             const error = await imageResponse.text();
             throw new Error(`Error en la imagen Sentinel-1 para ${date}: ${error}`);
         }
+
         const buffer = await imageResponse.arrayBuffer();
         const base64 = Buffer.from(buffer).toString('base64');
+
         return {
             url: `data:image/png;base64,${base64}`,
             usedDate: date,
             bbox: bbox
         };
+
     } catch (error) {
         console.error('❌ Error en la imagen Sentinel-1:', error.message);
         throw error;
