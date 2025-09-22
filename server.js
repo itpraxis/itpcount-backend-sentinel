@@ -366,9 +366,6 @@ function evaluatePixel(samples) {
 // ==============================================
 // ✅ FUNCIÓN FINAL: Obtiene la mejor imagen de Sentinel-1 para el frontend
 // ==============================================
-// ==============================================
-// ✅ FUNCIÓN FINAL Y ROBUSTA: Obtiene la mejor imagen de Sentinel-1 para el frontend
-// ==============================================
 const fetchSentinel1Radar = async ({ geometry, date }) => {
     const accessToken = await getAccessToken();
     const bbox = polygonToBbox(geometry);
@@ -380,7 +377,9 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
     fromDate.setDate(fromDate.getDate() - 7);
     const fromDateISO = fromDate.toISOString().split('T')[0];
 
-    // Función que realiza la solicitud para una polarización específica
+    // ✅ CORRECCIÓN: Calcular el área del polígono una sola vez
+    const polygonAreaInMeters = calculatePolygonArea(bbox);
+
     const tryRequest = async (polarization) => {
         const evalscript = `//VERSION=3
 function setup() {
@@ -427,8 +426,9 @@ function evaluatePixel(samples) {
                 ]
             },
             output: {
-                width: 256,
-                height: 256,
+                // ✅ CORRECCIÓN CLAVE: Usamos la variable de área calculada
+                width: calculateOptimalImageSize(polygonAreaInMeters, 10),
+                height: calculateOptimalImageSize(polygonAreaInMeters, 10),
                 format: "image/png",
                 sampleType: "UINT8"
             },
@@ -444,7 +444,6 @@ function evaluatePixel(samples) {
             body: JSON.stringify(payload)
         });
 
-        // Si la respuesta no es 200 OK, lanzamos un error que el catch manejará.
         if (!imageResponse.ok) {
             throw new Error(`Solicitud con polarización ${polarization} falló.`);
         }
@@ -452,7 +451,6 @@ function evaluatePixel(samples) {
     };
 
     try {
-        // ✅ INTENTO 1: Con polarización VH
         const responseVH = await tryRequest("VH");
         const buffer = await responseVH.arrayBuffer();
         const base64 = Buffer.from(buffer).toString('base64');
@@ -464,7 +462,6 @@ function evaluatePixel(samples) {
     } catch (vhError) {
         console.log("⚠️ No se encontraron datos VH. Reintentando con VV...");
         try {
-            // ✅ INTENTO 2: Con polarización VV
             const responseVV = await tryRequest("VV");
             const buffer = await responseVV.arrayBuffer();
             const base64 = Buffer.from(buffer).toString('base64');
