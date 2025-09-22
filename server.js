@@ -366,6 +366,9 @@ function evaluatePixel(samples) {
 // ==============================================
 // ✅ FUNCIÓN: Obtiene la imagen de Sentinel-1 para el frontend
 // ==============================================
+// ==============================================
+// ✅ FUNCIÓN CORREGIDA: Obtiene la imagen de Sentinel-1 para el frontend con fallback
+// ==============================================
 const fetchSentinel1Radar = async ({ geometry, date }) => {
     const accessToken = await getAccessToken();
     const bbox = polygonToBbox(geometry);
@@ -373,14 +376,16 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
         throw new Error('No se pudo calcular el bounding box del polígono.');
     }
 
-    try {
-        const areaInSquareMeters = calculatePolygonArea(bbox);
-        const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10);
-        
-        const fromDate = new Date(date);
-        fromDate.setDate(fromDate.getDate() - 3);
-        const fromDateISO = fromDate.toISOString().split('T')[0];
+    // Formateo de fechas más robusto
+    const fromDate = new Date(date);
+    fromDate.setDate(fromDate.getDate() - 3); // Buscamos en un rango de 4 días
+    const fromDateISO = fromDate.toISOString().split('T')[0];
 
+    // Primero, intenta con la banda VH
+    const bandsToRequest = ["VH"];
+    let imageResponse;
+
+    try {
         const payload = {
             input: {
                 bounds: {
@@ -396,15 +401,15 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
                                 from: `${fromDateISO}T00:00:00Z`,
                                 to: `${date}T23:59:59Z`
                             },
-                            polarization: "VH VV" // ✅ CAMBIO CRUCIAL: Pedimos ambas polarizaciones
+                            polarization: bandsToRequest[0] // ✅ Intenta con VH
                         },
                         type: "sentinel-1-grd"
                     }
                 ]
             },
             output: {
-                width: sizeInPixels,
-                height: sizeInPixels,
+                width: calculateOptimalImageSize(calculatePolygonArea(bbox), 10),
+                height: calculateOptimalImageSize(calculatePolygonArea(bbox), 10),
                 format: "image/png",
                 sampleType: "UINT8"
             },
@@ -417,7 +422,6 @@ function setup() {
 }
 
 function evaluatePixel(samples) {
-  // ✅ CAMBIO CRUCIAL: Usamos VH si existe, si no, usamos VV.
   const linearValue = samples.VH || samples.VV;
   
   if (!linearValue || samples.dataMask === 0) {
@@ -437,7 +441,7 @@ function evaluatePixel(samples) {
 }`
         };
 
-        const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
+        imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -446,9 +450,40 @@ function evaluatePixel(samples) {
             body: JSON.stringify(payload)
         });
 
+        // Si la primera solicitud falla por falta de banda, intenta de nuevo con VV
         if (!imageResponse.ok) {
-            const error = await imageResponse.text();
-            throw new Error(`Error en la imagen Sentinel-1 para ${date}: ${error}`);
+            const errorText = await imageResponse.text();
+            if (errorText.includes("RENDERER_S1_MISSING_POLARIZATION")) {
+                console.log("⚠️ No se encontraron datos VH. Reintentando con VV...");
+                
+                // Crea un nuevo payload para la banda VV
+                const fallbackPayload = {
+                    ...payload,
+                    data: [{
+                        ...payload.data[0],
+                        dataFilter: {
+                            ...payload.data[0].dataFilter,
+                            polarization: "VV" // ✅ Intenta con VV
+                        }
+                    }]
+                };
+
+                imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${accessToken}`
+                    },
+                    body: JSON.stringify(fallbackPayload)
+                });
+
+                if (!imageResponse.ok) {
+                     const fallbackErrorText = await imageResponse.text();
+                     throw new Error(`Error en la imagen Sentinel-1 para ${date} con banda VV: ${fallbackErrorText}`);
+                }
+            } else {
+                throw new Error(`Error en la imagen Sentinel-1 para ${date}: ${errorText}`);
+            }
         }
 
         const buffer = await imageResponse.arrayBuffer();
@@ -459,7 +494,6 @@ function evaluatePixel(samples) {
             usedDate: date,
             bbox: bbox
         };
-
     } catch (error) {
         console.error('❌ Error en la imagen Sentinel-1:', error.message);
         throw error;
