@@ -1029,6 +1029,10 @@ function evaluatePixel(samples) {
 }`
         };
 
+        // ✅ NUEVA LÍNEA DE CÓDIGO PARA DEPURACIÓN
+        console.log('✅ Payload que se enviará a Sentinel-Hub:', JSON.stringify(payload, null, 2));
+
+
         const response = await fetch('https://services.sentinel-hub.com/api/v1/process', {
             method: 'POST',
             headers: {
