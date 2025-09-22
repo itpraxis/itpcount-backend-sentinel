@@ -955,12 +955,8 @@ app.post('/api/sentinel2highlight', async (req, res) => {
 });
 
 
-app.listen(port, '0.0.0.0', () => {
-    console.log(`✅ Backend listo en http://localhost:${port}`);
-});
-
 // ==============================================
-// ✅ NUEVA FUNCIÓN: Obtiene el valor de retrodispersión promedio de Sentinel-1
+// ✅ FUNCIÓN CORREGIDA FINAL: Obtiene el valor de retrodispersión promedio de Sentinel-1
 // ==============================================
 
 /**
@@ -1029,10 +1025,6 @@ function evaluatePixel(samples) {
 }`
         };
 
-        // ✅ NUEVA LÍNEA DE CÓDIGO PARA DEPURACIÓN
-        console.log('✅ Payload que se enviará a Sentinel-Hub:', JSON.stringify(payload, null, 2));
-
-
         const response = await fetch('https://services.sentinel-hub.com/api/v1/process', {
             method: 'POST',
             headers: {
@@ -1076,7 +1068,7 @@ function evaluatePixel(samples) {
 };
 
 // ==============================================
-// ✅ NUEVO ENDPOINT: /api/get-s1-averages
+// ✅ ENDPOINT FINAL: /api/get-s1-averages
 // ==============================================
 
 app.post('/api/get-s1-averages', async (req, res) => {
@@ -1101,3 +1093,9 @@ app.post('/api/get-s1-averages', async (req, res) => {
         res.status(500).json({ error: error.message });
     }
 });
+
+
+app.listen(port, '0.0.0.0', () => {
+    console.log(`✅ Backend listo en http://localhost:${port}`);
+});
+
