@@ -366,6 +366,9 @@ function evaluatePixel(samples) {
 // ==============================================
 // ✅ FUNCIÓN: Obtiene la imagen de Sentinel-1 para el frontend (CORREGIDA)
 // ==============================================
+// ==============================================
+// ✅ FUNCIÓN: Obtiene la imagen de Sentinel-1 para el frontend (CORREGIDA)
+// ==============================================
 const fetchSentinel1Radar = async ({ geometry, date }) => {
     const accessToken = await getAccessToken();
     const bbox = polygonToBbox(geometry);
@@ -375,9 +378,9 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
     try {
         const areaInSquareMeters = calculatePolygonArea(bbox);
         const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10);
-        // ✅ CORRECCIÓN: Ampliar el rango de búsqueda a 15 días
+        // ✅ CORRECCIÓN: Ampliar el rango de búsqueda a 60 días
         const fromDate = new Date(date);
-        fromDate.setDate(fromDate.getDate() - 14); // 14 días antes de la fecha solicitada (rango total de 15 días)
+        fromDate.setDate(fromDate.getDate() - 60); // 60 días antes de la fecha solicitada
         const payload = {
             input: {
                 bounds: {
@@ -386,7 +389,7 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
                         coordinates: geometry
                     }
                 },
-                data: [
+                 [
                     {
                         dataFilter: {
                             timeRange: {
@@ -394,7 +397,7 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
                                 to: `${date}T23:59:59Z` // Fin del rango
                             },
                             polarization: "VH",
-                            // ✅ Eliminamos orbitDirection para ser más flexibles
+                            orbitDirection: "ASCENDING" // ✅ CORRECCIÓN: Usar ASCENDING
                         },
                         type: "sentinel-1-grd"
                     }
