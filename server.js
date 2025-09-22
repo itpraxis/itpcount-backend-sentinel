@@ -372,21 +372,21 @@ function evaluatePixel(samples) {
 // ✅ FUNCIÓN: Obtiene la imagen de Sentinel-1 para el frontend
 // ==============================================
 
+// ==============================================
+// ✅ FUNCIÓN: Obtiene la imagen de Sentinel-1 para el frontend (CORREGIDA)
+// ==============================================
 const fetchSentinel1Radar = async ({ geometry, date }) => {
     const accessToken = await getAccessToken();
     const bbox = polygonToBbox(geometry);
     if (!bbox) {
         throw new Error('No se pudo calcular el bounding box del polígono.');
     }
-
     try {
         const areaInSquareMeters = calculatePolygonArea(bbox);
         const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10);
-
         // ✅ NUEVO: Rango de búsqueda de tres días
         const fromDate = new Date(date);
         fromDate.setDate(fromDate.getDate() - 2); // 2 días antes de la fecha solicitada
-        
         const payload = {
             input: {
                 bounds: {
@@ -422,23 +422,22 @@ function setup() {
     output: { bands: 1, sampleType: "UINT8", format: "image/png" }
   };
 }
-
 function evaluatePixel(samples) {
   if (samples.dataMask === 0) {
     return [0];
   }
-  
   const vh_linear = samples.VH;
   const vh_db = 10 * Math.log10(vh_linear);
-
-  const minDb = -20;
-  const maxDb = 5;
-  const mappedValue = Math.round((vh_db - minDb) / (maxDb - minDb) * 255);
-
+  // ✅ CORRECCIÓN: Ajustar el rango de mapeo a valores más realistas para tierra
+  const minDb = -25; // Valor mínimo típico para áreas terrestres
+  const maxDb = 0;   // Valor máximo típico para áreas terrestres
+  // Mapear el valor de dB al rango 0-255
+  let mappedValue = Math.round((vh_db - minDb) / (maxDb - minDb) * 255);
+  // Asegurar que el valor esté dentro del rango [0, 255]
+  mappedValue = Math.max(0, Math.min(255, mappedValue));
   return [mappedValue];
 }`
         };
-
         const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
             method: 'POST',
             headers: {
@@ -447,21 +446,17 @@ function evaluatePixel(samples) {
             },
             body: JSON.stringify(payload)
         });
-
         if (!imageResponse.ok) {
             const error = await imageResponse.text();
             throw new Error(`Error en la imagen Sentinel-1 para ${date}: ${error}`);
         }
-
         const buffer = await imageResponse.arrayBuffer();
         const base64 = Buffer.from(buffer).toString('base64');
-
         return {
             url: `data:image/png;base64,${base64}`,
             usedDate: date,
             bbox: bbox
         };
-
     } catch (error) {
         console.error('❌ Error en la imagen Sentinel-1:', error.message);
         throw error;
