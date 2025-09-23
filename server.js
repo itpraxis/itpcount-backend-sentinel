@@ -369,37 +369,28 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
         fromDate.setDate(fromDate.getDate() - 3);
         toDate.setDate(toDate.getDate() + 3);
 
-        // Verificar disponibilidad en el catálogo con múltiples intentos
+        // Verificar disponibilidad en el catálogo
         const catalogUrl = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search';
         let catalogData = null;
-        let searchAttempts = [
-            // Intento 1: VH con IW
+        const searchConfigs = [
+            // Configuración 1: VH con IW
             { 
                 filter: "s1:polarization = 'VH' AND sar:instrument_mode = 'IW'",
-                polarization: "VH",
-                instrumentMode: "IW"
+                polarization: "VH"
             },
-            // Intento 2: VV con IW  
+            // Configuración 2: VV con IW
             { 
                 filter: "s1:polarization = 'VV' AND sar:instrument_mode = 'IW'", 
-                polarization: "VV", 
-                instrumentMode: "IW" 
+                polarization: "VV" 
             },
-            // Intento 3: Cualquier polarización con IW
+            // Configuración 3: Cualquier polarización con IW
             { 
                 filter: "sar:instrument_mode = 'IW'", 
-                polarization: null, 
-                instrumentMode: "IW" 
-            },
-            // Intento 4: Cualquier combinación
-            { 
-                filter: "", 
-                polarization: null, 
-                instrumentMode: null 
+                polarization: "VH" // Usar VH como predeterminado si no se especifica
             }
         ];
 
-        for (const attempt of searchAttempts) {
+        for (const config of searchConfigs) {
             const catalogPayload = {
                 "bbox": bbox,
                 "datetime": `${fromDate.toISOString().split('T')[0]}T00:00:00Z/${toDate.toISOString().split('T')[0]}T23:59:59Z`,
@@ -407,9 +398,9 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
                 "limit": 1
             };
             
-            // Solo añadir filtro si está definido y no está vacío
-            if (attempt.filter && attempt.filter.length > 0) {
-                catalogPayload.filter = attempt.filter;
+            // Solo añadir filtro si está definido
+            if (config.filter) {
+                catalogPayload.filter = config.filter;
             }
 
             try {
@@ -426,12 +417,12 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
                     const data = await catalogResponse.json();
                     if (data.features.length > 0) {
                         catalogData = data;
-                        console.log(`✅ Datos encontrados con filtro: ${attempt.filter || 'sin filtro'}`);
+                        console.log(`✅ Datos encontrados con configuración:`, config);
                         break;
                     }
                 }
             } catch (error) {
-                console.log(`❌ Error con intento "${attempt.filter || 'sin filtro'}":`, error.message);
+                console.log(`❌ Error con configuración "${config.filter}":`, error.message);
                 continue;
             }
         }
@@ -457,12 +448,11 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
         const foundDate = closestFeature.properties.datetime.split('T')[0];
         const orbitDirection = closestFeature.properties['sat:orbit_state'] || null;
         const detectedPolarization = closestFeature.properties['s1:polarization'];
-        const detectedInstrumentMode = closestFeature.properties['sar:instrument_mode'];
+        
+        // FORZAR USO DE VH - EVITA CUALQUIER TRANSFORMACIÓN
+        const bandToUse = 'VH'; // ¡Forzamos VH directamente!
 
-        // Determinar qué banda usar basado en lo que realmente está disponible
-        const bandToUse = detectedPolarization || 'VH'; // VH como fallback
-
-        // Payload simplificado y corregido para procesamiento de imagen
+        // Payload simplificado sin variables dinámicas
         const payload = {
             input: {
                 bounds: {
@@ -471,7 +461,7 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
                         coordinates: geometry
                     }
                 },
-                 data: [
+                 [
                     {
                         dataFilter: {
                             timeRange: {
@@ -497,7 +487,7 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
 function setup() {
     return {
         input: [{ 
-            bands: ["${bandToUse}", "dataMask"], 
+            bands: ["VH", "dataMask"], 
             units: "LINEAR_POWER" 
         }],
         output: { 
@@ -512,7 +502,7 @@ function evaluatePixel(samples) {
     // Filtrar muestras válidas
     let validSamples = [];
     for (let i = 0; i < samples.length; i++) {
-        if (samples[i].dataMask > 0 && !isNaN(samples[i]["${bandToUse}"])) {
+        if (samples[i].dataMask > 0 && !isNaN(samples[i]["VH"])) {
             validSamples.push(samples[i]);
         }
     }
@@ -524,7 +514,7 @@ function evaluatePixel(samples) {
     // Calcular media geométrica para reducir ruido speckle
     let sumLog = 0;
     for (let i = 0; i < validSamples.length; i++) {
-        let value = validSamples[i]["${bandToUse}"];
+        let value = validSamples[i]["VH"];
         // Evitar log(0)
         value = Math.max(value, 1e-6);
         sumLog += Math.log(value);
@@ -535,32 +525,25 @@ function evaluatePixel(samples) {
     const meanDb = 10 * Math.log10(meanLinear);
     
     // Parámetros de ajuste basados en tipo de terreno
-    // Estos valores están optimizados para imágenes terrestres
     const minDb = -25;
     const maxDb = -5;
     
     // Mapear el valor de dB al rango 0-255
     let normalizedValue = (meanDb - minDb) / (maxDb - minDb);
-    
-    // Asegurar que el valor esté dentro del rango [0, 1]
     normalizedValue = Math.max(0, Math.min(1, normalizedValue));
-    
-    // Convertir a rango 0-255
     let mappedValue = Math.round(normalizedValue * 255);
     
     return [mappedValue];
 }`
         };
 
-        // DEBUG: Imprimir el payload completo antes de enviarlo
+        // DEBUG: Imprimir el payload completo
         console.log("=== PAYLOAD PARA SENTINEL-1 ===");
         console.log("Fecha solicitada:", date);
         console.log("Fecha encontrada:", foundDate);
-        console.log("Banda a usar:", bandToUse);
-        console.log("Modo de instrumento:", detectedInstrumentMode);
-        console.log("Orbita:", orbitDirection);
+        console.log("Banda usada (forzada):", bandToUse);
         console.log("Dimensiones:", finalWidth, "x", finalHeight);
-        console.log("Evalscript:", payload.evalscript.substring(0, 200) + "...");
+        console.log("Evalscript tiene", payload.evalscript.length, "caracteres");
         console.log("==============================");
 
         const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
@@ -582,9 +565,8 @@ function evaluatePixel(samples) {
         const buffer = await imageResponse.arrayBuffer();
         const base64 = Buffer.from(buffer).toString('base64');
         
-        // Verificar que la imagen no sea completamente negra o vacía
         if (base64.length < 1000) {
-            throw new Error("La imagen generada es demasiado pequeña, probablemente está vacía.");
+            throw new Error("La imagen generada es demasiado pequeña.");
         }
 
         return {
@@ -593,8 +575,7 @@ function evaluatePixel(samples) {
             bbox: bbox,
             width: finalWidth,
             height: finalHeight,
-            polarization: bandToUse,
-            instrumentMode: detectedInstrumentMode
+            polarization: bandToUse
         };
 
     } catch (error) {
