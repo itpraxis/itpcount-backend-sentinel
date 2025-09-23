@@ -404,20 +404,12 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
             throw new Error("No se encontraron datos de Sentinel-1 para esta ubicación.");
         }
 
-        // Filtrar features válidos y corregir polarización errónea
+        // Filtrar features válidos
         const validFeatures = catalogData.features.filter(feature => {
             return feature.properties && 
                    feature.properties.datetime &&
                    feature.geometry &&
                    feature.geometry.coordinates;
-        }).map(feature => {
-            // Corregir valores erróneos de polarización
-            const polarization = feature.properties['s1:polarization'];
-            if (polarization === 'SH') {
-                console.warn("⚠️ Polarización 'SH' detectada, corrigiendo a 'VV'");
-                feature.properties['s1:polarization'] = 'VV';
-            }
-            return feature;
         });
         
         if (validFeatures.length === 0) {
@@ -443,16 +435,26 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
         const availablePolarization = closestFeature.properties['s1:polarization'];
         const instrumentMode = closestFeature.properties['sar:instrument_mode'];
 
-        // Mapear polarización a banda válida
-        const bandMapping = {
+        // Mapeo seguro de polarización a banda
+        const polarizationMap = {
             'VV': 'VV',
             'VH': 'VH', 
             'HH': 'HH',
-            'HV': 'HV'
+            'HV': 'HV',
+            'SV': 'VV', // Single VV/VH → usar VV
+            'SH': 'HH'  // Single HH/HV → usar HH
         };
         
-        // Si la polarización no es válida, usar VV como fallback
-        const bandToUse = bandMapping[availablePolarization] || 'VV';
+        // Determinar banda disponible con fallback
+        const detectedBand = polarizationMap[availablePolarization] || 'VV';
+        
+        // Verificar si la banda existe en el tile
+        const tileId = closestFeature.id;
+        const expectedBand = tileId.includes('_SSH_') ? 'HH' : 
+                           tileId.includes('_SSV_') ? 'VV' :
+                           tileId.includes('_DV_') ? 'VH' : 'VV';
+
+        const bandToUse = detectedBand;
 
         // Payload para procesamiento de imagen
         const payload = {
@@ -543,6 +545,7 @@ function evaluatePixel(samples) {
         console.log("Primera fecha disponible:", validFeatures[0].properties.datetime);
         console.log("Última fecha disponible:", validFeatures[validFeatures.length-1].properties.datetime);
         console.log("Polarización original:", availablePolarization);
+        console.log("Tile ID:", closestFeature.id);
         console.log("Banda usada:", bandToUse);
         console.log("Modo de instrumento:", instrumentMode);
         console.log("Orbita:", orbitDirection);
