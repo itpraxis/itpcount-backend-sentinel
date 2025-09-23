@@ -345,7 +345,7 @@ function evaluatePixel(sample) {
 };
 
 // ==============================================
-// ✅ FUNCIÓN FINAL: Obtiene la mejor imagen de Sentinel-1 para el frontend Gemini
+// ✅ FUNCIÓN: Obtiene la imagen de Sentinel-1 para el frontend (CORREGIDA) Qwen
 // ==============================================
 const fetchSentinel1Radar = async ({ geometry, date }) => {
     const accessToken = await getAccessToken();
@@ -353,33 +353,54 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
     if (!bbox) {
         throw new Error('No se pudo calcular el bounding box del polígono.');
     }
+    
+    try {
+        // Calcular área y tamaño óptimo
+        const areaInSquareMeters = calculatePolygonArea(bbox);
+        const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10);
+        
+        // Validar que el tamaño no sea demasiado pequeño
+        const finalWidth = Math.max(sizeInPixels, 512);
+        const finalHeight = Math.max(sizeInPixels, 512);
 
-    const fromDate = new Date(date);
-    fromDate.setDate(fromDate.getDate() - 7);
-    const fromDateISO = fromDate.toISOString().split('T')[0];
+        // Rango de búsqueda de tres días
+        const fromDate = new Date(date);
+        fromDate.setDate(fromDate.getDate() - 2); // 2 días antes
 
-    const tryRequest = async (polarization) => {
-        // ✅ CORRECCIÓN CLAVE: Evalscript más básico y robusto
-        const evalscript = `//VERSION=3
-function setup() {
-  return {
-    input: [{ bands: ["${polarization}", "dataMask"], units: "LINEAR_POWER" }],
-    output: { bands: 1, sampleType: "UINT8", format: "image/png" }
-  };
-}
-function evaluatePixel(samples) {
-  const linearValue = samples.${polarization};
-  if (!linearValue || samples.dataMask === 0) {
-    return [0];
-  }
-  
-  // ✅ Mapeo simple: escala el valor lineal a un valor visible
-  const mappedValue = Math.round(linearValue * 100);
-  
-  // Aseguramos que el valor esté entre 0 y 255
-  return [Math.max(0, Math.min(255, mappedValue))];
-}`;
+        // Verificar disponibilidad en el catálogo
+        const catalogUrl = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search';
+        const catalogPayload = {
+            "bbox": bbox,
+            "datetime": `${fromDate.toISOString().split('T')[0]}T00:00:00Z/${date}T23:59:59Z`,
+            "collections": ["sentinel-1-grd"],
+            "limit": 1,
+            "filter": "sar:instrument_mode = 'IW' AND s1:polarization = 'VH'"
+        };
 
+        const catalogResponse = await fetch(catalogUrl, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${accessToken}`
+            },
+            body: JSON.stringify(catalogPayload)
+        });
+
+        if (!catalogResponse.ok) {
+            const error = await catalogResponse.text();
+            throw new Error(`Error al verificar disponibilidad de datos: ${error}`);
+        }
+
+        const catalogData = await catalogResponse.json();
+        if (catalogData.features.length === 0) {
+            throw new Error(`No se encontraron datos de Sentinel-1 (VH) para la fecha ${date} en esta ubicación. Por favor, prueba con otra fecha.`);
+        }
+
+        // Usar la fecha exacta del primer resultado encontrado
+        const foundDate = catalogData.features[0].properties.datetime.split('T')[0];
+        const orbitDirection = catalogData.features[0].properties['sat:orbit_state'] || null;
+
+        // Payload mejorado para procesamiento de imagen
         const payload = {
             input: {
                 bounds: {
@@ -392,67 +413,110 @@ function evaluatePixel(samples) {
                     {
                         dataFilter: {
                             timeRange: {
-                                from: `${fromDateISO}T00:00:00Z`,
-                                to: `${date}T23:59:59Z`
+                                from: `${foundDate}T00:00:00Z`, // Usar fecha exacta encontrada
+                                to: `${foundDate}T23:59:59Z`
                             },
-                            polarization: polarization,
-                            orbitDirection: "ASCENDING"
-                        },
-                        processing: {
-                            mosaicking: "ORBIT"
+                            polarization: "VH",
+                            mosaicOrder: "mostRecent", // Asegurar que tomamos la imagen más reciente
+                            upsampling: "BILINEAR", // Mejor calidad de muestreo
+                            downsampling: "AVERAGE"  // Mejor calidad de reducción
                         },
                         type: "sentinel-1-grd"
                     }
                 ]
             },
             output: {
-                width: 256,
-                height: 256,
+                width: finalWidth,
+                height: finalHeight,
                 format: "image/png",
                 sampleType: "UINT8"
             },
-            evalscript: evalscript
+            evalscript: `//VERSION=3
+function setup() {
+    return {
+        input: [{ 
+            bands: ["VH", "dataMask"], 
+            units: "LINEAR_POWER" 
+        }],
+        output: { 
+            bands: 1, 
+            sampleType: "UINT8", 
+            format: "image/png" 
+        }
+    };
+}
+
+function evaluatePixel(samples) {
+    // Manejar múltiples muestras si hay varias adquisiciones
+    let vh_linear = 0;
+    let validSamples = 0;
+    
+    for (let i = 0; i < samples.length; i++) {
+        if (samples[i].dataMask > 0 && !isNaN(samples[i].VH)) {
+            vh_linear += samples[i].VH;
+            validSamples++;
+        }
+    }
+    
+    if (validSamples === 0) {
+        return [0]; // No data
+    }
+    
+    vh_linear = vh_linear / validSamples; // Promedio de muestras válidas
+    
+    // Convertir a dB
+    const vh_db = 10 * Math.log10(vh_linear);
+    
+    // Parámetros de ajuste mejorados para tierra
+    const minDb = -24; // Valor mínimo típico para áreas terrestres
+    const maxDb = -5;  // Valor máximo típico para áreas terrestres (evita saturación)
+    
+    // Mapear el valor de dB al rango 0-255 con manejo de bordes
+    let normalizedValue = (vh_db - minDb) / (maxDb - minDb);
+    
+    // Aplicar una curva gamma suave para mejorar el contraste
+    let gamma = 1.8;
+    let adjustedValue = Math.pow(normalizedValue, 1/gamma);
+    
+    // Convertir a rango 0-255
+    let mappedValue = Math.round(adjustedValue * 255);
+    
+    // Asegurar que el valor esté dentro del rango [0, 255]
+    mappedValue = Math.max(0, Math.min(255, mappedValue));
+    
+    return [mappedValue];
+}`
         };
 
         const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
-                'Authorization': `Bearer ${accessToken}`
+                'Authorization': `Bearer ${accessToken}`,
+                'Cache-Control': 'no-cache' // Evitar caché de respuestas anteriores
             },
             body: JSON.stringify(payload)
         });
 
         if (!imageResponse.ok) {
-            throw new Error(`Solicitud con polarización ${polarization} falló.`);
+            const error = await imageResponse.text();
+            throw new Error(`Error en la imagen Sentinel-1 para ${date}: ${error}`);
         }
-        return imageResponse;
-    };
 
-    try {
-        const responseVH = await tryRequest("VH");
-        const buffer = await responseVH.arrayBuffer();
+        const buffer = await imageResponse.arrayBuffer();
         const base64 = Buffer.from(buffer).toString('base64');
+
         return {
             url: `data:image/png;base64,${base64}`,
-            usedDate: date,
-            bbox: bbox
+            usedDate: foundDate,
+            bbox: bbox,
+            width: finalWidth,
+            height: finalHeight
         };
-    } catch (vhError) {
-        console.log("⚠️ No se encontraron datos VH. Reintentando con VV...");
-        try {
-            const responseVV = await tryRequest("VV");
-            const buffer = await responseVV.arrayBuffer();
-            const base64 = Buffer.from(buffer).toString('base64');
-            return {
-                url: `data:image/png;base64,${base64}`,
-                usedDate: date,
-                bbox: bbox
-            };
-        } catch (vvError) {
-            console.error('❌ Ambos intentos de polarización fallaron:', vvError.message);
-            throw new Error(`Error al obtener imagen para ${date}: ${vvError.message}`);
-        }
+
+    } catch (error) {
+        console.error('❌ Error en la imagen Sentinel-1:', error.message);
+        throw error;
     }
 };
 
