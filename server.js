@@ -366,9 +366,6 @@ function evaluatePixel(samples) {
 // ==============================================
 // ✅ FUNCIÓN FINAL: Obtiene la mejor imagen de Sentinel-1 para el frontend Gemini
 // ==============================================
-// ==============================================
-// ✅ FUNCIÓN FINAL: Obtiene la mejor imagen de Sentinel-1 para el frontend
-// ==============================================
 const fetchSentinel1Radar = async ({ geometry, date }) => {
     const accessToken = await getAccessToken();
     const bbox = polygonToBbox(geometry);
@@ -381,7 +378,7 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
     const fromDateISO = fromDate.toISOString().split('T')[0];
 
     const tryRequest = async (polarization) => {
-        // ✅ SOLUCIÓN CLAVE: Evalscript simplificado
+        // ✅ CORRECCIÓN CLAVE: Evalscript más básico y robusto
         const evalscript = `//VERSION=3
 function setup() {
   return {
@@ -395,13 +392,11 @@ function evaluatePixel(samples) {
     return [0];
   }
   
-  // ✅ Mapeo logarítmico para asegurar visibilidad de cualquier dato
-  const dbValue = 10 * Math.log10(linearValue);
-  const minDb = -25;
-  const maxDb = 5;
-  let mappedValue = Math.round((dbValue - minDb) / (maxDb - minDb) * 255);
-  mappedValue = Math.max(0, Math.min(255, mappedValue));
-  return [mappedValue];
+  // ✅ Mapeo simple: escala el valor lineal a un valor visible
+  const mappedValue = Math.round(linearValue * 100);
+  
+  // Aseguramos que el valor esté entre 0 y 255
+  return [Math.max(0, Math.min(255, mappedValue))];
 }`;
 
         const payload = {
@@ -430,7 +425,6 @@ function evaluatePixel(samples) {
                 ]
             },
             output: {
-                // ✅ SOLUCIÓN CLAVE: Tamaño fijo para evitar errores de cálculo
                 width: 256,
                 height: 256,
                 format: "image/png",
