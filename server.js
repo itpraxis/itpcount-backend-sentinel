@@ -365,6 +365,9 @@ function evaluatePixel(sample) {
 // ==============================================
 // ✅ FUNCIÓN: Obtiene la imagen de Sentinel-1 IW GRD (CORREGIDA)
 // ==============================================
+// ==============================================
+// ✅ FUNCIÓN: Obtiene la imagen de Sentinel-1 IW GRD (CORREGIDA)
+// ==============================================
 const fetchSentinel1Radar = async ({ geometry, date }) => {
     const accessToken = await getAccessToken();
     const bbox = polygonToBbox(geometry);
@@ -379,15 +382,14 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
         fromDate.setDate(fromDate.getDate() - 30);
         toDate.setDate(toDate.getDate() + 7);
 
-        // BUSCAR PRODUCTOS SENTINEL-1 IW GRD CON VV/VH
+        // BUSCAR TODOS LOS PRODUCTOS SENTINEL-1 IW GRD SIN FILTRO COMPLEJO
         const catalogUrl = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search';
         
         const catalogPayload = {
             "bbox": bbox,
             "datetime": `${fromDate.toISOString().split('T')[0]}T00:00:00Z/${toDate.toISOString().split('T')[0]}T23:59:59Z`,
-            "collections": ["sentinel-1-grd"], // Esta colección debería funcionar
-            "limit": 5,
-            "filter": "sar:instrument_mode = 'IW' AND (s1:polarization = 'VV' OR s1:polarization = 'VH')"
+            "collections": ["sentinel-1-grd"],
+            "limit": 10
         };
 
         console.log(`Buscando IW GRD entre ${fromDate.toISOString()} y ${toDate.toISOString()}`);
@@ -410,7 +412,18 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
         const catalogData = await catalogResponse.json();
         
         if (catalogData.features.length === 0) {
-            throw new Error("No se encontraron datos de Sentinel-1 IW GRD para esta ubicación.");
+            throw new Error("No se encontraron datos de Sentinel-1 para esta ubicación.");
+        }
+
+        // Filtrar manualmente los features válidos para IW GRD
+        const validFeatures = catalogData.features.filter(feature => {
+            const instrumentMode = feature.properties['sar:instrument_mode'];
+            const polarization = feature.properties['s1:polarization'];
+            return instrumentMode === 'IW' && (polarization === 'VV' || polarization === 'VH');
+        });
+
+        if (validFeatures.length === 0) {
+            throw new Error("No se encontraron productos IW GRD con polarización VV o VH.");
         }
 
         // Procesar el feature más cercano
@@ -418,7 +431,7 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
         let closestFeature = null;
         let minDiff = Infinity;
 
-        for (const feature of catalogData.features) {
+        for (const feature of validFeatures) {
             const featureDate = new Date(feature.properties.datetime);
             const diff = Math.abs(featureDate - targetDate);
             if (diff < minDiff) {
@@ -430,8 +443,8 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
         const foundDate = closestFeature.properties.datetime.split('T')[0];
         const availablePolarization = closestFeature.properties['s1:polarization'];
         
-        // Ahora SÍ puedes confiar en esta polarización
-        const bandToUse = availablePolarization; // Será VH o VV
+        // Usar la banda disponible
+        const bandToUse = availablePolarization;
 
         const payload = {
             input: {
@@ -448,7 +461,6 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
                                 from: `${foundDate}T00:00:00Z`,
                                 to: `${foundDate}T23:59:59Z`
                             },
-                            polarization: bandToUse,
                             mosaicOrder: "mostRecent"
                         },
                         type: "sentinel-1-grd"
