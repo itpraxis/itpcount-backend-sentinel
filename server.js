@@ -353,6 +353,9 @@ function evaluatePixel(sample) {
 // ==============================================
 // ✅ FUNCIÓN: Usa cualquier dato de Sentinel-1 disponible
 // ==============================================
+// ==============================================
+// ✅ FUNCIÓN: Obtiene la imagen de Sentinel-1 para el frontend (DEFINITIVA)
+// ==============================================
 const fetchSentinel1Radar = async ({ geometry, date }) => {
     const accessToken = await getAccessToken();
     const bbox = polygonToBbox(geometry);
@@ -361,13 +364,21 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
     }
     
     try {
+        // Calcular área y tamaño óptimo
+        const areaInSquareMeters = calculatePolygonArea(bbox);
+        const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10);
+        
+        // Validar que el tamaño no sea demasiado pequeño
+        const finalWidth = Math.max(sizeInPixels, 512);
+        const finalHeight = Math.max(sizeInPixels, 512);
+
         // Rango de búsqueda ampliado
         const fromDate = new Date(date);
         const toDate = new Date(date);
         fromDate.setDate(fromDate.getDate() - 30);
         toDate.setDate(toDate.getDate() + 7);
 
-        // BUSCAR CUALQUIER DATO DE SENTINEL-1 EN LA ZONA
+        // Verificar disponibilidad en el catálogo SIN FILTROS
         const catalogUrl = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search';
         
         const catalogPayload = {
@@ -378,6 +389,7 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
         };
 
         console.log(`Buscando cualquier dato entre ${fromDate.toISOString()} y ${toDate.toISOString()}`);
+        console.log(`BBOX: [${bbox.join(', ')}]`);
 
         const catalogResponse = await fetch(catalogUrl, {
             method: 'POST',
@@ -389,7 +401,9 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
         });
 
         if (!catalogResponse.ok) {
-            throw new Error(`Error en catálogo: ${await catalogResponse.text()}`);
+            const errorText = await catalogResponse.text();
+            console.error("❌ Error en consulta al catálogo:", errorText);
+            throw new Error(`Error en consulta al catálogo: ${errorText}`);
         }
 
         const catalogData = await catalogResponse.json();
@@ -402,6 +416,9 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
         const feature = catalogData.features[0];
         const foundDate = feature.properties.datetime.split('T')[0];
         const tileId = feature.id;
+
+        // Log para ver exactamente qué tile estamos recibiendo
+        console.log("Tile ID encontrado:", tileId);
 
         // Determinar banda disponible por el nombre del tile
         let bandToUse = null;
@@ -421,10 +438,16 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
             instrumentMode = 'IW';
         }
 
+        // Fallback seguro si no se puede determinar la banda
         if (!bandToUse) {
-            throw new Error("No se pudo determinar la banda disponible del tile.");
+            console.warn("No se pudo determinar la banda. Usando HH como predeterminado para SSH.");
+            bandToUse = 'HH'; // HH es más común en SSH
+            instrumentMode = tileId.includes('IW') ? 'IW' : 'EW';
         }
 
+        console.log(`Usando banda: ${bandToUse}, Modo: ${instrumentMode}`);
+
+        // Payload para procesamiento de imagen
         const payload = {
             input: {
                 bounds: {
@@ -447,8 +470,8 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
                 ]
             },
             output: {
-                width: 512,
-                height: 512,
+                width: finalWidth,
+                height: finalHeight,
                 format: "image/png",
                 sampleType: "UINT8"
             },
@@ -498,12 +521,18 @@ function evaluatePixel(samples) {
 
         if (!imageResponse.ok) {
             const errorText = await imageResponse.text();
-            throw new Error(`Error en procesamiento: ${errorText}`);
+            console.error("❌ RESPUESTA COMPLETA DEL ERROR:", errorText);
+            throw new Error(`Error en la imagen Sentinel-1: ${errorText}`);
         }
 
         const buffer = await imageResponse.arrayBuffer();
         const base64 = Buffer.from(buffer).toString('base64');
         
+        // Validación mejorada: imagen mínima pero razonable
+        if (base64.length < 1000) {
+            throw new Error("La imagen generada es demasiado pequeña.");
+        }
+
         return {
             url: `image/png;base64,${base64}`,
             usedDate: foundDate,
@@ -513,7 +542,7 @@ function evaluatePixel(samples) {
         };
 
     } catch (error) {
-        console.error('❌ Error en Sentinel-1:', error.message);
+        console.error('❌ Error en la imagen Sentinel-1:', error.message);
         throw error;
     }
 };
