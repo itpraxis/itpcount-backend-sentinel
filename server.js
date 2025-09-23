@@ -363,105 +363,86 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
         const finalWidth = Math.max(sizeInPixels, 512);
         const finalHeight = Math.max(sizeInPixels, 512);
 
-        // Rango de búsqueda ampliado
+        // Rango de búsqueda ampliado a 90 días hacia atrás (máxima flexibilidad)
         const fromDate = new Date(date);
         const toDate = new Date(date);
-        fromDate.setDate(fromDate.getDate() - 30);
-        toDate.setDate(toDate.getDate() + 7);
+        fromDate.setDate(fromDate.getDate() - 90); // Buscar hasta 3 meses antes
+        toDate.setDate(toDate.getDate() + 30);     // Y 1 mes después
 
-        // Verificar disponibilidad en el catálogo
+        // Verificar disponibilidad en el catálogo SIN FILTROS
         const catalogUrl = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search';
         
-        // Priorizar primero IW con VH, luego otras combinaciones
-        const searchConfigs = [
-            // Intento 1: IW con VH (ideal para tierra)
-            { 
-                filter: "s1:polarization = 'VH' AND sar:instrument_mode = 'IW'",
-                polarization: "VH",
-                instrumentMode: "IW"
-            },
-            // Intento 2: IW con VV (segunda opción para tierra)
-            { 
-                filter: "s1:polarization = 'VV' AND sar:instrument_mode = 'IW'", 
-                polarization: "VV", 
-                instrumentMode: "IW" 
-            },
-            // Intento 3: Cualquier combinación de IW
-            { 
-                filter: "sar:instrument_mode = 'IW'", 
-                polarization: null, 
-                instrumentMode: "IW" 
-            },
-            // Intento 4: EW con VH (menos ideal pero aceptable)
-            { 
-                filter: "s1:polarization = 'VH' AND sar:instrument_mode = 'EW'",
-                polarization: "VH",
-                instrumentMode: "EW"
-            },
-            // Intento 5: EW con VV (última opción)
-            { 
-                filter: "s1:polarization = 'VV' AND sar:instrument_mode = 'EW'", 
-                polarization: "VV", 
-                instrumentMode: "EW" 
-            }
-        ];
+        // Configuración mínima posible
+        const catalogPayload = {
+            "bbox": bbox,
+            "datetime": `${fromDate.toISOString().split('T')[0]}T00:00:00Z/${toDate.toISOString().split('T')[0]}T23:59:59Z`,
+            "collections": ["sentinel-1-grd"],
+            "limit": 5
+            // ¡NO USAR FILTRO! Para máxima compatibilidad
+        };
 
-        let catalogData = null;
-        let usedConfig = null;
+        console.log(`Buscando datos entre ${fromDate.toISOString()} y ${toDate.toISOString()}`);
+        console.log(`BBOX: [${bbox.join(', ')}]`);
 
-        for (const config of searchConfigs) {
-            const catalogPayload = {
+        const catalogResponse = await fetch(catalogUrl, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${accessToken}`
+            },
+            body: JSON.stringify(catalogPayload)
+        });
+
+        if (!catalogResponse.ok) {
+            const errorText = await catalogResponse.text();
+            console.error("❌ Error en consulta al catálogo:", errorText);
+            throw new Error(`Error en consulta al catálogo: ${errorText}`);
+        }
+
+        const catalogData = await catalogResponse.json();
+        console.log(`Datos encontrados: ${catalogData.features.length} features`);
+        
+        if (catalogData.features.length === 0) {
+            // Hacer una verificación extrema: buscar cualquier dato en Sentinel-1
+            const extremeCheck = {
                 "bbox": bbox,
-                "datetime": `${fromDate.toISOString().split('T')[0]}T00:00:00Z/${toDate.toISOString().split('T')[0]}T23:59:59Z`,
                 "collections": ["sentinel-1-grd"],
-                "limit": 50
+                "limit": 1
             };
             
-            if (config.filter) {
-                catalogPayload.filter = config.filter;
-            }
-
-            try {
-                console.log(`Intentando con configuración:`, config.filter || 'sin filtro');
-                
-                const catalogResponse = await fetch(catalogUrl, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${accessToken}`
-                    },
-                    body: JSON.stringify(catalogPayload)
-                });
-
-                if (catalogResponse.ok) {
-                    const data = await catalogResponse.json();
-                    console.log(`Datos encontrados: ${data.features.length} features`);
-                    
-                    if (data.features.length > 0) {
-                        // Filtrar features válidos
-                        const validFeatures = data.features.filter(feature => {
-                            return feature.properties && 
-                                   feature.properties.datetime &&
-                                   feature.geometry &&
-                                   feature.geometry.coordinates;
-                        });
-                        
-                        if (validFeatures.length > 0) {
-                            catalogData = { ...data, features: validFeatures };
-                            usedConfig = config;
-                            console.log(`✅ Datos válidos encontrados con:`, config.filter);
-                            break;
-                        }
-                    }
+            const extremeResponse = await fetch(catalogUrl, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${accessToken}`
+                },
+                body: JSON.stringify(extremeCheck)
+            });
+            
+            if (extremeResponse.ok) {
+                const extremeData = await extremeResponse.json();
+                if (extremeData.features.length > 0) {
+                    console.log("✅ Hay datos de Sentinel-1 disponibles, pero no en el rango de tiempo");
+                    throw new Error(`No hay datos disponibles en el rango de fechas solicitado. El dato más reciente es de ${extremeData.features[0].properties.datetime.split('T')[0]}`);
+                } else {
+                    console.log("❌ No hay absolutamente ningún dato de Sentinel-1 disponible para esta ubicación");
+                    throw new Error("No se encontraron datos de Sentinel-1 para esta ubicación. Verifica las coordenadas o prueba con otra ubicación.");
                 }
-            } catch (error) {
-                console.log(`❌ Error con configuración "${config.filter || 'sin filtro'}":`, error.message);
-                continue;
+            } else {
+                throw new Error("Error al verificar disponibilidad de datos de Sentinel-1");
             }
         }
 
-        if (!catalogData || catalogData.features.length === 0) {
-            throw new Error(`No se encontraron datos de Sentinel-1 para la ubicación.`);
+        // Filtrar features válidos
+        const validFeatures = catalogData.features.filter(feature => {
+            return feature.properties && 
+                   feature.properties.datetime &&
+                   feature.geometry &&
+                   feature.geometry.coordinates;
+        });
+        
+        if (validFeatures.length === 0) {
+            throw new Error("Los datos encontrados no tienen información válida");
         }
 
         // Encontrar la fecha más cercana
@@ -469,7 +450,7 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
         let closestFeature = null;
         let minDiff = Infinity;
 
-        for (const feature of catalogData.features) {
+        for (const feature of validFeatures) {
             const featureDate = new Date(feature.properties.datetime);
             const diff = Math.abs(featureDate - targetDate);
             if (diff < minDiff) {
@@ -483,8 +464,8 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
         const availablePolarization = closestFeature.properties['s1:polarization'];
         const instrumentMode = closestFeature.properties['sar:instrument_mode'];
 
-        // Usar la polarización disponible en la imagen encontrada
-        const bandToUse = availablePolarization; // ¡Usar lo que realmente está disponible!
+        // Usar la polarización disponible
+        const bandToUse = availablePolarization || 'VV'; // VV como fallback
 
         // Payload para procesamiento de imagen
         const payload = {
@@ -555,15 +536,9 @@ function evaluatePixel(samples) {
     // Convertir a dB
     const meanDb = 10 * Math.log10(meanLinear);
     
-    // Parámetros de ajuste según modo de instrumento
-    let minDb, maxDb;
-    if ("${instrumentMode}" === "IW") {
-        minDb = -25;
-        maxDb = -5;
-    } else {
-        minDb = -30;
-        maxDb = 0;
-    }
+    // Parámetros de ajuste
+    let minDb = -30;
+    let maxDb = 0;
     
     let normalizedValue = (meanDb - minDb) / (maxDb - minDb);
     normalizedValue = Math.max(0, Math.min(1, normalizedValue));
@@ -577,15 +552,13 @@ function evaluatePixel(samples) {
         console.log("Coordenadas BBOX:", bbox);
         console.log("Fecha solicitada:", date);
         console.log("Fecha encontrada:", foundDate);
-        console.log("Número de features disponibles:", catalogData.features.length);
-        console.log("Primera fecha disponible:", catalogData.features[0].properties.datetime);
-        console.log("Última fecha disponible:", catalogData.features[catalogData.features.length-1].properties.datetime);
-        console.log("Banda REAL disponible:", availablePolarization);
-        console.log("Banda usada en evalscript:", bandToUse);
+        console.log("Número de features disponibles:", validFeatures.length);
+        console.log("Primera fecha disponible:", validFeatures[0].properties.datetime);
+        console.log("Última fecha disponible:", validFeatures[validFeatures.length-1].properties.datetime);
+        console.log("Banda disponible:", availablePolarization);
         console.log("Modo de instrumento:", instrumentMode);
         console.log("Orbita:", orbitDirection);
         console.log("Dimensiones:", finalWidth, "x", finalHeight);
-        console.log("Configuración usada:", usedConfig);
         console.log("================================");
 
         const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
