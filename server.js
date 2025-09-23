@@ -363,31 +363,46 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
         const finalWidth = Math.max(sizeInPixels, 512);
         const finalHeight = Math.max(sizeInPixels, 512);
 
-        // Rango de búsqueda ampliado a 30 días hacia atrás (más flexible)
+        // Rango de búsqueda ampliado
         const fromDate = new Date(date);
         const toDate = new Date(date);
-        fromDate.setDate(fromDate.getDate() - 30); // Buscar hasta 30 días antes
-        toDate.setDate(toDate.getDate() + 7);      // Y 7 días después
+        fromDate.setDate(fromDate.getDate() - 30);
+        toDate.setDate(toDate.getDate() + 7);
 
-        // Verificar disponibilidad en el catálogo con múltiples intentos
+        // Verificar disponibilidad en el catálogo
         const catalogUrl = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search';
         
-        // Intentar primero con filtro estricto, luego sin filtro
+        // Priorizar primero IW con VH, luego otras combinaciones
         const searchConfigs = [
-            // Intento 1: Filtro específico
+            // Intento 1: IW con VH (ideal para tierra)
             { 
                 filter: "s1:polarization = 'VH' AND sar:instrument_mode = 'IW'",
-                polarization: "VH"
+                polarization: "VH",
+                instrumentMode: "IW"
             },
-            // Intento 2: Solo modo IW
+            // Intento 2: IW con VV (segunda opción para tierra)
+            { 
+                filter: "s1:polarization = 'VV' AND sar:instrument_mode = 'IW'", 
+                polarization: "VV", 
+                instrumentMode: "IW" 
+            },
+            // Intento 3: Cualquier combinación de IW
             { 
                 filter: "sar:instrument_mode = 'IW'", 
-                polarization: "VH" 
+                polarization: null, 
+                instrumentMode: "IW" 
             },
-            // Intento 3: Sin filtro (máxima flexibilidad)
+            // Intento 4: EW con VH (menos ideal pero aceptable)
             { 
-                filter: null, 
-                polarization: "VH" 
+                filter: "s1:polarization = 'VH' AND sar:instrument_mode = 'EW'",
+                polarization: "VH",
+                instrumentMode: "EW"
+            },
+            // Intento 5: EW con VV (última opción)
+            { 
+                filter: "s1:polarization = 'VV' AND sar:instrument_mode = 'EW'", 
+                polarization: "VV", 
+                instrumentMode: "EW" 
             }
         ];
 
@@ -399,11 +414,10 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
                 "bbox": bbox,
                 "datetime": `${fromDate.toISOString().split('T')[0]}T00:00:00Z/${toDate.toISOString().split('T')[0]}T23:59:59Z`,
                 "collections": ["sentinel-1-grd"],
-                "limit": 50 // Obtener más resultados para tener opciones
+                "limit": 50
             };
             
-            // Añadir filtro solo si está definido
-            if (config.filter !== null) {
+            if (config.filter) {
                 catalogPayload.filter = config.filter;
             }
 
@@ -424,24 +438,21 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
                     console.log(`Datos encontrados: ${data.features.length} features`);
                     
                     if (data.features.length > 0) {
-                        // Filtrar features válidos (con datos reales)
+                        // Filtrar features válidos
                         const validFeatures = data.features.filter(feature => {
                             return feature.properties && 
                                    feature.properties.datetime &&
-                                   feature.geometry && 
+                                   feature.geometry &&
                                    feature.geometry.coordinates;
                         });
                         
                         if (validFeatures.length > 0) {
                             catalogData = { ...data, features: validFeatures };
                             usedConfig = config;
-                            console.log(`✅ Datos válidos encontrados con:`, config.filter || 'sin filtro');
+                            console.log(`✅ Datos válidos encontrados con:`, config.filter);
                             break;
                         }
                     }
-                } else {
-                    const errorText = await catalogResponse.text();
-                    console.log(`❌ Respuesta no OK:`, errorText);
                 }
             } catch (error) {
                 console.log(`❌ Error con configuración "${config.filter || 'sin filtro'}":`, error.message);
@@ -450,10 +461,10 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
         }
 
         if (!catalogData || catalogData.features.length === 0) {
-            throw new Error(`No se encontraron datos de Sentinel-1 para la ubicación en el rango de fechas ${fromDate.toISOString().split('T')[0]} a ${toDate.toISOString().split('T')[0]}.`);
+            throw new Error(`No se encontraron datos de Sentinel-1 para la ubicación.`);
         }
 
-        // Encontrar la fecha más cercana a la solicitada
+        // Encontrar la fecha más cercana
         const targetDate = new Date(date);
         let closestFeature = null;
         let minDiff = Infinity;
@@ -469,12 +480,11 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
 
         const foundDate = closestFeature.properties.datetime.split('T')[0];
         const orbitDirection = closestFeature.properties['sat:orbit_state'] || null;
-        const detectedPolarization = closestFeature.properties['s1:polarization'] || 'VH';
-        const instrumentMode = closestFeature.properties['sar:instrument_mode'] || 'IW';
+        const availablePolarization = closestFeature.properties['s1:polarization'];
+        const instrumentMode = closestFeature.properties['sar:instrument_mode'];
 
-        // Usar VH como banda principal, pero preparado para VV si es necesario
-        const primaryBand = 'VH';
-        const secondaryBand = 'VV';
+        // Usar la polarización disponible en la imagen encontrada
+        const bandToUse = availablePolarization; // ¡Usar lo que realmente está disponible!
 
         // Payload para procesamiento de imagen
         const payload = {
@@ -511,7 +521,7 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
 function setup() {
     return {
         input: [{ 
-            bands: ["${primaryBand}", "${secondaryBand}", "dataMask"], 
+            bands: ["${bandToUse}", "dataMask"], 
             units: "LINEAR_POWER" 
         }],
         output: { 
@@ -523,51 +533,39 @@ function setup() {
 }
 
 function evaluatePixel(samples) {
-    // Manejar múltiples muestras y diferentes bandas
-    let vhSum = 0;
-    let vvSum = 0;
-    let validSamples = 0;
-    
+    let validSamples = [];
     for (let i = 0; i < samples.length; i++) {
-        const s = samples[i];
-        if (s.dataMask > 0) {
-            // Verificar que las bandas existan y no sean NaN
-            if (s["${primaryBand}"] !== undefined && !isNaN(s["${primaryBand}"])) {
-                vhSum += s["${primaryBand}"];
-            }
-            if (s["${secondaryBand}"] !== undefined && !isNaN(s["${secondaryBand}"])) {
-                vvSum += s["${secondaryBand}"];
-            }
-            validSamples++;
+        if (samples[i].dataMask > 0 && !isNaN(samples[i]["${bandToUse}"])) {
+            validSamples.push(samples[i]);
         }
     }
     
-    if (validSamples === 0) {
-        return [0]; // No data
+    if (validSamples.length === 0) {
+        return [0];
     }
     
-    // Calcular promedios
-    const meanVH = vhSum / validSamples;
-    const meanVV = vvSum / validSamples;
+    // Calcular media geométrica
+    let sumLog = 0;
+    for (let i = 0; i < validSamples.length; i++) {
+        let value = Math.max(validSamples[i]["${bandToUse}"], 1e-6);
+        sumLog += Math.log(value);
+    }
+    let meanLinear = Math.exp(sumLog / validSamples.length);
     
     // Convertir a dB
-    const vh_db = meanVH > 0 ? 10 * Math.log10(meanVH) : -30;
-    const vv_db = meanVV > 0 ? 10 * Math.log10(meanVV) : -30;
+    const meanDb = 10 * Math.log10(meanLinear);
     
-    // Calcular relación VV/VH (común en detección de cambios)
-    const ratio = meanVH > 0 ? meanVV / meanVH : 0;
-    const ratio_db = ratio > 0 ? 10 * Math.log10(ratio) : -10;
+    // Parámetros de ajuste según modo de instrumento
+    let minDb, maxDb;
+    if ("${instrumentMode}" === "IW") {
+        minDb = -25;
+        maxDb = -5;
+    } else {
+        minDb = -30;
+        maxDb = 0;
+    }
     
-    // Combinar información de ambas bandas
-    // Ponderar VH más fuertemente ya que es nuestra banda principal
-    const combinedValue = 0.7 * vh_db + 0.3 * ratio_db;
-    
-    // Parámetros de ajuste basados en experiencia
-    const minDb = -24;
-    const maxDb = -4;
-    
-    // Mapear al rango 0-255
-    let normalizedValue = (combinedValue - minDb) / (maxDb - minDb);
+    let normalizedValue = (meanDb - minDb) / (maxDb - minDb);
     normalizedValue = Math.max(0, Math.min(1, normalizedValue));
     let mappedValue = Math.round(normalizedValue * 255);
     
@@ -575,7 +573,6 @@ function evaluatePixel(samples) {
 }`
         };
 
-        // DEBUG: Imprimir información crucial
         console.log("=== INFORMACIÓN PARA SENTINEL-1 ===");
         console.log("Coordenadas BBOX:", bbox);
         console.log("Fecha solicitada:", date);
@@ -583,7 +580,8 @@ function evaluatePixel(samples) {
         console.log("Número de features disponibles:", catalogData.features.length);
         console.log("Primera fecha disponible:", catalogData.features[0].properties.datetime);
         console.log("Última fecha disponible:", catalogData.features[catalogData.features.length-1].properties.datetime);
-        console.log("Banda usada:", primaryBand);
+        console.log("Banda REAL disponible:", availablePolarization);
+        console.log("Banda usada en evalscript:", bandToUse);
         console.log("Modo de instrumento:", instrumentMode);
         console.log("Orbita:", orbitDirection);
         console.log("Dimensiones:", finalWidth, "x", finalHeight);
@@ -609,9 +607,8 @@ function evaluatePixel(samples) {
         const buffer = await imageResponse.arrayBuffer();
         const base64 = Buffer.from(buffer).toString('base64');
         
-        // Verificar que la imagen no esté vacía
         if (base64.length < 1000) {
-            throw new Error("La imagen generada es demasiado pequeña, probablemente está vacía.");
+            throw new Error("La imagen generada es demasiado pequeña.");
         }
 
         return {
@@ -620,7 +617,7 @@ function evaluatePixel(samples) {
             bbox: bbox,
             width: finalWidth,
             height: finalHeight,
-            polarization: primaryBand,
+            polarization: availablePolarization,
             instrumentMode: instrumentMode,
             originalRequestDate: date
         };
