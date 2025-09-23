@@ -362,6 +362,9 @@ function evaluatePixel(sample) {
 // ==============================================
 // ✅ FUNCIÓN: Obtiene la imagen de Sentinel-1 para el frontend (CORREGIDA)
 // ==============================================
+// ==============================================
+// ✅ FUNCIÓN: Obtiene la imagen de Sentinel-1 IW GRD (CORREGIDA)
+// ==============================================
 const fetchSentinel1Radar = async ({ geometry, date }) => {
     const accessToken = await getAccessToken();
     const bbox = polygonToBbox(geometry);
@@ -376,17 +379,18 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
         fromDate.setDate(fromDate.getDate() - 30);
         toDate.setDate(toDate.getDate() + 7);
 
-        // Verificar disponibilidad en el catálogo SIN FILTROS
+        // BUSCAR PRODUCTOS SENTINEL-1 IW GRD CON VV/VH
         const catalogUrl = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search';
         
         const catalogPayload = {
             "bbox": bbox,
             "datetime": `${fromDate.toISOString().split('T')[0]}T00:00:00Z/${toDate.toISOString().split('T')[0]}T23:59:59Z`,
-            "collections": ["sentinel-1-grd"],
-            "limit": 1
+            "collections": ["sentinel-1-grd"], // Esta colección debería funcionar
+            "limit": 5,
+            "filter": "sar:instrument_mode = 'IW' AND (s1:polarization = 'VV' OR s1:polarization = 'VH')"
         };
 
-        console.log(`Buscando cualquier dato entre ${fromDate.toISOString()} y ${toDate.toISOString()}`);
+        console.log(`Buscando IW GRD entre ${fromDate.toISOString()} y ${toDate.toISOString()}`);
         console.log(`BBOX: [${bbox.join(', ')}]`);
 
         const catalogResponse = await fetch(catalogUrl, {
@@ -400,51 +404,35 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
 
         if (!catalogResponse.ok) {
             const errorText = await catalogResponse.text();
-            console.error("❌ Error en consulta al catálogo:", errorText);
-            throw new Error(`Error en consulta al catálogo: ${errorText}`);
+            throw new Error(`Error en catálogo: ${errorText}`);
         }
 
         const catalogData = await catalogResponse.json();
         
         if (catalogData.features.length === 0) {
-            throw new Error("No se encontraron datos de Sentinel-1 para esta ubicación.");
+            throw new Error("No se encontraron datos de Sentinel-1 IW GRD para esta ubicación.");
         }
 
-        // Usar el primer dato disponible
-        const feature = catalogData.features[0];
-        const foundDate = feature.properties.datetime.split('T')[0];
-        const tileId = feature.id;
+        // Procesar el feature más cercano
+        const targetDate = new Date(date);
+        let closestFeature = null;
+        let minDiff = Infinity;
 
-        console.log("Tile ID encontrado:", tileId);
-
-        // Determinar banda disponible por el nombre del tile
-        let bandToUse = null;
-        let instrumentMode = null;
-
-        if (tileId.includes('_SSH_')) {
-            bandToUse = 'HH';
-            instrumentMode = 'EW';
-        } else if (tileId.includes('_SSV_')) {
-            bandToUse = 'VV';
-            instrumentMode = 'EW';
-        } else if (tileId.includes('_DV_')) {
-            bandToUse = 'VH';
-            instrumentMode = 'IW';
-        } else if (tileId.includes('_DH_')) {
-            bandToUse = 'HH';
-            instrumentMode = 'IW';
+        for (const feature of catalogData.features) {
+            const featureDate = new Date(feature.properties.datetime);
+            const diff = Math.abs(featureDate - targetDate);
+            if (diff < minDiff) {
+                minDiff = diff;
+                closestFeature = feature;
+            }
         }
 
-        // Fallback seguro
-        if (!bandToUse) {
-            console.warn("No se pudo determinar la banda. Usando HH como predeterminado.");
-            bandToUse = 'HH';
-            instrumentMode = tileId.includes('IW') ? 'IW' : 'EW';
-        }
+        const foundDate = closestFeature.properties.datetime.split('T')[0];
+        const availablePolarization = closestFeature.properties['s1:polarization'];
+        
+        // Ahora SÍ puedes confiar en esta polarización
+        const bandToUse = availablePolarization; // Será VH o VV
 
-        console.log(`Usando banda: ${bandToUse}, Modo: ${instrumentMode}`);
-
-        // Payload para procesamiento de imagen
         const payload = {
             input: {
                 bounds: {
@@ -460,6 +448,7 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
                                 from: `${foundDate}T00:00:00Z`,
                                 to: `${foundDate}T23:59:59Z`
                             },
+                            polarization: bandToUse,
                             mosaicOrder: "mostRecent"
                         },
                         type: "sentinel-1-grd"
@@ -489,24 +478,21 @@ function setup() {
 }
 
 function evaluatePixel(samples) {
-    // Manejar múltiples muestras
-    for (let i = 0; i < samples.length; i++) {
-        const sample = samples[i];
-        if (sample && sample.dataMask === 1 && !isNaN(sample["${bandToUse}"])) {
-            const value = sample["${bandToUse}"];
-            const db = 10 * Math.log10(Math.max(value, 1e-6));
-            
-            // Rango típico para SAR
-            const minDb = -28;
-            const maxDb = -3;
-            
-            const normalized = (db - minDb) / (maxDb - minDb);
-            const clamped = Math.max(0, Math.min(1, normalized));
-            
-            return [Math.round(clamped * 255)];
-        }
+    if (samples.length === 0 || samples[0].dataMask === 0) {
+        return [0];
     }
-    return [0]; // No data
+    
+    const value = samples[0]["${bandToUse}"];
+    const db = 10 * Math.log10(Math.max(value, 1e-6));
+    
+    // Rango típico para tierra con IW
+    const minDb = -25;
+    const maxDb = -5;
+    
+    const normalized = (db - minDb) / (maxDb - minDb);
+    const clamped = Math.max(0, Math.min(1, normalized));
+    
+    return [Math.round(clamped * 255)];
 }`
         };
 
@@ -521,29 +507,21 @@ function evaluatePixel(samples) {
 
         if (!imageResponse.ok) {
             const errorText = await imageResponse.text();
-            console.error("❌ RESPUESTA COMPLETA DEL ERROR:", errorText);
-            throw new Error(`Error en la imagen Sentinel-1: ${errorText}`);
+            throw new Error(`Error en procesamiento: ${errorText}`);
         }
 
         const buffer = await imageResponse.arrayBuffer();
         const base64 = Buffer.from(buffer).toString('base64');
         
-        // Validación mejorada: aceptamos imágenes pequeñas pero no vacías
-        if (base64.length < 100) {
-            throw new Error("La imagen generada es inválida.");
-        }
-
         return {
             url: `image/png;base64,${base64}`,
             usedDate: foundDate,
             polarization: bandToUse,
-            instrumentMode: instrumentMode,
-            sourceTile: tileId,
-            warning: base64.length < 5000 ? "Imagen generada muy pequeña, posible baja cobertura" : null
+            instrumentMode: "IW"
         };
 
     } catch (error) {
-        console.error('❌ Error en la imagen Sentinel-1:', error.message);
+        console.error('❌ Error en Sentinel-1:', error.message);
         throw error;
     }
 };
