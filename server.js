@@ -347,6 +347,9 @@ function evaluatePixel(sample) {
 // ==============================================
 // ✅ FUNCIÓN: Obtiene la imagen de Sentinel-1 para el frontend (CORREGIDA) Qwen
 // ==============================================
+// ==============================================
+// ✅ FUNCIÓN: Obtiene la imagen de Sentinel-1 para el frontend (CORREGIDA)
+// ==============================================
 const fetchSentinel1Radar = async ({ geometry, date }) => {
     const accessToken = await getAccessToken();
     const bbox = polygonToBbox(geometry);
@@ -369,7 +372,7 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
         fromDate.setDate(fromDate.getDate() - 3);
         toDate.setDate(toDate.getDate() + 3);
 
-        // Verificar disponibilidad en el catálogo con múltiples intentos
+        // Verificar disponibilidad en el catálogo
         const catalogUrl = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search';
         let catalogData = null;
         let searchFilters = [
@@ -540,6 +543,13 @@ function evaluatePixel(samples) {
 }`
         };
 
+        // DEBUG: Imprimir el evalscript antes de enviarlo
+        console.log("Evalscript generado:", payload.evalscript);
+        
+        // DEBUG: Verificar que la polarización es correcta
+        console.log("Polarización detectada:", polarization);
+        console.log("Instrument Mode detectado:", instrumentMode);
+
         const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
             method: 'POST',
             headers: {
@@ -551,8 +561,9 @@ function evaluatePixel(samples) {
         });
 
         if (!imageResponse.ok) {
-            const error = await imageResponse.text();
-            throw new Error(`Error en la imagen Sentinel-1 para ${date}: ${error}`);
+            const errorText = await imageResponse.text();
+            console.error("Respuesta completa del error:", errorText);
+            throw new Error(`Error en la imagen Sentinel-1 para ${date}: ${errorText}`);
         }
 
         const buffer = await imageResponse.arrayBuffer();
