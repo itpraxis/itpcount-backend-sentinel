@@ -366,9 +366,6 @@ function evaluatePixel(samples) {
 // ==============================================
 // ✅ FUNCIÓN FINAL: Obtiene la mejor imagen de Sentinel-1 para el frontend Gemini
 // ==============================================
-// ==============================================
-// ✅ FUNCIÓN FINAL: Obtiene la mejor imagen de Sentinel-1 para el frontend
-// ==============================================
 const fetchSentinel1Radar = async ({ geometry, date }) => {
     const accessToken = await getAccessToken();
     const bbox = polygonToBbox(geometry);
@@ -384,7 +381,7 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
     const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10);
 
     const tryRequest = async (polarization) => {
-        // ✅ CORRECCIÓN CLAVE: Rango de dB ajustado
+        // ✅ CORRECCIÓN CLAVE: Evalscript simplificado con mapeo logarítmico
         const evalscript = `//VERSION=3
 function setup() {
   return {
@@ -397,11 +394,11 @@ function evaluatePixel(samples) {
   if (!linearValue || samples.dataMask === 0) {
     return [0];
   }
+  
+  // Utilizar un mapeo logarítmico simplificado
   const dbValue = 10 * Math.log10(linearValue);
-  const minDb = -25; // ✅ Valor mínimo ajustado
-  const maxDb = 0;   // ✅ Valor máximo ajustado
-  let mappedValue = Math.round((dbValue - minDb) / (maxDb - minDb) * 255);
-  mappedValue = Math.max(0, Math.min(255, mappedValue));
+  const mappedValue = Math.round(100 * (dbValue + 30) / 30); // ✅ Mapeo logarítmico mejorado
+  
   return [mappedValue];
 }`;
 
