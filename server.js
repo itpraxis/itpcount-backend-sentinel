@@ -433,58 +433,24 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
             },
             evalscript: `//VERSION=3
 function setup() {
-    return {
-        input: [{ 
-            bands: ["VH", "dataMask"], 
-            units: "LINEAR_POWER" 
-        }],
-        output: { 
-            bands: 1, 
-            sampleType: "UINT8", 
-            format: "image/png" 
-        }
-    };
+  return {
+    input: ["VH", "dataMask"],
+    output: [
+      { id: "default", bands: 4 },
+      { id: "eobrowserStats", bands: 1 },
+      { id: "dataMask", bands: 1 },
+    ],
+  };
 }
 
 function evaluatePixel(samples) {
-    // Manejar múltiples muestras si hay varias adquisiciones
-    let vh_linear = 0;
-    let validSamples = 0;
-    
-    for (let i = 0; i < samples.length; i++) {
-        if (samples[i].dataMask > 0 && !isNaN(samples[i].VH)) {
-            vh_linear += samples[i].VH;
-            validSamples++;
-        }
-    }
-    
-    if (validSamples === 0) {
-        return [0]; // No data
-    }
-    
-    vh_linear = vh_linear / validSamples; // Promedio de muestras válidas
-    
-    // Convertir a dB
-    const vh_db = 10 * Math.log10(vh_linear);
-    
-    // Parámetros de ajuste mejorados para tierra
-    const minDb = -24; // Valor mínimo típico para áreas terrestres
-    const maxDb = -5;  // Valor máximo típico para áreas terrestres (evita saturación)
-    
-    // Mapear el valor de dB al rango 0-255 con manejo de bordes
-    let normalizedValue = (vh_db - minDb) / (maxDb - minDb);
-    
-    // Aplicar una curva gamma suave para mejorar el contraste
-    let gamma = 1.8;
-    let adjustedValue = Math.pow(normalizedValue, 1/gamma);
-    
-    // Convertir a rango 0-255
-    let mappedValue = Math.round(adjustedValue * 255);
-    
-    // Asegurar que el valor esté dentro del rango [0, 255]
-    mappedValue = Math.max(0, Math.min(255, mappedValue));
-    
-    return [mappedValue];
+  const value = Math.max(0, Math.log(samples.VH) * 0.21714724095 + 1);
+
+  return {
+    default: [value, value, value, samples.dataMask],
+    eobrowserStats: [(10 * Math.log(samples.VH)) / Math.LN10],
+    dataMask: [samples.dataMask],
+  };
 }`
         };
 
