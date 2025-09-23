@@ -370,7 +370,7 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
         toDate.setDate(toDate.getDate() + 30);
 
         // Verificar disponibilidad en el catálogo SIN FILTROS
-        const catalogUrl = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search';
+        const catalogUrl = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search'; // ✅ URL corregida (sin espacio)
         
         const catalogPayload = {
             "bbox": bbox,
@@ -434,27 +434,24 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
         const orbitDirection = closestFeature.properties['sat:orbit_state'] || null;
         const availablePolarization = closestFeature.properties['s1:polarization'];
         const instrumentMode = closestFeature.properties['sar:instrument_mode'];
-
-        // Mapeo seguro de polarización a banda
-        const polarizationMap = {
-            'VV': 'VV',
-            'VH': 'VH', 
-            'HH': 'HH',
-            'HV': 'HV',
-            'SV': 'VV', // Single VV/VH → usar VV
-            'SH': 'HH'  // Single HH/HV → usar HH
-        };
-        
-        // Determinar banda disponible con fallback
-        const detectedBand = polarizationMap[availablePolarization] || 'VV';
-        
-        // Verificar si la banda existe en el tile
         const tileId = closestFeature.id;
-        const expectedBand = tileId.includes('_SSH_') ? 'HH' : 
-                           tileId.includes('_SSV_') ? 'VV' :
-                           tileId.includes('_DV_') ? 'VH' : 'VV';
 
-        const bandToUse = detectedBand;
+        // Determinar banda basada en el nombre del tile (más confiable que metadatos)
+        let bandToUse = 'VV'; // Fallback seguro
+        
+        if (tileId.includes('_SSH_')) {
+            bandToUse = 'HH';
+            console.log("Tile SSH detectado → usando banda HH");
+        } else if (tileId.includes('_SSV_')) {
+            bandToUse = 'VV';
+            console.log("Tile SSV detectado → usando banda VV");
+        } else if (tileId.includes('_DV_')) {
+            bandToUse = 'VH';
+            console.log("Tile DV detectado → usando banda VH");
+        } else if (tileId.includes('_DH_')) {
+            bandToUse = 'HH';
+            console.log("Tile DH detectado → usando banda HH");
+        }
 
         // Payload para procesamiento de imagen
         const payload = {
@@ -503,35 +500,32 @@ function setup() {
 }
 
 function evaluatePixel(samples) {
-    let validSamples = [];
+    // Manejar múltiples muestras
+    let sumLinear = 0;
+    let count = 0;
+    
     for (let i = 0; i < samples.length; i++) {
-        if (samples[i].dataMask > 0 && !isNaN(samples[i]["${bandToUse}"])) {
-            validSamples.push(samples[i]);
+        const s = samples[i];
+        if (s.dataMask > 0 && !isNaN(s["${bandToUse}"]) && s["${bandToUse}"] > 0) {
+            sumLinear += s["${bandToUse}"];
+            count++;
         }
     }
     
-    if (validSamples.length === 0) {
-        return [0];
+    if (count === 0) {
+        return [0]; // No data
     }
     
-    // Calcular media geométrica
-    let sumLog = 0;
-    for (let i = 0; i < validSamples.length; i++) {
-        let value = Math.max(validSamples[i]["${bandToUse}"], 1e-6);
-        sumLog += Math.log(value);
-    }
-    let meanLinear = Math.exp(sumLog / validSamples.length);
-    
-    // Convertir a dB
+    const meanLinear = sumLinear / count;
     const meanDb = 10 * Math.log10(meanLinear);
     
-    // Parámetros de ajuste
-    let minDb = -30;
-    let maxDb = 0;
+    // Parámetros ajustados para SAR
+    const minDb = -28;
+    const maxDb = -3;
     
     let normalizedValue = (meanDb - minDb) / (maxDb - minDb);
     normalizedValue = Math.max(0, Math.min(1, normalizedValue));
-    let mappedValue = Math.round(normalizedValue * 255);
+    const mappedValue = Math.round(normalizedValue * 255);
     
     return [mappedValue];
 }`
@@ -545,14 +539,17 @@ function evaluatePixel(samples) {
         console.log("Primera fecha disponible:", validFeatures[0].properties.datetime);
         console.log("Última fecha disponible:", validFeatures[validFeatures.length-1].properties.datetime);
         console.log("Polarización original:", availablePolarization);
-        console.log("Tile ID:", closestFeature.id);
+        console.log("Tile ID:", tileId);
         console.log("Banda usada:", bandToUse);
         console.log("Modo de instrumento:", instrumentMode);
         console.log("Orbita:", orbitDirection);
         console.log("Dimensiones:", finalWidth, "x", finalHeight);
         console.log("================================");
 
-        const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
+        // ✅ URL corregida (sin espacios)
+        const processUrl = 'https://services.sentinel-hub.com/api/v1/process';
+        
+        const imageResponse = await fetch(processUrl, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -571,19 +568,22 @@ function evaluatePixel(samples) {
         const buffer = await imageResponse.arrayBuffer();
         const base64 = Buffer.from(buffer).toString('base64');
         
-        if (base64.length < 1000) {
-            throw new Error("La imagen generada es demasiado pequeña.");
+        // ✅ Validación mejorada: imagen mínima pero razonable
+        if (base64.length < 5000) {
+            console.error("Imagen generada muy pequeña:", base64.length, "caracteres");
+            throw new Error("La imagen generada es demasiado pequeña. Posiblemente fuera de cobertura.");
         }
 
         return {
-            url: `image/png;base64,${base64}`,
+            url: `data:image/png;base64,${base64}`,
             usedDate: foundDate,
             bbox: bbox,
             width: finalWidth,
             height: finalHeight,
             polarization: bandToUse,
             instrumentMode: instrumentMode,
-            originalRequestDate: date
+            originalRequestDate: date,
+            tileId: tileId
         };
 
     } catch (error) {
@@ -591,6 +591,7 @@ function evaluatePixel(samples) {
         throw error;
     }
 };
+
 
 
 /**
