@@ -471,7 +471,7 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
                         coordinates: geometry
                     }
                 },
-                 [
+                 data: [
                     {
                         dataFilter: {
                             timeRange: {
