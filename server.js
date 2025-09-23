@@ -277,8 +277,8 @@ const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) 
  */
 const fetchSentinelImageTC = async ({ geometry, date, geometryType = 'Polygon' }) => {
     const accessToken = await getAccessToken();
-    
-    // ✅ NUEVO: Calcular el bbox y el área para determinar el tamaño óptimo
+
+    // Calcular el bbox y el área para determinar el tamaño óptimo
     const bbox = geometryType === 'Polygon' ? polygonToBbox(geometry) : geometry;
     if (!bbox) {
         throw new Error('No se pudo calcular el bounding box.');
@@ -288,10 +288,10 @@ const fetchSentinelImageTC = async ({ geometry, date, geometryType = 'Polygon' }
 
     const payload = {
         input: {
-            bounds: geometryType === 'Polygon' 
-                ? { geometry: { type: "Polygon", coordinates: geometry } } 
+            bounds: geometryType === 'Polygon'
+                ? { geometry: { type: "Polygon", coordinates: geometry } }
                 : { bbox: geometry },
-            data: [  // ⚠️ ¡No olvides "data:"!
+            data: [
                 {
                     type: "sentinel-2-l2a",
                     dataFilter: {
@@ -303,39 +303,20 @@ const fetchSentinelImageTC = async ({ geometry, date, geometryType = 'Polygon' }
             ]
         },
         output: {
-            width: sizeInPixels, // ✅ Tamaño adaptativo
-            height: sizeInPixels, // ✅ Tamaño adaptativo
-            format: "image/png",
-            upsampling: "BICUBIC",
-            downsampling: "BICUBIC",
-            bands: 3,
-            sampleType: "UINT8",
-            renderingHints: {
-                gamma: 0.8 // Ajusta entre 0.7 y 1.2
-            }
+            width: sizeInPixels,
+            height: sizeInPixels
         },
-        evalscript: `
-//VERSION=3
-
+        evalscript: `//VERSION=3
 function setup() {
   return {
-    input: [{ bands: ["B04", "B03", "B02"], units: "REFLECTANCE" }],
+    input: ["B02", "B03", "B04"],
     output: { bands: 3, sampleType: "UINT8" }
   };
 }
-
-// Ajuste automático de contraste usando percentiles
-// Estos valores (0.02 y 0.25) son un buen punto de partida, pero puedes ajustarlos
-const minVal = 0.02; // Percentil bajo (2%)
-const maxVal = 0.25; // Percentil alto (98%)
-
-function evaluatePixel(samples) {
-  let val = [samples.B04, samples.B03, samples.B02];
-  let imgVals = val.map(v => 255 * (v - minVal) / (maxVal - minVal));
-  imgVals = imgVals.map(v => Math.max(0, Math.min(255, v)));
-  return imgVals;
+function evaluatePixel(sample) {
+  return [2.5 * sample.B04 * 255, 2.5 * sample.B03 * 255, 2.5 * sample.B02 * 255];
 }
-    `
+`
     };
 
     const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
@@ -359,7 +340,7 @@ function evaluatePixel(samples) {
     return {
         url: `data:image/png;base64,${base64}`,
         usedDate: date,
-        bbox: bbox // ✅ Usamos el bbox calculado
+        bbox: bbox
     };
 };
 
