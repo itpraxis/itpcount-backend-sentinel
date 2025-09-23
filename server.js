@@ -356,6 +356,9 @@ function evaluatePixel(sample) {
 // ==============================================
 // ✅ FUNCIÓN: Obtiene la imagen de Sentinel-1 para el frontend (DEFINITIVA)
 // ==============================================
+// ==============================================
+// ✅ FUNCIÓN: Obtiene la imagen de Sentinel-1 para el frontend (DEFINITIVA)
+// ==============================================
 const fetchSentinel1Radar = async ({ geometry, date }) => {
     const accessToken = await getAccessToken();
     const bbox = polygonToBbox(geometry);
@@ -492,21 +495,36 @@ function setup() {
 }
 
 function evaluatePixel(samples) {
-    if (samples.length === 0 || samples[0].dataMask === 0) {
-        return [0];
+    // ✅ Corrección: Verificar que samples no esté vacío
+    if (!samples || samples.length === 0) {
+        return [0]; // No data
     }
     
-    const value = samples[0]["${bandToUse}"];
-    const db = 10 * Math.log10(Math.max(value, 1e-6));
+    // ✅ Corrección: Verificar que cada muestra tenga dataMask
+    for (let i = 0; i < samples.length; i++) {
+        if (!samples[i] || samples[i].dataMask === 0) {
+            continue; // Saltar muestra sin datos
+        }
+        
+        const value = samples[i]["${bandToUse}"];
+        if (value === undefined || isNaN(value) || value <= 0) {
+            continue;
+        }
+        
+        const db = 10 * Math.log10(value);
+        
+        // Rango típico para SAR
+        const minDb = -28;
+        const maxDb = -3;
+        
+        const normalized = (db - minDb) / (maxDb - minDb);
+        const clamped = Math.max(0, Math.min(1, normalized));
+        
+        return [Math.round(clamped * 255)];
+    }
     
-    // Rango adaptado para diferentes modos
-    const minDb = (samples[0].properties.sar_instrument_mode === 'IW') ? -25 : -28;
-    const maxDb = (samples[0].properties.sar_instrument_mode === 'IW') ? -5 : -3;
-    
-    const normalized = (db - minDb) / (maxDb - minDb);
-    const clamped = Math.max(0, Math.min(1, normalized));
-    
-    return [Math.round(clamped * 255)];
+    // Si ninguna muestra es válida
+    return [0];
 }`
         };
 
