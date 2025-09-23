@@ -359,6 +359,9 @@ function evaluatePixel(sample) {
 // ==============================================
 // ✅ FUNCIÓN: Obtiene la imagen de Sentinel-1 para el frontend (DEFINITIVA)
 // ==============================================
+// ==============================================
+// ✅ FUNCIÓN: Obtiene la imagen de Sentinel-1 para el frontend (CORREGIDA)
+// ==============================================
 const fetchSentinel1Radar = async ({ geometry, date }) => {
     const accessToken = await getAccessToken();
     const bbox = polygonToBbox(geometry);
@@ -367,14 +370,6 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
     }
     
     try {
-        // Calcular área y tamaño óptimo
-        const areaInSquareMeters = calculatePolygonArea(bbox);
-        const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10);
-        
-        // Validar que el tamaño no sea demasiado pequeño
-        const finalWidth = Math.max(sizeInPixels, 512);
-        const finalHeight = Math.max(sizeInPixels, 512);
-
         // Rango de búsqueda ampliado
         const fromDate = new Date(date);
         const toDate = new Date(date);
@@ -420,7 +415,6 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
         const foundDate = feature.properties.datetime.split('T')[0];
         const tileId = feature.id;
 
-        // Log para ver exactamente qué tile estamos recibiendo
         console.log("Tile ID encontrado:", tileId);
 
         // Determinar banda disponible por el nombre del tile
@@ -441,10 +435,10 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
             instrumentMode = 'IW';
         }
 
-        // Fallback seguro si no se puede determinar la banda
+        // Fallback seguro
         if (!bandToUse) {
-            console.warn("No se pudo determinar la banda. Usando HH como predeterminado para SSH.");
-            bandToUse = 'HH'; // HH es más común en SSH
+            console.warn("No se pudo determinar la banda. Usando HH como predeterminado.");
+            bandToUse = 'HH';
             instrumentMode = tileId.includes('IW') ? 'IW' : 'EW';
         }
 
@@ -473,8 +467,8 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
                 ]
             },
             output: {
-                width: finalWidth,
-                height: finalHeight,
+                width: 512,
+                height: 512,
                 format: "image/png",
                 sampleType: "UINT8"
             },
@@ -495,36 +489,24 @@ function setup() {
 }
 
 function evaluatePixel(samples) {
-    // ✅ Corrección: Verificar que samples no esté vacío
-    if (!samples || samples.length === 0) {
-        return [0]; // No data
-    }
-    
-    // ✅ Corrección: Verificar que cada muestra tenga dataMask
+    // Manejar múltiples muestras
     for (let i = 0; i < samples.length; i++) {
-        if (!samples[i] || samples[i].dataMask === 0) {
-            continue; // Saltar muestra sin datos
+        const sample = samples[i];
+        if (sample && sample.dataMask === 1 && !isNaN(sample["${bandToUse}"])) {
+            const value = sample["${bandToUse}"];
+            const db = 10 * Math.log10(Math.max(value, 1e-6));
+            
+            // Rango típico para SAR
+            const minDb = -28;
+            const maxDb = -3;
+            
+            const normalized = (db - minDb) / (maxDb - minDb);
+            const clamped = Math.max(0, Math.min(1, normalized));
+            
+            return [Math.round(clamped * 255)];
         }
-        
-        const value = samples[i]["${bandToUse}"];
-        if (value === undefined || isNaN(value) || value <= 0) {
-            continue;
-        }
-        
-        const db = 10 * Math.log10(value);
-        
-        // Rango típico para SAR
-        const minDb = -28;
-        const maxDb = -3;
-        
-        const normalized = (db - minDb) / (maxDb - minDb);
-        const clamped = Math.max(0, Math.min(1, normalized));
-        
-        return [Math.round(clamped * 255)];
     }
-    
-    // Si ninguna muestra es válida
-    return [0];
+    return [0]; // No data
 }`
         };
 
@@ -546,9 +528,9 @@ function evaluatePixel(samples) {
         const buffer = await imageResponse.arrayBuffer();
         const base64 = Buffer.from(buffer).toString('base64');
         
-        // Validación mejorada: imagen mínima pero razonable
-        if (base64.length < 1000) {
-            throw new Error("La imagen generada es demasiado pequeña.");
+        // Validación mejorada: aceptamos imágenes pequeñas pero no vacías
+        if (base64.length < 100) {
+            throw new Error("La imagen generada es inválida.");
         }
 
         return {
@@ -556,7 +538,8 @@ function evaluatePixel(samples) {
             usedDate: foundDate,
             polarization: bandToUse,
             instrumentMode: instrumentMode,
-            sourceTile: tileId
+            sourceTile: tileId,
+            warning: base64.length < 5000 ? "Imagen generada muy pequeña, posible baja cobertura" : null
         };
 
     } catch (error) {
