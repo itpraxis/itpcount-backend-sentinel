@@ -347,6 +347,9 @@ function evaluatePixel(sample) {
 // ==============================================
 // ✅ FUNCIÓN: Obtiene la imagen de Sentinel-1 para el frontend (DEFINITIVA) Qwen
 // ==============================================
+// ==============================================
+// ✅ FUNCIÓN: Obtiene la imagen de Sentinel-1 IW GRD
+// ==============================================
 const fetchSentinel1Radar = async ({ geometry, date }) => {
     const accessToken = await getAccessToken();
     const bbox = polygonToBbox(geometry);
@@ -355,31 +358,24 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
     }
     
     try {
-        // Calcular área y tamaño óptimo
-        const areaInSquareMeters = calculatePolygonArea(bbox);
-        const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10);
-        
-        // Validar que el tamaño no sea demasiado pequeño
-        const finalWidth = Math.max(sizeInPixels, 512);
-        const finalHeight = Math.max(sizeInPixels, 512);
-
         // Rango de búsqueda ampliado
         const fromDate = new Date(date);
         const toDate = new Date(date);
         fromDate.setDate(fromDate.getDate() - 90);
         toDate.setDate(toDate.getDate() + 30);
 
-        // Verificar disponibilidad en el catálogo SIN FILTROS
-        const catalogUrl = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search'; // ✅ URL corregida (sin espacio)
+        // BUSCAR SOLO PRODUCTOS IW GRD CON VH/VV
+        const catalogUrl = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search';
         
         const catalogPayload = {
             "bbox": bbox,
             "datetime": `${fromDate.toISOString().split('T')[0]}T00:00:00Z/${toDate.toISOString().split('T')[0]}T23:59:59Z`,
             "collections": ["sentinel-1-grd"],
-            "limit": 5
+            "limit": 5,
+            "filter": "sar:instrument_mode = 'IW' AND (s1:polarization = 'VH' OR s1:polarization = 'VV')"
         };
 
-        console.log(`Buscando datos entre ${fromDate.toISOString()} y ${toDate.toISOString()}`);
+        console.log(`Buscando IW GRD entre ${fromDate.toISOString()} y ${toDate.toISOString()}`);
         console.log(`BBOX: [${bbox.join(', ')}]`);
 
         const catalogResponse = await fetch(catalogUrl, {
@@ -393,35 +389,22 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
 
         if (!catalogResponse.ok) {
             const errorText = await catalogResponse.text();
-            console.error("❌ Error en consulta al catálogo:", errorText);
-            throw new Error(`Error en consulta al catálogo: ${errorText}`);
+            throw new Error(`Error en catálogo: ${errorText}`);
         }
 
         const catalogData = await catalogResponse.json();
-        console.log(`Datos encontrados: ${catalogData.features.length} features`);
         
         if (catalogData.features.length === 0) {
-            throw new Error("No se encontraron datos de Sentinel-1 para esta ubicación.");
+            // Si no hay IW, podrías considerar fallback a EW, pero mejor no
+            throw new Error("No se encontraron datos de Sentinel-1 IW GRD para esta ubicación.");
         }
 
-        // Filtrar features válidos
-        const validFeatures = catalogData.features.filter(feature => {
-            return feature.properties && 
-                   feature.properties.datetime &&
-                   feature.geometry &&
-                   feature.geometry.coordinates;
-        });
-        
-        if (validFeatures.length === 0) {
-            throw new Error("Los datos encontrados no tienen información válida");
-        }
-
-        // Encontrar la fecha más cercana
+        // Procesar el feature más cercano
         const targetDate = new Date(date);
         let closestFeature = null;
         let minDiff = Infinity;
 
-        for (const feature of validFeatures) {
+        for (const feature of catalogData.features) {
             const featureDate = new Date(feature.properties.datetime);
             const diff = Math.abs(featureDate - targetDate);
             if (diff < minDiff) {
@@ -431,29 +414,11 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
         }
 
         const foundDate = closestFeature.properties.datetime.split('T')[0];
-        const orbitDirection = closestFeature.properties['sat:orbit_state'] || null;
         const availablePolarization = closestFeature.properties['s1:polarization'];
-        const instrumentMode = closestFeature.properties['sar:instrument_mode'];
-        const tileId = closestFeature.id;
-
-        // Determinar banda basada en el nombre del tile (más confiable que metadatos)
-        let bandToUse = 'VV'; // Fallback seguro
         
-        if (tileId.includes('_SSH_')) {
-            bandToUse = 'HH';
-            console.log("Tile SSH detectado → usando banda HH");
-        } else if (tileId.includes('_SSV_')) {
-            bandToUse = 'VV';
-            console.log("Tile SSV detectado → usando banda VV");
-        } else if (tileId.includes('_DV_')) {
-            bandToUse = 'VH';
-            console.log("Tile DV detectado → usando banda VH");
-        } else if (tileId.includes('_DH_')) {
-            bandToUse = 'HH';
-            console.log("Tile DH detectado → usando banda HH");
-        }
+        // Ahora SÍ puedes confiar en esta polarización
+        const bandToUse = availablePolarization; // Será VH o VV
 
-        // Payload para procesamiento de imagen
         const payload = {
             input: {
                 bounds: {
@@ -469,17 +434,16 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
                                 from: `${foundDate}T00:00:00Z`,
                                 to: `${foundDate}T23:59:59Z`
                             },
-                            mosaicOrder: "mostRecent",
-                            upsampling: "BILINEAR",
-                            downsampling: "AVERAGE"
+                            polarization: bandToUse,
+                            mosaicOrder: "mostRecent"
                         },
                         type: "sentinel-1-grd"
                     }
                 ]
             },
             output: {
-                width: finalWidth,
-                height: finalHeight,
+                width: 512,
+                height: 512,
                 format: "image/png",
                 sampleType: "UINT8"
             },
@@ -500,94 +464,50 @@ function setup() {
 }
 
 function evaluatePixel(samples) {
-    // Manejar múltiples muestras
-    let sumLinear = 0;
-    let count = 0;
-    
-    for (let i = 0; i < samples.length; i++) {
-        const s = samples[i];
-        if (s.dataMask > 0 && !isNaN(s["${bandToUse}"]) && s["${bandToUse}"] > 0) {
-            sumLinear += s["${bandToUse}"];
-            count++;
-        }
+    if (samples.length === 0 || samples[0].dataMask === 0) {
+        return [0];
     }
     
-    if (count === 0) {
-        return [0]; // No data
-    }
+    const value = samples[0]["${bandToUse}"];
+    const db = 10 * Math.log10(Math.max(value, 1e-6));
     
-    const meanLinear = sumLinear / count;
-    const meanDb = 10 * Math.log10(meanLinear);
+    // Rango típico para tierra con IW
+    const minDb = -25;
+    const maxDb = -5;
     
-    // Parámetros ajustados para SAR
-    const minDb = -28;
-    const maxDb = -3;
+    const normalized = (db - minDb) / (maxDb - minDb);
+    const clamped = Math.max(0, Math.min(1, normalized));
     
-    let normalizedValue = (meanDb - minDb) / (maxDb - minDb);
-    normalizedValue = Math.max(0, Math.min(1, normalizedValue));
-    const mappedValue = Math.round(normalizedValue * 255);
-    
-    return [mappedValue];
+    return [Math.round(clamped * 255)];
 }`
         };
 
-        console.log("=== INFORMACIÓN PARA SENTINEL-1 ===");
-        console.log("Coordenadas BBOX:", bbox);
-        console.log("Fecha solicitada:", date);
-        console.log("Fecha encontrada:", foundDate);
-        console.log("Número de features disponibles:", validFeatures.length);
-        console.log("Primera fecha disponible:", validFeatures[0].properties.datetime);
-        console.log("Última fecha disponible:", validFeatures[validFeatures.length-1].properties.datetime);
-        console.log("Polarización original:", availablePolarization);
-        console.log("Tile ID:", tileId);
-        console.log("Banda usada:", bandToUse);
-        console.log("Modo de instrumento:", instrumentMode);
-        console.log("Orbita:", orbitDirection);
-        console.log("Dimensiones:", finalWidth, "x", finalHeight);
-        console.log("================================");
-
-        // ✅ URL corregida (sin espacios)
-        const processUrl = 'https://services.sentinel-hub.com/api/v1/process';
-        
-        const imageResponse = await fetch(processUrl, {
+        const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
-                'Authorization': `Bearer ${accessToken}`,
-                'Cache-Control': 'no-cache'
+                'Authorization': `Bearer ${accessToken}`
             },
             body: JSON.stringify(payload)
         });
 
         if (!imageResponse.ok) {
             const errorText = await imageResponse.text();
-            console.error("❌ RESPUESTA COMPLETA DEL ERROR:", errorText);
-            throw new Error(`Error en la imagen Sentinel-1: ${errorText}`);
+            throw new Error(`Error en procesamiento: ${errorText}`);
         }
 
         const buffer = await imageResponse.arrayBuffer();
         const base64 = Buffer.from(buffer).toString('base64');
         
-        // ✅ Validación mejorada: imagen mínima pero razonable
-        if (base64.length < 5000) {
-            console.error("Imagen generada muy pequeña:", base64.length, "caracteres");
-            throw new Error("La imagen generada es demasiado pequeña. Posiblemente fuera de cobertura.");
-        }
-
         return {
-            url: `data:image/png;base64,${base64}`,
+            url: `image/png;base64,${base64}`,
             usedDate: foundDate,
-            bbox: bbox,
-            width: finalWidth,
-            height: finalHeight,
             polarization: bandToUse,
-            instrumentMode: instrumentMode,
-            originalRequestDate: date,
-            tileId: tileId
+            instrumentMode: "IW"
         };
 
     } catch (error) {
-        console.error('❌ Error en la imagen Sentinel-1:', error.message);
+        console.error('❌ Error en Sentinel-1:', error.message);
         throw error;
     }
 };
