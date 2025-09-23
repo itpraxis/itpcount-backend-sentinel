@@ -348,7 +348,7 @@ function evaluatePixel(sample) {
 // ✅ FUNCIÓN: Obtiene la imagen de Sentinel-1 para el frontend (DEFINITIVA) Qwen
 // ==============================================
 // ==============================================
-// ✅ FUNCIÓN: Obtiene la imagen de Sentinel-1 IW GRD
+// ✅ FUNCIÓN: Obtiene la imagen de Sentinel-1 IW GRD (CORREGIDA)
 // ==============================================
 const fetchSentinel1Radar = async ({ geometry, date }) => {
     const accessToken = await getAccessToken();
@@ -364,38 +364,71 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
         fromDate.setDate(fromDate.getDate() - 90);
         toDate.setDate(toDate.getDate() + 30);
 
-        // BUSCAR SOLO PRODUCTOS IW GRD CON VH/VV
+        // Buscar primero por VH (prioritario para vegetación)
         const catalogUrl = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search';
         
-        const catalogPayload = {
+        // Intentar primero con VH
+        const catalogPayloadVH = {
             "bbox": bbox,
             "datetime": `${fromDate.toISOString().split('T')[0]}T00:00:00Z/${toDate.toISOString().split('T')[0]}T23:59:59Z`,
             "collections": ["sentinel-1-grd"],
             "limit": 5,
-            "filter": "sar:instrument_mode = 'IW' AND (s1:polarization = 'VH' OR s1:polarization = 'VV')"
+            "filter": "sar:instrument_mode = 'IW' AND s1:polarization = 'VH'"
         };
 
-        console.log(`Buscando IW GRD entre ${fromDate.toISOString()} y ${toDate.toISOString()}`);
+        console.log(`Buscando IW GRD con VH entre ${fromDate.toISOString()} y ${toDate.toISOString()}`);
         console.log(`BBOX: [${bbox.join(', ')}]`);
 
-        const catalogResponse = await fetch(catalogUrl, {
+        let catalogResponse = await fetch(catalogUrl, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
                 'Authorization': `Bearer ${accessToken}`
             },
-            body: JSON.stringify(catalogPayload)
+            body: JSON.stringify(catalogPayloadVH)
         });
 
-        if (!catalogResponse.ok) {
-            const errorText = await catalogResponse.text();
-            throw new Error(`Error en catálogo: ${errorText}`);
+        let catalogData = null;
+        let polarization = 'VH';
+
+        if (catalogResponse.ok) {
+            catalogData = await catalogResponse.json();
+            if (catalogData.features.length === 0) {
+                console.log("No se encontraron datos con VH, intentando con VV");
+                
+                // Si no hay VH, intentar con VV
+                const catalogPayloadVV = {
+                    "bbox": bbox,
+                    "datetime": `${fromDate.toISOString().split('T')[0]}T00:00:00Z/${toDate.toISOString().split('T')[0]}T23:59:59Z`,
+                    "collections": ["sentinel-1-grd"],
+                    "limit": 5,
+                    "filter": "sar:instrument_mode = 'IW' AND s1:polarization = 'VV'"
+                };
+
+                const vvResponse = await fetch(catalogUrl, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${accessToken}`
+                    },
+                    body: JSON.stringify(catalogPayloadVV)
+                });
+
+                if (vvResponse.ok) {
+                    catalogData = await vvResponse.json();
+                    polarization = 'VV';
+                    console.log(`Datos encontrados con VV: ${catalogData.features.length} features`);
+                } else {
+                    throw new Error(`Error en búsqueda con VV: ${await vvResponse.text()}`);
+                }
+            } else {
+                console.log(`Datos encontrados con VH: ${catalogData.features.length} features`);
+            }
+        } else {
+            throw new Error(`Error en búsqueda con VH: ${await catalogResponse.text()}`);
         }
 
-        const catalogData = await catalogResponse.json();
-        
-        if (catalogData.features.length === 0) {
-            // Si no hay IW, podrías considerar fallback a EW, pero mejor no
+        if (!catalogData || catalogData.features.length === 0) {
             throw new Error("No se encontraron datos de Sentinel-1 IW GRD para esta ubicación.");
         }
 
@@ -414,10 +447,6 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
         }
 
         const foundDate = closestFeature.properties.datetime.split('T')[0];
-        const availablePolarization = closestFeature.properties['s1:polarization'];
-        
-        // Ahora SÍ puedes confiar en esta polarización
-        const bandToUse = availablePolarization; // Será VH o VV
 
         const payload = {
             input: {
@@ -434,7 +463,7 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
                                 from: `${foundDate}T00:00:00Z`,
                                 to: `${foundDate}T23:59:59Z`
                             },
-                            polarization: bandToUse,
+                            polarization: polarization,
                             mosaicOrder: "mostRecent"
                         },
                         type: "sentinel-1-grd"
@@ -452,7 +481,7 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
 function setup() {
     return {
         input: [{ 
-            bands: ["${bandToUse}", "dataMask"], 
+            bands: ["${polarization}", "dataMask"], 
             units: "LINEAR_POWER" 
         }],
         output: { 
@@ -468,7 +497,7 @@ function evaluatePixel(samples) {
         return [0];
     }
     
-    const value = samples[0]["${bandToUse}"];
+    const value = samples[0]["${polarization}"];
     const db = 10 * Math.log10(Math.max(value, 1e-6));
     
     // Rango típico para tierra con IW
@@ -502,7 +531,7 @@ function evaluatePixel(samples) {
         return {
             url: `image/png;base64,${base64}`,
             usedDate: foundDate,
-            polarization: bandToUse,
+            polarization: polarization,
             instrumentMode: "IW"
         };
 
