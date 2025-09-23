@@ -457,7 +457,7 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
                         coordinates: geometry
                     }
                 },
-                 [
+                 data: [
                     {
                         dataFilter: {
                             timeRange: {
@@ -570,7 +570,7 @@ function evaluatePixel(samples) {
                 ...payload,
                 input: {
                     ...payload.input,
-                    [
+                    data: [
                         {
                             dataFilter: {
                                 ...payload.input[0].dataFilter,
