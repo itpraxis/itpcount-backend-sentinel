@@ -350,6 +350,9 @@ function evaluatePixel(sample) {
 // ==============================================
 // ✅ FUNCIÓN: Obtiene la imagen de Sentinel-1 IW GRD (CORREGIDA)
 // ==============================================
+// ==============================================
+// ✅ FUNCIÓN: Usa cualquier dato de Sentinel-1 disponible
+// ==============================================
 const fetchSentinel1Radar = async ({ geometry, date }) => {
     const accessToken = await getAccessToken();
     const bbox = polygonToBbox(geometry);
@@ -361,92 +364,66 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
         // Rango de búsqueda ampliado
         const fromDate = new Date(date);
         const toDate = new Date(date);
-        fromDate.setDate(fromDate.getDate() - 90);
-        toDate.setDate(toDate.getDate() + 30);
+        fromDate.setDate(fromDate.getDate() - 30);
+        toDate.setDate(toDate.getDate() + 7);
 
-        // Buscar primero por VH (prioritario para vegetación)
+        // BUSCAR CUALQUIER DATO DE SENTINEL-1 EN LA ZONA
         const catalogUrl = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search';
         
-        // Intentar primero con VH
-        const catalogPayloadVH = {
+        const catalogPayload = {
             "bbox": bbox,
             "datetime": `${fromDate.toISOString().split('T')[0]}T00:00:00Z/${toDate.toISOString().split('T')[0]}T23:59:59Z`,
             "collections": ["sentinel-1-grd"],
-            "limit": 5,
-            "filter": "sar:instrument_mode = 'IW' AND s1:polarization = 'VH'"
+            "limit": 1
         };
 
-        console.log(`Buscando IW GRD con VH entre ${fromDate.toISOString()} y ${toDate.toISOString()}`);
-        console.log(`BBOX: [${bbox.join(', ')}]`);
+        console.log(`Buscando cualquier dato entre ${fromDate.toISOString()} y ${toDate.toISOString()}`);
 
-        let catalogResponse = await fetch(catalogUrl, {
+        const catalogResponse = await fetch(catalogUrl, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
                 'Authorization': `Bearer ${accessToken}`
             },
-            body: JSON.stringify(catalogPayloadVH)
+            body: JSON.stringify(catalogPayload)
         });
 
-        let catalogData = null;
-        let polarization = 'VH';
-
-        if (catalogResponse.ok) {
-            catalogData = await catalogResponse.json();
-            if (catalogData.features.length === 0) {
-                console.log("No se encontraron datos con VH, intentando con VV");
-                
-                // Si no hay VH, intentar con VV
-                const catalogPayloadVV = {
-                    "bbox": bbox,
-                    "datetime": `${fromDate.toISOString().split('T')[0]}T00:00:00Z/${toDate.toISOString().split('T')[0]}T23:59:59Z`,
-                    "collections": ["sentinel-1-grd"],
-                    "limit": 5,
-                    "filter": "sar:instrument_mode = 'IW' AND s1:polarization = 'VV'"
-                };
-
-                const vvResponse = await fetch(catalogUrl, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${accessToken}`
-                    },
-                    body: JSON.stringify(catalogPayloadVV)
-                });
-
-                if (vvResponse.ok) {
-                    catalogData = await vvResponse.json();
-                    polarization = 'VV';
-                    console.log(`Datos encontrados con VV: ${catalogData.features.length} features`);
-                } else {
-                    throw new Error(`Error en búsqueda con VV: ${await vvResponse.text()}`);
-                }
-            } else {
-                console.log(`Datos encontrados con VH: ${catalogData.features.length} features`);
-            }
-        } else {
-            throw new Error(`Error en búsqueda con VH: ${await catalogResponse.text()}`);
+        if (!catalogResponse.ok) {
+            throw new Error(`Error en catálogo: ${await catalogResponse.text()}`);
         }
 
-        if (!catalogData || catalogData.features.length === 0) {
-            throw new Error("No se encontraron datos de Sentinel-1 IW GRD para esta ubicación.");
+        const catalogData = await catalogResponse.json();
+        
+        if (catalogData.features.length === 0) {
+            throw new Error("No se encontraron datos de Sentinel-1 para esta ubicación.");
         }
 
-        // Procesar el feature más cercano
-        const targetDate = new Date(date);
-        let closestFeature = null;
-        let minDiff = Infinity;
+        // Usar el primer dato disponible
+        const feature = catalogData.features[0];
+        const foundDate = feature.properties.datetime.split('T')[0];
+        const tileId = feature.id;
 
-        for (const feature of catalogData.features) {
-            const featureDate = new Date(feature.properties.datetime);
-            const diff = Math.abs(featureDate - targetDate);
-            if (diff < minDiff) {
-                minDiff = diff;
-                closestFeature = feature;
-            }
+        // Determinar banda disponible por el nombre del tile
+        let bandToUse = null;
+        let instrumentMode = null;
+
+        if (tileId.includes('_SSH_')) {
+            bandToUse = 'HH';
+            instrumentMode = 'EW';
+        } else if (tileId.includes('_SSV_')) {
+            bandToUse = 'VV';
+            instrumentMode = 'EW';
+        } else if (tileId.includes('_DV_')) {
+            bandToUse = 'VH';
+            instrumentMode = 'IW';
+        } else if (tileId.includes('_DH_')) {
+            bandToUse = 'HH';
+            instrumentMode = 'IW';
         }
 
-        const foundDate = closestFeature.properties.datetime.split('T')[0];
+        if (!bandToUse) {
+            throw new Error("No se pudo determinar la banda disponible del tile.");
+        }
 
         const payload = {
             input: {
@@ -463,7 +440,6 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
                                 from: `${foundDate}T00:00:00Z`,
                                 to: `${foundDate}T23:59:59Z`
                             },
-                            polarization: polarization,
                             mosaicOrder: "mostRecent"
                         },
                         type: "sentinel-1-grd"
@@ -481,7 +457,7 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
 function setup() {
     return {
         input: [{ 
-            bands: ["${polarization}", "dataMask"], 
+            bands: ["${bandToUse}", "dataMask"], 
             units: "LINEAR_POWER" 
         }],
         output: { 
@@ -497,12 +473,12 @@ function evaluatePixel(samples) {
         return [0];
     }
     
-    const value = samples[0]["${polarization}"];
+    const value = samples[0]["${bandToUse}"];
     const db = 10 * Math.log10(Math.max(value, 1e-6));
     
-    // Rango típico para tierra con IW
-    const minDb = -25;
-    const maxDb = -5;
+    // Rango adaptado para diferentes modos
+    const minDb = (samples[0].properties.sar_instrument_mode === 'IW') ? -25 : -28;
+    const maxDb = (samples[0].properties.sar_instrument_mode === 'IW') ? -5 : -3;
     
     const normalized = (db - minDb) / (maxDb - minDb);
     const clamped = Math.max(0, Math.min(1, normalized));
@@ -531,8 +507,9 @@ function evaluatePixel(samples) {
         return {
             url: `image/png;base64,${base64}`,
             usedDate: foundDate,
-            polarization: polarization,
-            instrumentMode: "IW"
+            polarization: bandToUse,
+            instrumentMode: instrumentMode,
+            sourceTile: tileId
         };
 
     } catch (error) {
