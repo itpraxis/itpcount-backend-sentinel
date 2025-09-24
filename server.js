@@ -347,18 +347,6 @@ function evaluatePixel(sample) {
 // ==============================================
 // ✅ FUNCIÓN FINAL VERIFICADA: Obtiene la mejor imagen de Sentinel-1 Gemini
 // ==============================================
-// ==============================================
-// ✅ FUNCIÓN FINAL VERIFICADA: Obtiene una imagen funcional de Sentinel-1
-// ==============================================
-// ==============================================
-// ✅ FUNCIÓN FINAL VERIFICADA: Obtiene una imagen funcional de Sentinel-1
-// ==============================================
-// ==============================================
-// ✅ FUNCIÓN FINAL VERIFICADA: Obtiene una imagen funcional de Sentinel-1
-// ==============================================
-// ==============================================
-// ✅ FUNCIÓN FINAL VERIFICADA: Obtiene una imagen funcional de Sentinel-1
-// ==============================================
 const fetchSentinel1Radar = async ({ geometry, date }) => {
     const accessToken = await getAccessToken();
     const bbox = polygonToBbox(geometry);
@@ -440,12 +428,9 @@ function evaluatePixel(samples) {
     if (linearValue <= 0 || samples.dataMask === 0) {
         return [0];
     }
-    const dbValue = 10 * Math.log10(linearValue);
-    const minDb = -45;
-    const maxDb = 5;
-    let mappedValue = (dbValue - minDb) / (maxDb - minDb) * 255;
-    mappedValue = Math.max(0, Math.min(255, mappedValue));
-    return [mappedValue];
+    // Mapeo no lineal para resaltar los detalles de baja intensidad
+    const mappedValue = Math.sqrt(linearValue) * 1000;
+    return [Math.max(0, Math.min(255, mappedValue))];
 }`;
 
             const payload = {
@@ -530,6 +515,7 @@ function evaluatePixel(samples) {
         throw error;
     }
 };
+
 
 
 
