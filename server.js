@@ -347,6 +347,9 @@ function evaluatePixel(sample) {
 // ==============================================
 // ✅ FUNCIÓN FINAL: Obtiene la mejor imagen de Sentinel-1 para el frontend Gemini
 // ==============================================
+// ==============================================
+// ✅ FUNCIÓN FINAL: Obtiene la mejor imagen de Sentinel-1 para el frontend
+// ==============================================
 const fetchSentinel1Radar = async ({ geometry, date }) => {
     const accessToken = await getAccessToken();
     const bbox = polygonToBbox(geometry);
@@ -354,34 +357,89 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
         throw new Error('No se pudo calcular el bounding box del polígono.');
     }
 
-    const fromDate = new Date(date);
-    fromDate.setDate(fromDate.getDate() - 30); // Aumentamos el rango de búsqueda a 30 días
-    const fromDateISO = fromDate.toISOString().split('T')[0];
+    try {
+        // ✅ Mantienes tu lógica de búsqueda en el catálogo, que es excelente
+        const areaInSquareMeters = calculatePolygonArea(bbox);
+        const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10);
+        const finalWidth = Math.max(sizeInPixels, 512);
+        const finalHeight = Math.max(sizeInPixels, 512);
 
-    const tryRequest = async (polarization) => {
-        // ✅ SOLUCIÓN CLAVE: Evalscript más robusto con mapeo logarítmico
+        const fromDate = new Date(date);
+        const toDate = new Date(date);
+        fromDate.setDate(fromDate.getDate() - 30);
+        toDate.setDate(toDate.getDate() + 7);
+
+        const catalogUrl = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search';
+        const catalogPayload = {
+            "bbox": bbox,
+            "datetime": `${fromDate.toISOString().split('T')[0]}T00:00:00Z/${toDate.toISOString().split('T')[0]}T23:59:59Z`,
+            "collections": ["sentinel-1-grd"],
+            "limit": 1
+        };
+
+        const catalogResponse = await fetch(catalogUrl, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${accessToken}`
+            },
+            body: JSON.stringify(catalogPayload)
+        });
+
+        if (!catalogResponse.ok) {
+            const errorText = await catalogResponse.text();
+            throw new Error(`Error en consulta al catálogo: ${errorText}`);
+        }
+
+        const catalogData = await catalogResponse.json();
+        if (catalogData.features.length === 0) {
+            throw new Error("No se encontraron datos de Sentinel-1 para esta ubicación.");
+        }
+
+        const feature = catalogData.features[0];
+        const foundDate = feature.properties.datetime.split('T')[0];
+        const tileId = feature.id;
+
+        // ✅ Lógica de polarización simplificada para ser más robusta
+        let bandToUse = 'VH'; // Empezamos con la banda más común
+        if (tileId.includes('_HH_') || tileId.includes('_SH_')) {
+            bandToUse = 'HH';
+        } else if (tileId.includes('_VV_') || tileId.includes('_SV_')) {
+            bandToUse = 'VV';
+        }
+        console.log(`Usando banda: ${bandToUse}`);
+
+        // ✅ CORRECCIÓN CLAVE: Evalscript más robusto
         const evalscript = `//VERSION=3
 function setup() {
-  return {
-    input: [{ bands: ["${polarization}", "dataMask"], units: "LINEAR_POWER" }],
-    output: { bands: 1, sampleType: "UINT8", format: "image/png" }
-  };
+    return {
+        input: [{ 
+            bands: ["${bandToUse}", "dataMask"], 
+            units: "LINEAR_POWER" 
+        }],
+        output: { 
+            bands: 1, 
+            sampleType: "UINT8", 
+            format: "image/png" 
+        }
+    };
 }
 function evaluatePixel(samples) {
-  const linearValue = samples.${polarization};
-  if (!linearValue || samples.dataMask === 0) {
-    return [0];
-  }
-  
-  // ✅ Mapeo logarítmico simplificado
-  const dbValue = 10 * Math.log10(linearValue);
-  const minDb = -25;
-  const maxDb = 0;
-  let mappedValue = Math.round((dbValue - minDb) / (maxDb - minDb) * 255);
-  mappedValue = Math.max(0, Math.min(255, mappedValue));
-  return [mappedValue];
+    const linearValue = samples.${bandToUse};
+    if (!linearValue || samples.dataMask === 0) {
+        return [0];
+    }
+    
+    // ✅ Mapeo logarítmico para asegurar visibilidad de cualquier dato
+    const dbValue = 10 * Math.log10(linearValue);
+    const minDb = -25;
+    const maxDb = 0;
+    let mappedValue = Math.round((dbValue - minDb) / (maxDb - minDb) * 255);
+    mappedValue = Math.max(0, Math.min(255, mappedValue));
+    return [mappedValue];
 }`;
 
+        // Payload para procesamiento de imagen
         const payload = {
             input: {
                 bounds: {
@@ -390,26 +448,20 @@ function evaluatePixel(samples) {
                         coordinates: geometry
                     }
                 },
-                data: [
-                    {
-                        dataFilter: {
-                            timeRange: {
-                                from: `${fromDateISO}T00:00:00Z`,
-                                to: `${date}T23:59:59Z`
-                            },
-                            polarization: polarization,
-                            orbitDirection: "ASCENDING"
+                data: [{
+                    dataFilter: {
+                        timeRange: {
+                            from: `${foundDate}T00:00:00Z`,
+                            to: `${foundDate}T23:59:59Z`
                         },
-                        processing: {
-                            mosaicking: "ORBIT"
-                        },
-                        type: "sentinel-1-grd"
-                    }
-                ]
+                        mosaicOrder: "mostRecent"
+                    },
+                    type: "sentinel-1-grd"
+                }]
             },
             output: {
-                width: 512, // ✅ Tamaño fijo para evitar problemas de cálculo
-                height: 512,
+                width: finalWidth,
+                height: finalHeight,
                 format: "image/png",
                 sampleType: "UINT8"
             },
@@ -426,37 +478,23 @@ function evaluatePixel(samples) {
         });
 
         if (!imageResponse.ok) {
-            throw new Error(`Solicitud con polarización ${polarization} falló.`);
+            const errorText = await imageResponse.text();
+            throw new Error(`Error en la imagen Sentinel-1: ${errorText}`);
         }
-        return imageResponse;
-    };
 
-    try {
-        const responseVH = await tryRequest("VH");
-        const buffer = await responseVH.arrayBuffer();
+        const buffer = await imageResponse.arrayBuffer();
         const base64 = Buffer.from(buffer).toString('base64');
+        
         return {
             url: `image/png;base64,${base64}`,
-            usedDate: date,
-            bbox: bbox,
-            polarization: "VH"
+            usedDate: foundDate,
+            polarization: bandToUse,
+            sourceTile: tileId
         };
-    } catch (vhError) {
-        console.log("⚠️ No se encontraron datos VH. Reintentando con VV...");
-        try {
-            const responseVV = await tryRequest("VV");
-            const buffer = await responseVV.arrayBuffer();
-            const base64 = Buffer.from(buffer).toString('base64');
-            return {
-                url: `image/png;base64,${base64}`,
-                usedDate: date,
-                bbox: bbox,
-                polarization: "VV"
-            };
-        } catch (vvError) {
-            console.error('❌ Ambos intentos de polarización fallaron:', vvError.message);
-            throw new Error(`Error al obtener imagen para ${date}: ${vvError.message}`);
-        }
+
+    } catch (error) {
+        console.error('❌ Error en la imagen Sentinel-1:', error.message);
+        throw error;
     }
 };
 
