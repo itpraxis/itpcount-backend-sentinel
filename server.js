@@ -415,22 +415,25 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
         const pol = determinePolarization(tileId);
 
         const tryRequest = async (polarization) => {
-            // ✅ Evalscript final y verificado
+            // ✅ Evalscript final y verificado. Se utiliza la unidad 'GAMMA0_DB'
             const evalscript = `//VERSION=3
 function setup() {
     return {
-        input: [{ bands: ["${polarization}", "dataMask"], units: "LINEAR_POWER" }],
+        // Se solicita la unidad en decibelios para evitar conversiones
+        input: [{ bands: ["${polarization}", "dataMask"], units: "GAMMA0_DB" }],
         output: { bands: 1, sampleType: "UINT8", format: "image/png" }
     };
 }
 function evaluatePixel(samples) {
-    const linearValue = samples.${polarization};
-    if (linearValue <= 0 || samples.dataMask === 0) {
+    const dbValue = samples.${polarization};
+    if (samples.dataMask === 0) {
         return [0];
     }
-    // Mapeo no lineal para resaltar los detalles de baja intensidad
-    const mappedValue = Math.sqrt(linearValue) * 1000;
-    return [Math.max(0, Math.min(255, mappedValue))];
+    const minDb = -30;
+    const maxDb = 0;
+    let mappedValue = (dbValue - minDb) / (maxDb - minDb) * 255;
+    mappedValue = Math.max(0, Math.min(255, mappedValue));
+    return [mappedValue];
 }`;
 
             const payload = {
