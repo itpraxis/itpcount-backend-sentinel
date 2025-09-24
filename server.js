@@ -396,37 +396,45 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
         const foundDate = feature.properties.datetime.split('T')[0];
         const tileId = feature.id;
 
+        // ✅ Lógica de polarización corregida
         const determinePolarization = (id) => {
-            if (id.includes('_SSH_') || id.includes('_SDH_')) { return { first: 'HH', second: 'HV', mode: 'EW' }; }
-            if (id.includes('_SSV_') || id.includes('_SDV_')) { return { first: 'VV', second: 'VH', mode: 'EW' }; }
-            if (id.includes('_DV_')) { return { first: 'VH', second: 'VV', mode: 'IW' }; }
-            if (id.includes('_DH_')) { return { first: 'HH', second: 'HV', mode: 'IW' }; }
-            return { first: 'VH', second: 'VV', mode: 'IW' };
+            if (id.includes('_DV_')) {
+                return { first: 'VH', second: 'VV', mode: 'IW' };
+            }
+            if (id.includes('_DH_')) {
+                return { first: 'HH', second: 'HV', mode: 'IW' };
+            }
+            if (id.includes('_SV_')) {
+                return { first: 'VV', second: 'VH', mode: 'EW' };
+            }
+            if (id.includes('_SH_')) {
+                return { first: 'HH', second: 'HV', mode: 'EW' };
+            }
+            // Modo de adquisición por defecto
+            return { first: 'VV', second: 'VH', mode: 'IW' };
         };
+        
         const pol = determinePolarization(tileId);
 
         const tryRequest = async (polarization) => {
-            // ✅ CORRECCIÓN CLAVE: Evalscript con rango de decibelios más amplio
             const evalscript = `//VERSION=3
 function setup() {
-  return {
-    input: [{ bands: ["${polarization}", "dataMask"], units: "LINEAR_POWER" }],
-    output: { bands: 1, sampleType: "UINT8", format: "image/png" }
-  };
+    return {
+        input: [{ bands: ["${polarization}", "dataMask"], units: "LINEAR_POWER" }],
+        output: { bands: 1, sampleType: "UINT8", format: "image/png" }
+    };
 }
 function evaluatePixel(samples) {
-  const linearValue = samples.${polarization};
-  if (!linearValue || samples.dataMask === 0) {
-    return [0];
-  }
-
-  // ✅ Rango mucho más amplio y robusto
-  const dbValue = 10 * Math.log10(linearValue);
-  const minDb = -40; 
-  const maxDb = 10;
-  let mappedValue = Math.round((dbValue - minDb) / (maxDb - minDb) * 255);
-  mappedValue = Math.max(0, Math.min(255, mappedValue));
-  return [mappedValue];
+    const linearValue = samples.${polarization};
+    if (!linearValue || samples.dataMask === 0) {
+        return [0];
+    }
+    const dbValue = 10 * Math.log10(linearValue);
+    const minDb = -40;  
+    const maxDb = 10;
+    let mappedValue = Math.round((dbValue - minDb) / (maxDb - minDb) * 255);
+    mappedValue = Math.max(0, Math.min(255, mappedValue));
+    return [mappedValue];
 }`;
 
             const payload = {
