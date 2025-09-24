@@ -350,6 +350,9 @@ function evaluatePixel(sample) {
 // ==============================================
 // ✅ FUNCIÓN FINAL VERIFICADA: Obtiene una imagen funcional de Sentinel-1
 // ==============================================
+// ==============================================
+// ✅ FUNCIÓN FINAL VERIFICADA: Obtiene una imagen funcional de Sentinel-1
+// ==============================================
 const fetchSentinel1Radar = async ({ geometry, date }) => {
     const accessToken = await getAccessToken();
     const bbox = polygonToBbox(geometry);
@@ -418,7 +421,7 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
         const pol = determinePolarization(tileId);
 
         const tryRequest = async (polarization) => {
-            // ✅ Evalscript corregido para mapeo de color dinámico
+            // ✅ Evalscript corregido para un mapeo más amplio
             const evalscript = `//VERSION=3
 function setup() {
     return {
@@ -432,8 +435,8 @@ function evaluatePixel(samples) {
         return [0];
     }
     const dbValue = 10 * Math.log10(linearValue);
-    // Mapeo dinámico de valores a 8 bits
-    const minDb = -25;
+    // Nuevo rango de mapeo
+    const minDb = -30;
     const maxDb = 0;
     let mappedValue = (dbValue - minDb) / (maxDb - minDb) * 255;
     mappedValue = Math.max(0, Math.min(255, mappedValue));
