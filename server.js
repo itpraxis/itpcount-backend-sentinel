@@ -350,6 +350,9 @@ function evaluatePixel(sample) {
 // ==============================================
 // ✅ FUNCIÓN FINAL: Obtiene la mejor imagen de Sentinel-1 para el frontend
 // ==============================================
+// ==============================================
+// ✅ FUNCIÓN FINAL: Obtiene la mejor imagen de Sentinel-1 para el frontend
+// ==============================================
 const fetchSentinel1Radar = async ({ geometry, date }) => {
     const accessToken = await getAccessToken();
     const bbox = polygonToBbox(geometry);
@@ -358,7 +361,6 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
     }
 
     try {
-        // ✅ Mantienes tu lógica de búsqueda en el catálogo, que es excelente
         const areaInSquareMeters = calculatePolygonArea(bbox);
         const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10);
         const finalWidth = Math.max(sizeInPixels, 512);
@@ -400,98 +402,116 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
         const foundDate = feature.properties.datetime.split('T')[0];
         const tileId = feature.id;
 
-        // ✅ Lógica de polarización simplificada para ser más robusta
-        let bandToUse = 'VH'; // Empezamos con la banda más común
-        if (tileId.includes('_HH_') || tileId.includes('_SH_')) {
-            bandToUse = 'HH';
-        } else if (tileId.includes('_VV_') || tileId.includes('_SV_')) {
-            bandToUse = 'VV';
-        }
-        console.log(`Usando banda: ${bandToUse}`);
+        // ✅ LÓGICA REINTEGRADA: Identificar la banda correcta desde el tileId
+        const determinePolarization = (id) => {
+            if (id.includes('_SSH_')) { return { first: 'HH', second: 'HV', mode: 'EW' }; }
+            if (id.includes('_SSV_')) { return { first: 'VV', second: 'VH', mode: 'EW' }; }
+            if (id.includes('_SDH_')) { return { first: 'HH', second: 'HV', mode: 'EW' }; } // ✅ CORRECCIÓN
+            if (id.includes('_SDV_')) { return { first: 'VV', second: 'VH', mode: 'EW' }; } // ✅ CORRECCIÓN
+            if (id.includes('_DV_')) { return { first: 'VH', second: 'VV', mode: 'IW' }; }
+            if (id.includes('_DH_')) { return { first: 'HH', second: 'HV', mode: 'IW' }; }
+            return { first: 'VH', second: 'VV', mode: 'IW' }; // Fallback predeterminado
+        };
+        const pol = determinePolarization(tileId);
 
-        // ✅ CORRECCIÓN CLAVE: Evalscript más robusto
-        const evalscript = `//VERSION=3
+        const tryRequest = async (polarization) => {
+            const evalscript = `//VERSION=3
 function setup() {
-    return {
-        input: [{ 
-            bands: ["${bandToUse}", "dataMask"], 
-            units: "LINEAR_POWER" 
-        }],
-        output: { 
-            bands: 1, 
-            sampleType: "UINT8", 
-            format: "image/png" 
-        }
-    };
+  return {
+    input: [{ bands: ["${polarization}", "dataMask"], units: "LINEAR_POWER" }],
+    output: { bands: 1, sampleType: "UINT8", format: "image/png" }
+  };
 }
 function evaluatePixel(samples) {
-    const linearValue = samples.${bandToUse};
-    if (!linearValue || samples.dataMask === 0) {
-        return [0];
-    }
-    
-    // ✅ Mapeo logarítmico para asegurar visibilidad de cualquier dato
-    const dbValue = 10 * Math.log10(linearValue);
-    const minDb = -25;
-    const maxDb = 0;
-    let mappedValue = Math.round((dbValue - minDb) / (maxDb - minDb) * 255);
-    mappedValue = Math.max(0, Math.min(255, mappedValue));
-    return [mappedValue];
+  const linearValue = samples.${polarization};
+  if (!linearValue || samples.dataMask === 0) {
+    return [0];
+  }
+  const dbValue = 10 * Math.log10(linearValue);
+  const minDb = -25;
+  const maxDb = 0;
+  let mappedValue = Math.round((dbValue - minDb) / (maxDb - minDb) * 255);
+  mappedValue = Math.max(0, Math.min(255, mappedValue));
+  return [mappedValue];
 }`;
 
-        // Payload para procesamiento de imagen
-        const payload = {
-            input: {
-                bounds: {
-                    geometry: {
-                        type: "Polygon",
-                        coordinates: geometry
-                    }
-                },
-                data: [{
-                    dataFilter: {
-                        timeRange: {
-                            from: `${foundDate}T00:00:00Z`,
-                            to: `${foundDate}T23:59:59Z`
-                        },
-                        mosaicOrder: "mostRecent"
+            const payload = {
+                input: {
+                    bounds: {
+                        geometry: {
+                            type: "Polygon",
+                            coordinates: geometry
+                        }
                     },
-                    type: "sentinel-1-grd"
-                }]
-            },
-            output: {
-                width: finalWidth,
-                height: finalHeight,
-                format: "image/png",
-                sampleType: "UINT8"
-            },
-            evalscript: evalscript
+                    data: [{
+                        dataFilter: {
+                            timeRange: {
+                                from: `${foundDate}T00:00:00Z`,
+                                to: `${foundDate}T23:59:59Z`
+                            },
+                            polarization: polarization,
+                            instrumentMode: pol.mode
+                        },
+                        processing: {
+                            mosaicking: "ORBIT"
+                        },
+                        type: "sentinel-1-grd"
+                    }]
+                },
+                output: {
+                    width: finalWidth,
+                    height: finalHeight,
+                    format: "image/png",
+                    sampleType: "UINT8"
+                },
+                evalscript: evalscript
+            };
+
+            const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${accessToken}`
+                },
+                body: JSON.stringify(payload)
+            });
+
+            if (!imageResponse.ok) {
+                const errorText = await imageResponse.text();
+                throw new Error(`Solicitud con polarización ${polarization} falló: ${errorText}`);
+            }
+            return imageResponse;
         };
 
-        const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${accessToken}`
-            },
-            body: JSON.stringify(payload)
-        });
-
-        if (!imageResponse.ok) {
-            const errorText = await imageResponse.text();
-            throw new Error(`Error en la imagen Sentinel-1: ${errorText}`);
+        try {
+            const response = await tryRequest(pol.first);
+            const buffer = await response.arrayBuffer();
+            const base64 = Buffer.from(buffer).toString('base64');
+            return {
+                url: `data:image/png;base64,${base64}`,
+                usedDate: foundDate,
+                polarization: pol.first,
+                sourceTile: tileId,
+                bbox: bbox
+            };
+        } catch (error) {
+            console.log("⚠️ Intento con polarización principal falló. Reintentando con secundaria...");
+            try {
+                const response = await tryRequest(pol.second);
+                const buffer = await response.arrayBuffer();
+                const base64 = Buffer.from(buffer).toString('base64');
+                return {
+                    url: `data:image/png;base64,${base64}`,
+                    usedDate: foundDate,
+                    polarization: pol.second,
+                    sourceTile: tileId,
+                    bbox: bbox
+                };
+            } catch (secondError) {
+                console.error('❌ Ambos intentos de polarización fallaron:', secondError.message);
+                throw new Error(`Error al obtener imagen para ${foundDate}: ${secondError.message}`);
+            }
         }
-
-        const buffer = await imageResponse.arrayBuffer();
-        const base64 = Buffer.from(buffer).toString('base64');
-        
-        return {
-            url: `image/png;base64,${base64}`,
-            usedDate: foundDate,
-            polarization: bandToUse,
-            sourceTile: tileId
-        };
-
     } catch (error) {
         console.error('❌ Error en la imagen Sentinel-1:', error.message);
         throw error;
