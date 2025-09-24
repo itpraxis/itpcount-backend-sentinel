@@ -435,8 +435,8 @@ function evaluatePixel(samples) {
         return [0];
     }
     const dbValue = 10 * Math.log10(linearValue);
-    // Nuevo rango de mapeo
-    const minDb = -30;
+    // Nuevo rango de mapeo: de -40 a 0 dB
+    const minDb = -40;
     const maxDb = 0;
     let mappedValue = (dbValue - minDb) / (maxDb - minDb) * 255;
     mappedValue = Math.max(0, Math.min(255, mappedValue));
