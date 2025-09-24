@@ -356,6 +356,9 @@ function evaluatePixel(sample) {
 // ==============================================
 // ✅ FUNCIÓN FINAL VERIFICADA: Obtiene una imagen funcional de Sentinel-1
 // ==============================================
+// ==============================================
+// ✅ FUNCIÓN FINAL VERIFICADA: Obtiene una imagen funcional de Sentinel-1
+// ==============================================
 const fetchSentinel1Radar = async ({ geometry, date }) => {
     const accessToken = await getAccessToken();
     const bbox = polygonToBbox(geometry);
@@ -424,20 +427,20 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
         const pol = determinePolarization(tileId);
 
         const tryRequest = async (polarization) => {
-            // ✅ Evalscript final y verificado. Se elimina la conversión de dB
+            // ✅ Evalscript final y verificado
             const evalscript = `//VERSION=3
 function setup() {
-    // Cambio clave: la unidad de entrada es ahora 'dB'
     return {
-        input: [{ bands: ["${polarization}", "dataMask"], units: "dB" }],
+        input: [{ bands: ["${polarization}", "dataMask"], units: "LINEAR_POWER" }],
         output: { bands: 1, sampleType: "UINT8", format: "image/png" }
     };
 }
 function evaluatePixel(samples) {
-    const dbValue = samples.${polarization};
-    if (samples.dataMask === 0) {
+    const linearValue = samples.${polarization};
+    if (linearValue <= 0 || samples.dataMask === 0) {
         return [0];
     }
+    const dbValue = 10 * Math.log10(linearValue);
     const minDb = -45;
     const maxDb = 5;
     let mappedValue = (dbValue - minDb) / (maxDb - minDb) * 255;
