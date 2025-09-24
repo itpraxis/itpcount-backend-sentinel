@@ -344,8 +344,9 @@ function evaluatePixel(sample) {
     };
 };
 
+
 // ==============================================
-// ✅ FUNCIÓN FINAL VERIFICADA: Obtiene la mejor imagen de Sentinel-1 Gemini
+// ✅ FUNCIÓN FINAL VERIFICADA: Obtiene una imagen funcional de Sentinel-1
 // ==============================================
 const fetchSentinel1Radar = async ({ geometry, date }) => {
     const accessToken = await getAccessToken();
@@ -415,22 +416,22 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
         const pol = determinePolarization(tileId);
 
         const tryRequest = async (polarization) => {
-            // ✅ Evalscript final y verificado. Se utiliza la unidad 'GAMMA0_DB'
+            // ✅ Evalscript final y verificado
             const evalscript = `//VERSION=3
 function setup() {
     return {
-        // Se solicita la unidad en decibelios para evitar conversiones
-        input: [{ bands: ["${polarization}", "dataMask"], units: "GAMMA0_DB" }],
+        input: [{ bands: ["${polarization}", "dataMask"], units: "LINEAR_POWER" }],
         output: { bands: 1, sampleType: "UINT8", format: "image/png" }
     };
 }
 function evaluatePixel(samples) {
-    const dbValue = samples.${polarization};
-    if (samples.dataMask === 0) {
+    const linearValue = samples.${polarization};
+    if (linearValue <= 0 || samples.dataMask === 0) {
         return [0];
     }
-    const minDb = -30;
-    const maxDb = 0;
+    const dbValue = 10 * Math.log10(linearValue);
+    const minDb = -80; // Rango más amplio para capturar los valores más bajos
+    const maxDb = 5;
     let mappedValue = (dbValue - minDb) / (maxDb - minDb) * 255;
     mappedValue = Math.max(0, Math.min(255, mappedValue));
     return [mappedValue];
@@ -518,7 +519,6 @@ function evaluatePixel(samples) {
         throw error;
     }
 };
-
 
 
 
