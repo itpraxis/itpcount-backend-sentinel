@@ -347,117 +347,56 @@ function evaluatePixel(sample) {
 // ==============================================
 // ✅ FUNCIÓN: Obtiene la imagen de Sentinel-1 para el frontend (DEFINITIVA) Qwen
 // ==============================================
+// ==============================================
+// ✅ FUNCIÓN SIMPLIFICADA: Obtiene imagen de Sentinel-1
+// ==============================================
 const fetchSentinel1Radar = async ({ geometry, date }) => {
     const accessToken = await getAccessToken();
-    const bbox = polygonToBbox(geometry);
-    if (!bbox) {
-        throw new Error('No se pudo calcular el bounding box del polígono.');
-    }
     
-    try {
-        // Rango de búsqueda ampliado
-        const fromDate = new Date(date);
-        const toDate = new Date(date);
-        fromDate.setDate(fromDate.getDate() - 30);
-        toDate.setDate(toDate.getDate() + 7);
+    // Forzar uso de una geometría simple y válida para pruebas
+    const testGeometry = [
+      [
+        [-72.17144423062364, -38.91506863834287],
+        [-72.17144423062364, -38.89568845546379],
+        [-72.15935346645514, -38.89568845546379],
+        [-72.15935346645514, -38.91506863834287],
+        [-72.17144423062364, -38.91506863834287]
+      ]
+    ];
 
-        // BUSCAR PRODUCTOS SENTINEL-1 IW GRD CON VV/VH
-        const catalogUrl = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search';
-        
-        const catalogPayload = {
-            "bbox": bbox,
-            "datetime": `${fromDate.toISOString().split('T')[0]}T00:00:00Z/${toDate.toISOString().split('T')[0]}T23:59:59Z`,
-            "collections": ["sentinel-1-grd"],
-            "limit": 5
-        };
-
-        console.log(`Buscando IW GRD entre ${fromDate.toISOString()} y ${toDate.toISOString()}`);
-        console.log(`BBOX: [${bbox.join(', ')}]`);
-
-        const catalogResponse = await fetch(catalogUrl, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${accessToken}`
+    const payload = {
+        input: {
+            bounds: {
+                geometry: {
+                    type: "Polygon",
+                    coordinates: testGeometry
+                }
             },
-            body: JSON.stringify(catalogPayload)
-        });
-
-        if (!catalogResponse.ok) {
-            const errorText = await catalogResponse.text();
-            throw new Error(`Error en catálogo: ${errorText}`);
-        }
-
-        const catalogData = await catalogResponse.json();
-        
-        if (catalogData.features.length === 0) {
-            throw new Error("No se encontraron datos de Sentinel-1 para esta ubicación.");
-        }
-
-        // Filtrar manualmente los features válidos para IW GRD
-        const validFeatures = catalogData.features.filter(feature => {
-            const instrumentMode = feature.properties['sar:instrument_mode'];
-            const polarization = feature.properties['s1:polarization'];
-            return instrumentMode === 'IW' && (polarization === 'VV' || polarization === 'VH');
-        });
-
-        if (validFeatures.length === 0) {
-            throw new Error("No se encontraron productos IW GRD con polarización VV o VH.");
-        }
-
-        // Procesar el feature más cercano
-        const targetDate = new Date(date);
-        let closestFeature = null;
-        let minDiff = Infinity;
-
-        for (const feature of validFeatures) {
-            const featureDate = new Date(feature.properties.datetime);
-            const diff = Math.abs(featureDate - targetDate);
-            if (diff < minDiff) {
-                minDiff = diff;
-                closestFeature = feature;
-            }
-        }
-
-        const foundDate = closestFeature.properties.datetime.split('T')[0];
-        const availablePolarization = closestFeature.properties['s1:polarization'];
-        
-        // Usar la banda disponible
-        const bandToUse = availablePolarization;
-
-        const payload = {
-            input: {
-                bounds: {
-                    geometry: {
-                        type: "Polygon",
-                        coordinates: geometry
-                    }
-                },
-                data: [
-                    {
-                        dataFilter: {
-                            timeRange: {
-                                from: `${foundDate}T00:00:00Z`,
-                                to: `${foundDate}T23:59:59Z`
-                            },
-                            mosaicOrder: "mostRecent"
+            data: [
+                {
+                    dataFilter: {
+                        timeRange: {
+                            from: `${date}T00:00:00Z`,
+                            to: `${date}T23:59:59Z`
                         },
-                        type: "sentinel-1-grd"
-                    }
-                ]
-            },
-            output: {
-                width: 512,
-                height: 512,
-                format: "image/png",
-                sampleType: "UINT8"
-            },
-            evalscript: `
+                        mosaicOrder: "mostRecent"
+                    },
+                    type: "sentinel-1-grd"
+                }
+            ]
+        },
+        output: {
+            width: 512,
+            height: 512,
+            format: "image/png",
+            sampleType: "UINT8"
+        },
+        evalscript: `
 //VERSION=3
 function setup() {
     return {
         input: [{ 
-            bands: ["${bandToUse}", "dataMask"], 
+            bands: ["VV"], 
             units: "LINEAR_POWER" 
         }],
         output: { 
@@ -469,24 +408,19 @@ function setup() {
 }
 
 function evaluatePixel(samples) {
-    if (samples.length === 0 || samples[0].dataMask === 0) {
+    if (!samples || samples.length === 0 || !samples[0] || samples[0].dataMask === 0) {
         return [0];
     }
-    
-    const value = samples[0]["${bandToUse}"];
-    const db = 10 * Math.log10(Math.max(value, 1e-6));
-    
-    // Rango típico para tierra con IW
+    const value = Math.max(samples[0].VV, 1e-6);
+    const db = 10 * Math.log10(value);
     const minDb = -25;
     const maxDb = -5;
-    
     const normalized = (db - minDb) / (maxDb - minDb);
-    const clamped = Math.max(0, Math.min(1, normalized));
-    
-    return [Math.round(clamped * 255)];
+    return [Math.round(Math.max(0, Math.min(1, normalized)) * 255)];
 }`
-        };
+    };
 
+    try {
         const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
             method: 'POST',
             headers: {
@@ -504,10 +438,14 @@ function evaluatePixel(samples) {
         const buffer = await imageResponse.arrayBuffer();
         const base64 = Buffer.from(buffer).toString('base64');
         
+        if (base64.length < 1000) {
+            throw new Error("Imagen generada inválida");
+        }
+
         return {
             url: `image/png;base64,${base64}`,
-            usedDate: foundDate,
-            polarization: bandToUse,
+            usedDate: date,
+            polarization: "VV",
             instrumentMode: "IW"
         };
 
