@@ -347,6 +347,9 @@ function evaluatePixel(sample) {
 // ==============================================
 // ✅ FUNCIÓN FINAL VERIFICADA: Obtiene la mejor imagen de Sentinel-1 Gemini
 // ==============================================
+// ==============================================
+// ✅ FUNCIÓN FINAL VERIFICADA: Obtiene una imagen funcional de Sentinel-1
+// ==============================================
 const fetchSentinel1Radar = async ({ geometry, date }) => {
     const accessToken = await getAccessToken();
     const bbox = polygonToBbox(geometry);
@@ -396,7 +399,6 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
         const foundDate = feature.properties.datetime.split('T')[0];
         const tileId = feature.id;
 
-        // ✅ Lógica de polarización corregida
         const determinePolarization = (id) => {
             if (id.includes('_DV_')) {
                 return { first: 'VH', second: 'VV', mode: 'IW' };
@@ -410,13 +412,13 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
             if (id.includes('_SH_')) {
                 return { first: 'HH', second: 'HV', mode: 'EW' };
             }
-            // Modo de adquisición por defecto
             return { first: 'VV', second: 'VH', mode: 'IW' };
         };
         
         const pol = determinePolarization(tileId);
 
         const tryRequest = async (polarization) => {
+            // ✅ Evalscript corregido para mapeo de color dinámico
             const evalscript = `//VERSION=3
 function setup() {
     return {
@@ -430,9 +432,10 @@ function evaluatePixel(samples) {
         return [0];
     }
     const dbValue = 10 * Math.log10(linearValue);
-    const minDb = -40;  
-    const maxDb = 10;
-    let mappedValue = Math.round((dbValue - minDb) / (maxDb - minDb) * 255);
+    // Mapeo dinámico de valores a 8 bits
+    const minDb = -25;
+    const maxDb = 0;
+    let mappedValue = (dbValue - minDb) / (maxDb - minDb) * 255;
     mappedValue = Math.max(0, Math.min(255, mappedValue));
     return [mappedValue];
 }`;
