@@ -353,6 +353,9 @@ function evaluatePixel(sample) {
 // ==============================================
 // ✅ FUNCIÓN FINAL: Obtiene la mejor imagen de Sentinel-1 para el frontend
 // ==============================================
+// ==============================================
+// ✅ FUNCIÓN FINAL: Obtiene la mejor imagen de Sentinel-1 para el frontend
+// ==============================================
 const fetchSentinel1Radar = async ({ geometry, date }) => {
     const accessToken = await getAccessToken();
     const bbox = polygonToBbox(geometry);
@@ -402,12 +405,12 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
         const foundDate = feature.properties.datetime.split('T')[0];
         const tileId = feature.id;
 
-        // ✅ LÓGICA REINTEGRADA: Identificar la banda correcta desde el tileId
+        // ✅ CORRECCIÓN CLAVE: Identificar la banda correcta desde el tileId, incluyendo los casos SDH y SDV
         const determinePolarization = (id) => {
             if (id.includes('_SSH_')) { return { first: 'HH', second: 'HV', mode: 'EW' }; }
             if (id.includes('_SSV_')) { return { first: 'VV', second: 'VH', mode: 'EW' }; }
-            if (id.includes('_SDH_')) { return { first: 'HH', second: 'HV', mode: 'EW' }; } // ✅ CORRECCIÓN
-            if (id.includes('_SDV_')) { return { first: 'VV', second: 'VH', mode: 'EW' }; } // ✅ CORRECCIÓN
+            if (id.includes('_SDH_')) { return { first: 'HH', second: 'HV', mode: 'EW' }; }
+            if (id.includes('_SDV_')) { return { first: 'VV', second: 'VH', mode: 'EW' }; }
             if (id.includes('_DV_')) { return { first: 'VH', second: 'VV', mode: 'IW' }; }
             if (id.includes('_DH_')) { return { first: 'HH', second: 'HV', mode: 'IW' }; }
             return { first: 'VH', second: 'VV', mode: 'IW' }; // Fallback predeterminado
