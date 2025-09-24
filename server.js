@@ -347,27 +347,6 @@ function evaluatePixel(sample) {
 // ==============================================
 // ✅ FUNCIÓN: Obtiene la imagen de Sentinel-1 para el frontend (DEFINITIVA) Qwen
 // ==============================================
-// ==============================================
-// ✅ FUNCIÓN: Obtiene la imagen de Sentinel-1 IW GRD (CORREGIDA)
-// ==============================================
-// ==============================================
-// ✅ FUNCIÓN: Usa cualquier dato de Sentinel-1 disponible
-// ==============================================
-// ==============================================
-// ✅ FUNCIÓN: Obtiene la imagen de Sentinel-1 para el frontend (DEFINITIVA)
-// ==============================================
-// ==============================================
-// ✅ FUNCIÓN: Obtiene la imagen de Sentinel-1 para el frontend (DEFINITIVA)
-// ==============================================
-// ==============================================
-// ✅ FUNCIÓN: Obtiene la imagen de Sentinel-1 para el frontend (CORREGIDA)
-// ==============================================
-// ==============================================
-// ✅ FUNCIÓN: Obtiene la imagen de Sentinel-1 IW GRD (CORREGIDA)
-// ==============================================
-// ==============================================
-// ✅ FUNCIÓN: Obtiene la imagen de Sentinel-1 IW GRD (CORREGIDA)
-// ==============================================
 const fetchSentinel1Radar = async ({ geometry, date }) => {
     const accessToken = await getAccessToken();
     const bbox = polygonToBbox(geometry);
@@ -382,14 +361,14 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
         fromDate.setDate(fromDate.getDate() - 30);
         toDate.setDate(toDate.getDate() + 7);
 
-        // BUSCAR TODOS LOS PRODUCTOS SENTINEL-1 IW GRD SIN FILTRO COMPLEJO
+        // BUSCAR PRODUCTOS SENTINEL-1 IW GRD CON VV/VH
         const catalogUrl = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search';
         
         const catalogPayload = {
             "bbox": bbox,
             "datetime": `${fromDate.toISOString().split('T')[0]}T00:00:00Z/${toDate.toISOString().split('T')[0]}T23:59:59Z`,
             "collections": ["sentinel-1-grd"],
-            "limit": 10
+            "limit": 5
         };
 
         console.log(`Buscando IW GRD entre ${fromDate.toISOString()} y ${toDate.toISOString()}`);
