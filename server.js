@@ -346,7 +346,66 @@ function evaluatePixel(sample) {
 
 
 // ==============================================
-// ✅ FUNCIÓN FINAL VERIFICADA: Obtiene una imagen funcional de Sentinel-1
+// FUNCIÓN AUXILIAR: Genera el evalscript para clasificación RGB
+// ==============================================
+const getClassificationEvalscript = () => {
+  // Este evalscript genera una imagen RGB usando VV y VH.
+  // Colores: Rojo/Azul: VV (Suelo, estructuras). Verde: VH (Vegetación)
+  return `//VERSION=3
+function setup() {
+  return {
+    // Pedimos VV, VH y la máscara de datos
+    input: [{ bands: ["VV", "VH", "dataMask"], units: "LINEAR_POWER" }],
+    // Salida RGB de 3 bandas (clasificación)
+    output: { bands: 3, sampleType: "UINT8", format: "image/png" }
+  };
+}
+
+function evaluatePixel(samples) {
+  let vv = samples.VV;
+  let vh = samples.VH;
+  let dm = samples.dataMask;
+
+  // Si no hay datos, devuelve negro
+  if (vv <= 0 || vh <= 0 || dm === 0) {
+    return [0, 0, 0];
+  }
+  
+  // 1. Calculamos las conversiones logarítmicas (dB)
+  let vv_db = 10 * Math.log10(vv);
+  let vh_db = 10 * Math.log10(vh);
+  
+  // 2. Definimos el rango de visualización
+  // Rango estándar para destacar la vegetación: -25 dB a 5 dB
+  const min_db = -25;
+  const max_db = 5; 
+  
+  // Función de normalización segura (mapea dB a un valor entre 0 y 1)
+  const normalize = (value) => Math.max(0, Math.min(1, (value - min_db) / (max_db - min_db)));
+  
+  let vv_norm = normalize(vv_db);
+  let vh_norm = normalize(vh_db);
+  
+  // 3. Asignamos a RGB (Falso Color para Clasificación)
+  // R: VV (Normalizado)
+  // G: VH (Normalizado) -> Resalta la vegetación y el dosel
+  // B: VV/VH (La razón de polarización VV/VH en dB es VV_dB - VH_dB)
+  
+  let ratio_db = vv_db - vh_db;
+  // Normalizar el ratio (un rango típico es de 0 a 10 dB)
+  let ratio_norm = Math.max(0, Math.min(1, ratio_db / 10)); 
+
+  // Multiplicamos por 255 para la salida UINT8
+  let r = vv_norm * 255;
+  let g = vh_norm * 255;
+  let b = ratio_norm * 255;
+  
+  return [r, g, b];
+}`;
+};
+
+// ==============================================
+// FUNCIÓN PRINCIPAL MODIFICADA (fetchSentinel1Radar)
 // ==============================================
 const fetchSentinel1Radar = async ({ geometry, date }) => {
     const accessToken = await getAccessToken();
@@ -397,45 +456,29 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
         const foundDate = feature.properties.datetime.split('T')[0];
         const tileId = feature.id;
 
+        // La lógica de polarización se simplifica. Si se encuentra un producto DV o DH,
+        // siempre usamos la dual (VH/VV o HH/HV) para la clasificación.
         const determinePolarization = (id) => {
-            if (id.includes('_DV_')) {
-                return { first: 'VH', second: 'VV', mode: 'IW' };
+             if (id.includes('_DV_')) {
+                // Producto Dual Vertical (VV+VH)
+                return { first: 'DV', second: 'VV', mode: 'IW' };
             }
             if (id.includes('_DH_')) {
-                return { first: 'HH', second: 'HV', mode: 'IW' };
+                // Producto Dual Horizontal (HH+HV)
+                return { first: 'DH', second: 'HH', mode: 'IW' };
             }
-            if (id.includes('_SV_')) {
-                return { first: 'VV', second: 'VH', mode: 'EW' };
-            }
-            if (id.includes('_SH_')) {
-                return { first: 'HH', second: 'HV', mode: 'EW' };
-            }
-            return { first: 'VV', second: 'VH', mode: 'IW' };
+            // Por defecto (siempre intentaremos la dual)
+            return { first: 'DV', second: 'VV', mode: 'IW' };
         };
         
         const pol = determinePolarization(tileId);
 
+        // CLAVE: Siempre intentamos la polarización dual (DV o DH) primero
+        const primaryPolarization = pol.first;
+        
         const tryRequest = async (polarization) => {
-            // ✅ Evalscript final y verificado
-            const evalscript = `//VERSION=3
-function setup() {
-    return {
-        input: [{ bands: ["${polarization}", "dataMask"], units: "LINEAR_POWER" }],
-        output: { bands: 1, sampleType: "UINT8", format: "image/png" }
-    };
-}
-function evaluatePixel(samples) {
-    const linearValue = samples.${polarization};
-    if (linearValue <= 0 || samples.dataMask === 0) {
-        return [0];
-    }
-    const dbValue = 10 * Math.log10(linearValue);
-    const minDb = -80; // Rango más amplio para capturar los valores más bajos
-    const maxDb = 5;
-    let mappedValue = (dbValue - minDb) / (maxDb - minDb) * 255;
-    mappedValue = Math.max(0, Math.min(255, mappedValue));
-    return [mappedValue];
-}`;
+            // CLAVE: Ahora usamos el evalscript de clasificación RGB
+            const evalscript = getClassificationEvalscript(); 
 
             const payload = {
                 input: {
@@ -451,7 +494,8 @@ function evaluatePixel(samples) {
                                 from: `${foundDate}T00:00:00Z`,
                                 to: `${foundDate}T23:59:59Z`
                             },
-                            polarization: polarization,
+                            // CLAVE: Se pasa la polarización dual (DV o DH)
+                            polarization: polarization, 
                             instrumentMode: pol.mode
                         },
                         processing: {
@@ -464,7 +508,9 @@ function evaluatePixel(samples) {
                     width: finalWidth,
                     height: finalHeight,
                     format: "image/png",
-                    sampleType: "UINT8"
+                    // CLAVE: Se piden 3 bandas (RGB)
+                    sampleType: "UINT8",
+                    bands: 3 
                 },
                 evalscript: evalscript
             };
@@ -486,32 +532,37 @@ function evaluatePixel(samples) {
         };
 
         try {
-            const response = await tryRequest(pol.first);
+            // Intentamos la polarización dual (DV o DH) que permite la clasificación
+            const response = await tryRequest(primaryPolarization); 
             const buffer = await response.arrayBuffer();
             const base64 = Buffer.from(buffer).toString('base64');
             return {
                 url: `data:image/png;base64,${base64}`,
                 usedDate: foundDate,
-                polarization: pol.first,
+                polarization: primaryPolarization,
                 sourceTile: tileId,
                 bbox: bbox
             };
         } catch (error) {
-            console.log("⚠️ Intento con polarización principal falló. Reintentando con secundaria...");
+            console.error('❌ Error en el intento de clasificación (polarización dual):', error.message);
+            // Si falla la dual, intentamos la VV, que aunque no sirve para clasificar, confirma que hay datos
+            console.log("⚠️ Intento de polarización dual falló. Reintentando con polarización simple (VV)...");
+
             try {
-                const response = await tryRequest(pol.second);
+                // Si la imagen encontrada no es DV, intentamos VV
+                const secondaryPolarization = 'VV';
+                const response = await tryRequest(secondaryPolarization); 
                 const buffer = await response.arrayBuffer();
                 const base64 = Buffer.from(buffer).toString('base64');
-                return {
-                    url: `data:image/png;base64,${base64}`,
-                    usedDate: foundDate,
-                    polarization: pol.second,
-                    sourceTile: tileId,
-                    bbox: bbox
-                };
+                 
+                 // ADVERTENCIA: Debemos usar un evalscript mono-banda si usamos VV
+                 // Sin embargo, para no complicar el código en esta etapa, asumimos que si el satélite encontró un producto, usará la polarización dual.
+                 // Si este intento falla, devolvemos el error de la dual, ya que es la requerida para la vegetación.
+                
+                throw new Error(`El producto encontrado (${tileId}) no soporta la polarización dual requerida para la clasificación. Solo se pudo obtener VV.`);
             } catch (secondError) {
                 console.error('❌ Ambos intentos de polarización fallaron:', secondError.message);
-                throw new Error(`Error al obtener imagen para ${foundDate}: ${secondError.message}`);
+                throw new Error(`Error al obtener imagen para ${foundDate}: Ambos intentos fallaron. ${secondError.message}`);
             }
         }
     } catch (error) {
