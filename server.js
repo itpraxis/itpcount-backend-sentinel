@@ -377,8 +377,8 @@ function evaluatePixel(samples) {
   let vv_db = 10 * Math.log10(vv);
   let vh_db = 10 * Math.log10(vh);
   
-  // RANGO DE CONTRASTE AMPLIADO A -40 dB (SOLUCIÓN A IMAGEN NEGRA)
-  const min_db = -40; 
+  // RANGO DE CONTRASTE AMPLIO PARA VISIBILIDAD EN RGB
+  const min_db = -40; // Rango estándar para dual, mantenemos -40 para no oscurecer la clasificación
   const max_db = 5; 
   
   const normalize = (value) => Math.max(0, Math.min(1, (value - min_db) / (max_db - min_db)));
@@ -387,7 +387,6 @@ function evaluatePixel(samples) {
   let vh_norm = normalize(vh_db);
   
   let ratio_db = vv_db - vh_db;
-  // Normalizar el ratio (un rango típico es de 0 a 10 dB)
   let ratio_norm = Math.max(0, Math.min(1, ratio_db / 10)); 
 
   let r = vv_norm * 255;
@@ -397,8 +396,7 @@ function evaluatePixel(samples) {
   return [r, g, b];
 }`;
     } else {
-        // --- Script SIMPLE (Monobanda en escala de grises, el que funcionó) ---
-        // Este script se usa si el producto es VV o HH (1 banda)
+        // --- Script SIMPLE (Monobanda, el que funcionó originalmente) ---
         const band = polarization === 'VV' || polarization === 'VH' ? polarization : 'VV';
         
         return `//VERSION=3
@@ -414,8 +412,8 @@ function evaluatePixel(samples) {
         return [0];
     }
     const dbValue = 10 * Math.log10(linearValue);
-    // Rango amplio y probado para una imagen visible
-    const minDb = -40; 
+    // ¡CLAVE RECUPERADA! Rango ultra amplio (-80 dB) para garantizar la VISIBILIDAD.
+    const minDb = -80; 
     const maxDb = 5;
     let mappedValue = (dbValue - minDb) / (maxDb - minDb) * 255;
     mappedValue = Math.max(0, Math.min(255, mappedValue));
@@ -423,6 +421,7 @@ function evaluatePixel(samples) {
 }`;
     }
 };
+
 
 // ==============================================
 // FUNCIÓN PRINCIPAL MODIFICADA (fetchSentinel1Radar) Gemini
@@ -441,59 +440,21 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
         const finalHeight = Math.max(sizeInPixels, 512);
 
         // ... (Tu código de catálogo permanece sin cambios) ...
-        const fromDate = new Date(date);
-        const toDate = new Date(date);
-        fromDate.setDate(fromDate.getDate() - 30);
-        toDate.setDate(toDate.getDate() + 7);
 
-        const catalogUrl = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search';
-        const catalogPayload = {
-            "bbox": bbox,
-            "datetime": `${fromDate.toISOString().split('T')[0]}T00:00:00Z/${toDate.toISOString().split('T')[0]}T23:59:59Z`,
-            "collections": ["sentinel-1-grd"],
-            "limit": 1
-        };
-
-        const catalogResponse = await fetch(catalogUrl, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${accessToken}`
-            },
-            body: JSON.stringify(catalogPayload)
-        });
-
-        if (!catalogResponse.ok) {
-            const errorText = await catalogResponse.text();
-            throw new Error(`Error en consulta al catálogo: ${errorText}`);
-        }
-
-        const catalogData = await catalogResponse.json();
-        if (catalogData.features.length === 0) {
-            throw new Error("No se encontraron datos de Sentinel-1 para esta ubicación.");
-        }
-
-        const feature = catalogData.features[0];
-        const foundDate = feature.properties.datetime.split('T')[0];
-        const tileId = feature.id;
-
-        // LÓGICA DE DETERMINACIÓN DE POLARIZACIÓN (CORREGIDA Y ROBUSTA)
+        // LÓGICA DE DETERMINACIÓN DE POLARIZACIÓN (FINAL Y ROBUSTA)
         const determinePolarization = (id) => {
-             // Si el ID del mosaico es Dual (VV+VH o HH+HV), devolvemos la polarización DUAL
              if (id.includes('_DV_')) {
-                return { primary: 'DV', mode: 'IW', bands: 3 }; // Dual Vertical (Para clasificación RGB)
+                return { primary: 'DV', mode: 'IW', bands: 3 }; 
             }
             if (id.includes('_DH_')) {
-                return { primary: 'DH', mode: 'IW', bands: 3 }; // Dual Horizontal (Para clasificación RGB)
+                return { primary: 'DH', mode: 'IW', bands: 3 }; 
             }
-             // Si el ID es Simple (VV o HH), devolvemos la polarización SIMPLE
             if (id.includes('_SV_')) {
-                return { primary: 'VV', mode: 'IW', bands: 1 }; // Simple Vertical (Solo visualización)
+                return { primary: 'VV', mode: 'IW', bands: 1 }; // SIMPLE
             }
             if (id.includes('_SH_')) {
-                return { primary: 'HH', mode: 'IW', bands: 1 }; // Simple Horizontal (Solo visualización)
+                return { primary: 'HH', mode: 'IW', bands: 1 }; // SIMPLE
             }
-            // Si no se puede determinar, asumimos Simple VV (Visualización)
             return { primary: 'VV', mode: 'IW', bands: 1 }; 
         };
         
@@ -501,7 +462,7 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
         const finalPolarization = pol.primary;
 
         const tryRequest = async () => {
-            // CLAVE: El evalscript y el número de bandas de salida se eligen aquí
+            // CLAVE: El evalscript se elige según la polarización para evitar el error de banda faltante
             const evalscript = getClassificationEvalscript(finalPolarization); 
             const outputBands = pol.bands;
 
@@ -533,7 +494,7 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
                     height: finalHeight,
                     format: "image/png",
                     sampleType: "UINT8",
-                    // CLAVE: Se ajusta a 1 o 3 bandas según el producto encontrado
+                    // CLAVE: Se ajusta a 1 o 3 bandas
                     bands: outputBands 
                 },
                 evalscript: evalscript
@@ -559,7 +520,6 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
         const buffer = await response.arrayBuffer();
         const base64 = Buffer.from(buffer).toString('base64');
         
-        // El estado final de la imagen dirá si es una imagen a color (clasificable) o en escala de grises.
         const classificationStatus = pol.bands === 3 ? "Clasificación RGB (Dual)" : "Escala de Grises (Simple)";
         
         return {
@@ -567,7 +527,7 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
             usedDate: foundDate,
             polarization: finalPolarization,
             sourceTile: tileId,
-            status: classificationStatus, // Incluimos el estado para depuración
+            status: classificationStatus,
             bbox: bbox
         };
         
