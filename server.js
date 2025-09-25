@@ -149,7 +149,6 @@ const getAvailableDates = async (bbox, maxCloudCoverage) => {
  * @returns {Array<string>} Lista de fechas únicas en formato 'YYYY-MM-DD', ordenadas descendentemente.
  */
 const getSentinel1Dates = async ({ geometry }) => {
-    // Estas dependencias (getAccessToken, polygonToBbox) se asumen definidas en server.js
     const accessToken = await getAccessToken();
     const bbox = polygonToBbox(geometry);
 
@@ -159,25 +158,47 @@ const getSentinel1Dates = async ({ geometry }) => {
 
     const today = new Date();
     const eighteenMonthsAgo = new Date();
-    // Buscamos un rango amplio, por ejemplo, los últimos 18 meses
     eighteenMonthsAgo.setMonth(today.getMonth() - 18);
+    const datetimeRange = `${eighteenMonthsAgo.toISOString()}/${today.toISOString()}`;
 
     const catalogUrl = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search';
     
-    // El payload inicial solicita los datos del catálogo
-    const catalogPayload = {
+    // 🚩 CLAVE DE LA CORRECCIÓN: Definimos el payload base que se usará en TODAS las solicitudes POST.
+    const basePayload = {
         "bbox": bbox,
-        "datetime": `${eighteenMonthsAgo.toISOString()}/${today.toISOString()}`,
+        "datetime": datetimeRange,
         "collections": ["sentinel-1-grd"],
-        "limit": 100 // Solicitamos un límite alto de resultados por página
+        "limit": 100 
     };
 
     let allFeatures = [];
     let nextUrl = catalogUrl;
-    let payload = catalogPayload;
+    // 🚩 Usamos el payload base para la primera llamada.
+    let payload = basePayload; 
     
-    // Iteramos para manejar la paginación (aunque S1 tiene buena cobertura)
+    // Iteramos para manejar la paginación
     while (nextUrl) {
+        
+        // 🚩 Si nextUrl no es el catalogUrl base, debemos usar el endpoint base
+        //    y añadir el token de paginación al cuerpo del POST.
+        if (nextUrl !== catalogUrl) {
+            // El API del Catálogo requiere que usemos el endpoint base para el POST,
+            // y que el token de la URL 'next' se envíe en el cuerpo como 'next'.
+            
+            // 1. Extraemos el token 'next' de la URL de paginación
+            const urlParams = new URLSearchParams(new URL(nextUrl).search);
+            const nextToken = urlParams.get('next');
+            
+            // 2. Usamos el payload base y le añadimos la clave 'next' para la paginación
+            payload = { 
+                ...basePayload, // Mantiene 'collections', 'datetime', y 'bbox'
+                "next": nextToken 
+            };
+
+            // 3. Reseteamos nextUrl a catalogUrl para que el fetch use el endpoint base
+            nextUrl = catalogUrl;
+        }
+
         const response = await fetch(nextUrl, {
             method: 'POST',
             headers: {
@@ -198,25 +219,23 @@ const getSentinel1Dates = async ({ geometry }) => {
         // Manejo de paginación (busca el link 'next')
         const nextLink = data.links.find(link => link.rel === 'next');
         if (nextLink) {
-            nextUrl = nextLink.href;
-            payload = {}; // La paginación usa la URL 'next', por lo que el body del POST puede ir vacío
+            nextUrl = nextLink.href; // La URL completa con el token 'next'
+            // NO se resetea 'payload' aquí, se reconstruye al inicio del ciclo 'while'
         } else {
             nextUrl = null;
         }
 
-        // Limitamos el total de tiles procesados para evitar sobrecarga o timeouts
+        // Limitamos el total de tiles procesados
         if (allFeatures.length >= 500) break;
     }
 
     // Extraemos y filtramos las fechas únicas
     const uniqueDates = new Set();
     allFeatures.forEach(feature => {
-        // La propiedad datetime es un ISO 8601, tomamos solo la parte de la fecha
         const datePart = feature.properties.datetime.split('T')[0];
         uniqueDates.add(datePart);
     });
 
-    // Convertimos a array, ordenamos y retornamos
     const sortedDates = Array.from(uniqueDates).sort().reverse();
     return sortedDates;
 };
