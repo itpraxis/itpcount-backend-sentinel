@@ -141,6 +141,87 @@ const getAvailableDates = async (bbox, maxCloudCoverage) => {
     }
 };
 
+
+/**
+ * Consulta el catálogo de Sentinel-1 para obtener fechas disponibles
+ * en una región durante los últimos 18 meses.
+ * @param {object} options.geometry Coordenadas GeoJSON del polígono.
+ * @returns {Array<string>} Lista de fechas únicas en formato 'YYYY-MM-DD', ordenadas descendentemente.
+ */
+const getSentinel1Dates = async ({ geometry }) => {
+    // Estas dependencias (getAccessToken, polygonToBbox) se asumen definidas en server.js
+    const accessToken = await getAccessToken();
+    const bbox = polygonToBbox(geometry);
+
+    if (!bbox) {
+        throw new Error('No se pudo calcular el bounding box del polígono para buscar fechas S1.');
+    }
+
+    const today = new Date();
+    const eighteenMonthsAgo = new Date();
+    // Buscamos un rango amplio, por ejemplo, los últimos 18 meses
+    eighteenMonthsAgo.setMonth(today.getMonth() - 18);
+
+    const catalogUrl = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search';
+    
+    // El payload inicial solicita los datos del catálogo
+    const catalogPayload = {
+        "bbox": bbox,
+        "datetime": `${eighteenMonthsAgo.toISOString()}/${today.toISOString()}`,
+        "collections": ["sentinel-1-grd"],
+        "limit": 100 // Solicitamos un límite alto de resultados por página
+    };
+
+    let allFeatures = [];
+    let nextUrl = catalogUrl;
+    let payload = catalogPayload;
+    
+    // Iteramos para manejar la paginación (aunque S1 tiene buena cobertura)
+    while (nextUrl) {
+        const response = await fetch(nextUrl, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${accessToken}`
+            },
+            body: JSON.stringify(payload)
+        });
+
+        if (!response.ok) {
+            const errorText = await response.text();
+            throw new Error(`Error en consulta al catálogo de S1: ${errorText}`);
+        }
+
+        const data = await response.json();
+        allFeatures.push(...data.features);
+
+        // Manejo de paginación (busca el link 'next')
+        const nextLink = data.links.find(link => link.rel === 'next');
+        if (nextLink) {
+            nextUrl = nextLink.href;
+            payload = {}; // La paginación usa la URL 'next', por lo que el body del POST puede ir vacío
+        } else {
+            nextUrl = null;
+        }
+
+        // Limitamos el total de tiles procesados para evitar sobrecarga o timeouts
+        if (allFeatures.length >= 500) break;
+    }
+
+    // Extraemos y filtramos las fechas únicas
+    const uniqueDates = new Set();
+    allFeatures.forEach(feature => {
+        // La propiedad datetime es un ISO 8601, tomamos solo la parte de la fecha
+        const datePart = feature.properties.datetime.split('T')[0];
+        uniqueDates.add(datePart);
+    });
+
+    // Convertimos a array, ordenamos y retornamos
+    const sortedDates = Array.from(uniqueDates).sort().reverse();
+    return sortedDates;
+};
+
+
 /**
  * ✅ NUEVA: Calcula el área aproximada de un polígono a partir de su bounding box.
  * @param {array} bbox - [minLon, minLat, maxLon, maxLat]
@@ -779,6 +860,26 @@ app.post('/api/get-valid-dates', async (req, res) => {
     } catch (error) {
         console.error('❌ Error al verificar cobertura:', error.message);
         res.status(500).json({ error: error.message, suggestion: "Verifica que las coordenadas sean válidas y el área esté en tierra firme." });
+    }
+});
+
+// =============================================
+// ✅ NUEVO ENDPOINT: /api/get-valid-dates-s1 (Sentinel-1)
+// =============================================
+app.post('/api/get-valid-dates-s1', async (req, res) => {
+    // El frontend enviará las coordenadas del polígono
+    const { coordinates } = req.body; 
+
+    if (!coordinates) {
+        return res.status(400).json({ error: 'Faltan parámetros: coordinates.' });
+    }
+
+    try {
+        const dates = await getSentinel1Dates({ geometry: coordinates });
+        res.json({ dates });
+    } catch (error) {
+        console.error('❌ Error en el endpoint /api/get-valid-dates-s1:', error.message);
+        res.status(500).json({ error: error.message });
     }
 });
 
