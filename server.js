@@ -354,7 +354,6 @@ function evaluatePixel(sample) {
 //  * @returns {string} El evalscript correspondiente.
 //  */
 const getClassificationEvalscript = (polarization) => {
-    // Si la polarización es DUAL (DV o DH), usamos el script RGB (3 bandas)
     if (polarization === 'DV' || polarization === 'DH') {
         // --- Script DUAL (RGB para clasificación) ---
         return `//VERSION=3
@@ -377,8 +376,7 @@ function evaluatePixel(samples) {
   let vv_db = 10 * Math.log10(vv);
   let vh_db = 10 * Math.log10(vh);
   
-  // RANGO DE CONTRASTE AMPLIO PARA VISIBILIDAD EN RGB
-  const min_db = -40; // Rango estándar para dual, mantenemos -40 para no oscurecer la clasificación
+  const min_db = -40;
   const max_db = 5; 
   
   const normalize = (value) => Math.max(0, Math.min(1, (value - min_db) / (max_db - min_db)));
@@ -396,7 +394,7 @@ function evaluatePixel(samples) {
   return [r, g, b];
 }`;
     } else {
-        // --- Script SIMPLE (Monobanda, el que funcionó originalmente) ---
+        // --- Script SIMPLE (Monobanda, con -80 dB para visibilidad) ---
         const band = polarization === 'VV' || polarization === 'VH' ? polarization : 'VV';
         
         return `//VERSION=3
@@ -412,7 +410,7 @@ function evaluatePixel(samples) {
         return [0];
     }
     const dbValue = 10 * Math.log10(linearValue);
-    // ¡CLAVE RECUPERADA! Rango ultra amplio (-80 dB) para garantizar la VISIBILIDAD.
+    // Rango ultra amplio (-80 dB) para garantizar la VISIBILIDAD.
     const minDb = -80; 
     const maxDb = 5;
     let mappedValue = (dbValue - minDb) / (maxDb - minDb) * 255;
@@ -427,6 +425,12 @@ function evaluatePixel(samples) {
 // FUNCIÓN PRINCIPAL MODIFICADA (fetchSentinel1Radar) Gemini
 // ==============================================
 const fetchSentinel1Radar = async ({ geometry, date }) => {
+    // CLAVE: Declaración de variables clave fuera del try para corrección de alcance (scope)
+    let foundDate;
+    let tileId;
+    let pol;
+    let finalPolarization;
+    
     const accessToken = await getAccessToken();
     const bbox = polygonToBbox(geometry);
     if (!bbox) {
@@ -439,7 +443,42 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
         const finalWidth = Math.max(sizeInPixels, 512);
         const finalHeight = Math.max(sizeInPixels, 512);
 
-        // ... (Tu código de catálogo permanece sin cambios) ...
+        const fromDate = new Date(date);
+        const toDate = new Date(date);
+        fromDate.setDate(fromDate.getDate() - 30);
+        toDate.setDate(toDate.getDate() + 7);
+
+        const catalogUrl = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search';
+        const catalogPayload = {
+            "bbox": bbox,
+            "datetime": `${fromDate.toISOString().split('T')[0]}T00:00:00Z/${toDate.toISOString().split('T')[0]}T23:59:59Z`,
+            "collections": ["sentinel-1-grd"],
+            "limit": 1
+        };
+
+        const catalogResponse = await fetch(catalogUrl, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${accessToken}`
+            },
+            body: JSON.stringify(catalogPayload)
+        });
+
+        if (!catalogResponse.ok) {
+            const errorText = await catalogResponse.text();
+            throw new Error(`Error en consulta al catálogo: ${errorText}`);
+        }
+
+        const catalogData = await catalogResponse.json();
+        if (catalogData.features.length === 0) {
+            throw new Error("No se encontraron datos de Sentinel-1 para esta ubicación.");
+        }
+
+        const feature = catalogData.features[0];
+        // CLAVE: Asignación a variables previamente declaradas con 'let'
+        foundDate = feature.properties.datetime.split('T')[0];
+        tileId = feature.id;
 
         // LÓGICA DE DETERMINACIÓN DE POLARIZACIÓN (FINAL Y ROBUSTA)
         const determinePolarization = (id) => {
@@ -450,19 +489,19 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
                 return { primary: 'DH', mode: 'IW', bands: 3 }; 
             }
             if (id.includes('_SV_')) {
-                return { primary: 'VV', mode: 'IW', bands: 1 }; // SIMPLE
+                return { primary: 'VV', mode: 'IW', bands: 1 };
             }
             if (id.includes('_SH_')) {
-                return { primary: 'HH', mode: 'IW', bands: 1 }; // SIMPLE
+                return { primary: 'HH', mode: 'IW', bands: 1 };
             }
             return { primary: 'VV', mode: 'IW', bands: 1 }; 
         };
         
-        const pol = determinePolarization(tileId);
-        const finalPolarization = pol.primary;
+        // CLAVE: Asignación a variables previamente declaradas con 'let'
+        pol = determinePolarization(tileId);
+        finalPolarization = pol.primary;
 
         const tryRequest = async () => {
-            // CLAVE: El evalscript se elige según la polarización para evitar el error de banda faltante
             const evalscript = getClassificationEvalscript(finalPolarization); 
             const outputBands = pol.bands;
 
@@ -494,7 +533,6 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
                     height: finalHeight,
                     format: "image/png",
                     sampleType: "UINT8",
-                    // CLAVE: Se ajusta a 1 o 3 bandas
                     bands: outputBands 
                 },
                 evalscript: evalscript
