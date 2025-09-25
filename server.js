@@ -353,12 +353,6 @@ function evaluatePixel(sample) {
 //  * @param {string} polarization La polarización a usar ('DV', 'DH', 'VV', 'HH', etc.)
 //  * @returns {string} El evalscript correspondiente.
 //  */
-/**
- * Genera el evalscript apropiado (RGB para clasificación o Monobanda para visualización).
- * Incluye contraste de -80 dB y desactiva dataMask en el modo simple.
- * @param {string} polarization La polarización a usar ('DV', 'DH', 'VV', 'HH', etc.)
- * @returns {string} El evalscript correspondiente.
- */
 const getClassificationEvalscript = (polarization) => {
     // Rango de contraste definitivo para garantizar VISIBILIDAD
     const min_db_visible = -80; 
@@ -378,7 +372,7 @@ function evaluatePixel(samples) {
   let vv = samples.VV;
   let vh = samples.VH;
   let dm = samples.dataMask;
-  // Mantenemos la máscara de datos aquí para evitar píxeles no válidos en la clasificación RGB
+  
   if (vv <= 0 || vh <= 0 || dm === 0) {
     return [0, 0, 0];
   }
@@ -407,16 +401,14 @@ function evaluatePixel(samples) {
         
         return `//VERSION=3
 function setup() {
-    // CLAVE: Quitamos "dataMask" del input
     return {
-        input: [{ bands: ["${band}"/*, "dataMask"*/], units: "LINEAR_POWER" }],
+        input: [{ bands: ["${band}"], units: "LINEAR_POWER" }],
         output: { bands: 1, sampleType: "UINT8", format: "image/png" }
     };
 }
 function evaluatePixel(samples) {
     const linearValue = samples.${band};
-    // CLAVE: Quitamos la condición de dataMask para forzar la visualización de datos
-    if (linearValue <= 0 /*|| samples.dataMask === 0*/) { 
+    if (linearValue <= 0) { 
         return [0];
     }
     const dbValue = 10 * Math.log10(linearValue);
@@ -434,6 +426,7 @@ function evaluatePixel(samples) {
 // FUNCIÓN PRINCIPAL MODIFICADA (fetchSentinel1Radar) Gemini
 // ==============================================
 const fetchSentinel1Radar = async ({ geometry, date }) => {
+    // Declaración de variables clave fuera del try para corrección de alcance (scope)
     let foundDate;
     let tileId;
     let pol;
@@ -451,36 +444,61 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
         const finalWidth = Math.max(sizeInPixels, 512);
         const finalHeight = Math.max(sizeInPixels, 512);
 
-        // ... (Tu código de catálogo permanece sin cambios) ...
+        // CLAVE: CÓDIGO DEL CATÁLOGO REINSERTADO
+        const fromDate = new Date(date);
+        const toDate = new Date(date);
+        fromDate.setDate(fromDate.getDate() - 30);
+        toDate.setDate(toDate.getDate() + 7);
 
-        const catalogResponse = await fetch(catalogUrl, { /* ... */ });
+        const catalogUrl = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search';
+        const catalogPayload = {
+            "bbox": bbox,
+            "datetime": `${fromDate.toISOString().split('T')[0]}T00:00:00Z/${toDate.toISOString().split('T')[0]}T23:59:59Z`,
+            "collections": ["sentinel-1-grd"],
+            "limit": 1
+        };
+        // FIN CÓDIGO DEL CATÁLOGO
 
-        if (!catalogResponse.ok) { /* ... */ }
+        const catalogResponse = await fetch(catalogUrl, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${accessToken}`
+            },
+            body: JSON.stringify(catalogPayload)
+        });
+
+        if (!catalogResponse.ok) {
+            const errorText = await catalogResponse.text();
+            throw new Error(`Error en consulta al catálogo: ${errorText}`);
+        }
 
         const catalogData = await catalogResponse.json();
-        if (catalogData.features.length === 0) { /* ... */ }
+        if (catalogData.features.length === 0) {
+            throw new Error("No se encontraron datos de Sentinel-1 para esta ubicación.");
+        }
 
         const feature = catalogData.features[0];
         foundDate = feature.properties.datetime.split('T')[0];
         tileId = feature.id;
 
-        // LÓGICA DE DETERMINACIÓN DE POLARIZACIÓN (CORREGIDA)
+        // LÓGICA DE DETERMINACIÓN DE POLARIZACIÓN (FINAL Y ROBUSTA)
         const determinePolarization = (id) => {
-             // 1. DUAL (Clasificación RGB) - BUSCAR 1SDV o 1SDH
+             // 1. DUAL (Clasificación RGB) - Buscar 1SDV o 1SDH
              if (id.includes('1SDV')) {
                 return { primary: 'DV', mode: 'IW', bands: 3 }; 
             }
             if (id.includes('1SDH')) {
                 return { primary: 'DH', mode: 'IW', bands: 3 }; 
             }
-            // 2. SIMPLE (Visualización Escala de Grises) - BUSCAR 1SSV o 1SSH
+            // 2. SIMPLE (Visualización Escala de Grises) - Buscar 1SSV o 1SSH
             if (id.includes('1SSV')) {
                 return { primary: 'VV', mode: 'IW', bands: 1 };
             }
             if (id.includes('1SSH')) {
                 return { primary: 'HH', mode: 'IW', bands: 1 };
             }
-            // 3. Fallback (Asumimos simple VV)
+            // 3. Fallback 
             return { primary: 'VV', mode: 'IW', bands: 1 }; 
         };
         
@@ -491,7 +509,6 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
             const evalscript = getClassificationEvalscript(finalPolarization); 
             const outputBands = pol.bands;
 
-            // ... (Resto del payload sin cambios) ...
             const payload = {
                 input: {
                     bounds: {
