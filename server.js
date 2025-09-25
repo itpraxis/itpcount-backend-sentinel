@@ -354,6 +354,10 @@ function evaluatePixel(sample) {
 //  * @returns {string} El evalscript correspondiente.
 //  */
 const getClassificationEvalscript = (polarization) => {
+    // Rango de contraste definitivo para garantizar VISIBILIDAD, basado en la imagen que funcionó
+    const min_db_visible = -80; 
+    const max_db = 5; 
+
     if (polarization === 'DV' || polarization === 'DH') {
         // --- Script DUAL (RGB para clasificación) ---
         return `//VERSION=3
@@ -376,16 +380,16 @@ function evaluatePixel(samples) {
   let vv_db = 10 * Math.log10(vv);
   let vh_db = 10 * Math.log10(vh);
   
-  const min_db = -40;
-  const max_db = 5; 
-  
-  const normalize = (value) => Math.max(0, Math.min(1, (value - min_db) / (max_db - min_db)));
+  // ¡CLAVE! Rango ultra-amplio para visibilidad en el compuesto RGB
+  const min_db = ${min_db_visible}; 
+  const normalize = (value) => Math.max(0, Math.min(1, (value - min_db) / (${max_db} - min_db)));
   
   let vv_norm = normalize(vv_db);
   let vh_norm = normalize(vh_db);
   
   let ratio_db = vv_db - vh_db;
-  let ratio_norm = Math.max(0, Math.min(1, ratio_db / 10)); 
+  // Normalizamos el ratio en un rango más amplio (0 a 20 dB, para evitar saturación del azul)
+  let ratio_norm = Math.max(0, Math.min(1, ratio_db / 20)); 
 
   let r = vv_norm * 255;
   let g = vh_norm * 255;
@@ -410,9 +414,9 @@ function evaluatePixel(samples) {
         return [0];
     }
     const dbValue = 10 * Math.log10(linearValue);
-    // Rango ultra amplio (-80 dB) para garantizar la VISIBILIDAD.
-    const minDb = -80; 
-    const maxDb = 5;
+    // ¡CLAVE! Rango ultra amplio (-80 dB) para garantizar la VISIBILIDAD.
+    const minDb = ${min_db_visible}; 
+    const maxDb = ${max_db};
     let mappedValue = (dbValue - minDb) / (maxDb - minDb) * 255;
     mappedValue = Math.max(0, Math.min(255, mappedValue));
     return [mappedValue];
@@ -425,7 +429,7 @@ function evaluatePixel(samples) {
 // FUNCIÓN PRINCIPAL MODIFICADA (fetchSentinel1Radar) Gemini
 // ==============================================
 const fetchSentinel1Radar = async ({ geometry, date }) => {
-    // CLAVE: Declaración de variables clave fuera del try para corrección de alcance (scope)
+    // Declaración de variables clave fuera del try para corrección de alcance (scope)
     let foundDate;
     let tileId;
     let pol;
@@ -443,6 +447,7 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
         const finalWidth = Math.max(sizeInPixels, 512);
         const finalHeight = Math.max(sizeInPixels, 512);
 
+        // ... (Código de catálogo y fechas) ...
         const fromDate = new Date(date);
         const toDate = new Date(date);
         fromDate.setDate(fromDate.getDate() - 30);
@@ -476,32 +481,34 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
         }
 
         const feature = catalogData.features[0];
-        // CLAVE: Asignación a variables previamente declaradas con 'let'
         foundDate = feature.properties.datetime.split('T')[0];
         tileId = feature.id;
 
-        // LÓGICA DE DETERMINACIÓN DE POLARIZACIÓN (FINAL Y ROBUSTA)
+        // LÓGICA DE DETERMINACIÓN DE POLARIZACIÓN (FINAL)
         const determinePolarization = (id) => {
+             // 1. DUAL (Clasificación RGB)
              if (id.includes('_DV_')) {
                 return { primary: 'DV', mode: 'IW', bands: 3 }; 
             }
             if (id.includes('_DH_')) {
                 return { primary: 'DH', mode: 'IW', bands: 3 }; 
             }
+            // 2. SIMPLE (Visualización Escala de Grises)
             if (id.includes('_SV_')) {
                 return { primary: 'VV', mode: 'IW', bands: 1 };
             }
             if (id.includes('_SH_')) {
                 return { primary: 'HH', mode: 'IW', bands: 1 };
             }
+            // 3. Fallback (Si no se puede determinar, asumimos el más común)
             return { primary: 'VV', mode: 'IW', bands: 1 }; 
         };
         
-        // CLAVE: Asignación a variables previamente declaradas con 'let'
         pol = determinePolarization(tileId);
         finalPolarization = pol.primary;
 
         const tryRequest = async () => {
+            // Se usa el evalscript y el número de bandas determinado.
             const evalscript = getClassificationEvalscript(finalPolarization); 
             const outputBands = pol.bands;
 
