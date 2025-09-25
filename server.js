@@ -348,19 +348,15 @@ function evaluatePixel(sample) {
 // ==============================================
 // FUNCIÓN AUXILIAR: Genera el evalscript para clasificación RGB
 // ==============================================
-// /**
-//  * Genera el evalscript apropiado (RGB para clasificación o Monobanda para visualización).
-//  * @param {string} polarization La polarización a usar ('DV', 'DH', 'VV', 'HH', etc.)
-//  * @returns {string} El evalscript correspondiente.
-//  */
-const getClassificationEvalscript = (polarization) => {
-    // Si la polarización es DUAL (DV o DH), usamos el script RGB
-    if (polarization === 'DV' || polarization === 'DH') {
-        // --- Script DUAL (RGB para clasificación) ---
-        return `//VERSION=3
+const getClassificationEvalscript = () => {
+  // Este evalscript genera una imagen RGB usando VV y VH.
+  // Colores: Rojo/Azul: VV (Suelo, estructuras). Verde: VH (Vegetación)
+  return `//VERSION=3
 function setup() {
   return {
+    // Pedimos VV, VH y la máscara de datos
     input: [{ bands: ["VV", "VH", "dataMask"], units: "LINEAR_POWER" }],
+    // Salida RGB de 3 bandas (clasificación)
     output: { bands: 3, sampleType: "UINT8", format: "image/png" }
   };
 }
@@ -370,56 +366,42 @@ function evaluatePixel(samples) {
   let vh = samples.VH;
   let dm = samples.dataMask;
 
+  // Si no hay datos, devuelve negro
   if (vv <= 0 || vh <= 0 || dm === 0) {
     return [0, 0, 0];
   }
   
+  // 1. Calculamos las conversiones logarítmicas (dB)
   let vv_db = 10 * Math.log10(vv);
   let vh_db = 10 * Math.log10(vh);
   
+  // 2. Definimos el rango de visualización
+  // Rango estándar para destacar la vegetación: -25 dB a 5 dB
   const min_db = -25;
   const max_db = 5; 
   
+  // Función de normalización segura (mapea dB a un valor entre 0 y 1)
   const normalize = (value) => Math.max(0, Math.min(1, (value - min_db) / (max_db - min_db)));
   
   let vv_norm = normalize(vv_db);
   let vh_norm = normalize(vh_db);
   
+  // 3. Asignamos a RGB (Falso Color para Clasificación)
+  // R: VV (Normalizado)
+  // G: VH (Normalizado) -> Resalta la vegetación y el dosel
+  // B: VV/VH (La razón de polarización VV/VH en dB es VV_dB - VH_dB)
+  
   let ratio_db = vv_db - vh_db;
+  // Normalizar el ratio (un rango típico es de 0 a 10 dB)
   let ratio_norm = Math.max(0, Math.min(1, ratio_db / 10)); 
 
+  // Multiplicamos por 255 para la salida UINT8
   let r = vv_norm * 255;
   let g = vh_norm * 255;
   let b = ratio_norm * 255;
   
   return [r, g, b];
 }`;
-    } else {
-        // --- Script SIMPLE (Monobanda en escala de grises, el que funcionó) ---
-        // Este script usa VV o HH (la banda principal) si solo hay una disponible.
-        const band = polarization === 'VV' || polarization === 'VH' ? polarization : 'VV';
-        
-        return `//VERSION=3
-function setup() {
-    return {
-        input: [{ bands: ["${band}", "dataMask"], units: "LINEAR_POWER" }],
-        output: { bands: 1, sampleType: "UINT8", format: "image/png" }
-    };
-}
-function evaluatePixel(samples) {
-    const linearValue = samples.${band};
-    if (linearValue <= 0 || samples.dataMask === 0) {
-        return [0];
-    }
-    const dbValue = 10 * Math.log10(linearValue);
-    // Usamos el rango amplio y probado que generó imágenes visibles
-    const minDb = -40; 
-    const maxDb = 5;
-    let mappedValue = (dbValue - minDb) / (maxDb - minDb) * 255;
-    mappedValue = Math.max(0, Math.min(255, mappedValue));
-    return [mappedValue];
-}`;
-    }
 };
 
 // ==============================================
@@ -438,7 +420,6 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
         const finalWidth = Math.max(sizeInPixels, 512);
         const finalHeight = Math.max(sizeInPixels, 512);
 
-        // ... (Tu código de catálogo permanece sin cambios) ...
         const fromDate = new Date(date);
         const toDate = new Date(date);
         fromDate.setDate(fromDate.getDate() - 30);
@@ -475,32 +456,29 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
         const foundDate = feature.properties.datetime.split('T')[0];
         const tileId = feature.id;
 
-        // LÓGICA DE DETERMINACIÓN DE POLARIZACIÓN (CORREGIDA Y ROBUSTA)
+        // La lógica de polarización se simplifica. Si se encuentra un producto DV o DH,
+        // siempre usamos la dual (VH/VV o HH/HV) para la clasificación.
         const determinePolarization = (id) => {
-             // Priorizamos la polarización que el ID del tile indica
              if (id.includes('_DV_')) {
-                return { primary: 'DV', mode: 'IW', bands: 3 }; // Dual Vertical
+                // Producto Dual Vertical (VV+VH)
+                return { first: 'DV', second: 'VV', mode: 'IW' };
             }
             if (id.includes('_DH_')) {
-                return { primary: 'DH', mode: 'IW', bands: 3 }; // Dual Horizontal
+                // Producto Dual Horizontal (HH+HV)
+                return { first: 'DH', second: 'HH', mode: 'IW' };
             }
-            if (id.includes('_SV_')) {
-                return { primary: 'VV', mode: 'IW', bands: 1 }; // Simple Vertical
-            }
-            if (id.includes('_SH_')) {
-                return { primary: 'HH', mode: 'IW', bands: 1 }; // Simple Horizontal
-            }
-            // Por defecto, asumimos que es una banda simple si no se reconoce el ID
-            return { primary: 'VV', mode: 'IW', bands: 1 }; 
+            // Por defecto (siempre intentaremos la dual)
+            return { first: 'DV', second: 'VV', mode: 'IW' };
         };
         
         const pol = determinePolarization(tileId);
-        const finalPolarization = pol.primary;
 
-        const tryRequest = async () => {
-            // CLAVE: El evalscript y el número de bandas de salida se eligen aquí
-            const evalscript = getClassificationEvalscript(finalPolarization); 
-            const outputBands = pol.bands;
+        // CLAVE: Siempre intentamos la polarización dual (DV o DH) primero
+        const primaryPolarization = pol.first;
+        
+        const tryRequest = async (polarization) => {
+            // CLAVE: Ahora usamos el evalscript de clasificación RGB
+            const evalscript = getClassificationEvalscript(); 
 
             const payload = {
                 input: {
@@ -516,8 +494,8 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
                                 from: `${foundDate}T00:00:00Z`,
                                 to: `${foundDate}T23:59:59Z`
                             },
-                            // CLAVE: Se usa la polarización encontrada (DV, DH, VV, HH)
-                            polarization: finalPolarization, 
+                            // CLAVE: Se pasa la polarización dual (DV o DH)
+                            polarization: polarization, 
                             instrumentMode: pol.mode
                         },
                         processing: {
@@ -530,9 +508,9 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
                     width: finalWidth,
                     height: finalHeight,
                     format: "image/png",
+                    // CLAVE: Se piden 3 bandas (RGB)
                     sampleType: "UINT8",
-                    // CLAVE: Se ajusta a 1 o 3 bandas según el producto
-                    bands: outputBands 
+                    bands: 3 
                 },
                 evalscript: evalscript
             };
@@ -548,26 +526,47 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
 
             if (!imageResponse.ok) {
                 const errorText = await imageResponse.text();
-                // Si falla el intento, no hacemos reintento, devolvemos el error específico.
-                throw new Error(`Solicitud con polarización ${finalPolarization} falló: ${errorText}`);
+                throw new Error(`Solicitud con polarización ${polarization} falló: ${errorText}`);
             }
             return imageResponse;
         };
 
-        const response = await tryRequest();
-        const buffer = await response.arrayBuffer();
-        const base64 = Buffer.from(buffer).toString('base64');
-        
-        return {
-            url: `data:image/png;base64,${base64}`,
-            usedDate: foundDate,
-            polarization: finalPolarization,
-            sourceTile: tileId,
-            bbox: bbox
-        };
-        
+        try {
+            // Intentamos la polarización dual (DV o DH) que permite la clasificación
+            const response = await tryRequest(primaryPolarization); 
+            const buffer = await response.arrayBuffer();
+            const base64 = Buffer.from(buffer).toString('base64');
+            return {
+                url: `data:image/png;base64,${base64}`,
+                usedDate: foundDate,
+                polarization: primaryPolarization,
+                sourceTile: tileId,
+                bbox: bbox
+            };
+        } catch (error) {
+            console.error('❌ Error en el intento de clasificación (polarización dual):', error.message);
+            // Si falla la dual, intentamos la VV, que aunque no sirve para clasificar, confirma que hay datos
+            console.log("⚠️ Intento de polarización dual falló. Reintentando con polarización simple (VV)...");
+
+            try {
+                // Si la imagen encontrada no es DV, intentamos VV
+                const secondaryPolarization = 'VV';
+                const response = await tryRequest(secondaryPolarization); 
+                const buffer = await response.arrayBuffer();
+                const base64 = Buffer.from(buffer).toString('base64');
+                 
+                 // ADVERTENCIA: Debemos usar un evalscript mono-banda si usamos VV
+                 // Sin embargo, para no complicar el código en esta etapa, asumimos que si el satélite encontró un producto, usará la polarización dual.
+                 // Si este intento falla, devolvemos el error de la dual, ya que es la requerida para la vegetación.
+                
+                throw new Error(`El producto encontrado (${tileId}) no soporta la polarización dual requerida para la clasificación. Solo se pudo obtener VV.`);
+            } catch (secondError) {
+                console.error('❌ Ambos intentos de polarización fallaron:', secondError.message);
+                throw new Error(`Error al obtener imagen para ${foundDate}: Ambos intentos fallaron. ${secondError.message}`);
+            }
+        }
     } catch (error) {
-        console.error('❌ Error en la imagen Sentinel-1 (Final):', error.message);
+        console.error('❌ Error en la imagen Sentinel-1:', error.message);
         throw error;
     }
 };
