@@ -547,15 +547,18 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
         // CLAVE: CÓDIGO DEL CATÁLOGO REINSERTADO
         const fromDate = new Date(date);
         const toDate = new Date(date);
-        fromDate.setDate(fromDate.getDate() - 30);
-        toDate.setDate(toDate.getDate() + 7);
+        // fromDate.setDate(fromDate.getDate() - 30);
+        // toDate.setDate(toDate.getDate() + 7);
+        fromDate.setDate(fromDate.getDate() - 0);
+        toDate.setDate(toDate.getDate() + 0);
 
         const catalogUrl = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search';
         const catalogPayload = {
             "bbox": bbox,
             "datetime": `${fromDate.toISOString().split('T')[0]}T00:00:00Z/${toDate.toISOString().split('T')[0]}T23:59:59Z`,
             "collections": ["sentinel-1-grd"],
-            "limit": 1
+            "limit": 10
+            // "limit": 1
         };
         // FIN CÓDIGO DEL CATÁLOGO
 
