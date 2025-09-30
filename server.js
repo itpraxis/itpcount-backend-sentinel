@@ -691,6 +691,14 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
  * Clases: 1=Agua, 2=Suelo/Urbano, 3=Vegetación Baja, 4=Bosque, 5=Vegetación Densa.
  * @returns {string} El evalscript correspondiente.
  */
+// ==============================================
+// FUNCIÓN AUXILIAR: Evalscript para CLASIFICACIÓN 5-CLASES (CORREGIDO)
+// ==============================================
+/**
+ * Genera el evalscript para la clasificación de 5 clases de cobertura Sentinel-1 (VV/VH).
+ * Clases: 1=Agua, 2=Suelo/Urbano, 3=Vegetación Baja, 4=Bosque, 5=Vegetación Densa.
+ * La salida se escala por 50 para asegurar visibilidad en UINT8.
+ */
 const getClassification5ClassesEvalscript = () => {
     // Usamos el modo Dual (VH y VV) ya que es necesario para la clasificación estructural.
     return `//VERSION=3
@@ -721,32 +729,32 @@ function evaluatePixel(samples) {
   let vh_db = 10 * Math.log10(vh);
   
   // --- CLASIFICACIÓN SECUENCIAL (Cascada) ---
-  // Las clases se definen por números enteros de 1 a 5.
   let classification_class = 2; // Valor por defecto: Suelo Desnudo / Urbano (Clase 2)
 
-  // 1. CLASE 1: Agua Tranquila (Muy baja señal de retorno en ambas polarizaciones)
+  // 1. CLASE 1: Agua Tranquila
   if (vv_db < -20.0 && vh_db < -25.0) {
       classification_class = 1;
   }
-  // 2. CLASE 5: Vegetación Densa (Alta Dispersión Volumétrica - Alta señal VH)
+  // 2. CLASE 5: Vegetación Densa
   else if (vh_db > -15.0) {
       classification_class = 5; 
   }
-  // 3. CLASE 4: Bosque (Dispersión Volumétrica Moderada/Alta)
+  // 3. CLASE 4: Bosque
   else if (vh_db > -18.0) {
       classification_class = 4;
   }
-  // 4. CLASE 3: Vegetación Baja (Cultivos, Arbustos, Vegetación Rala)
-  // Utilizamos la combinación de VV bajo y VH moderado.
+  // 4. CLASE 3: Vegetación Baja
   else if (vv_db < -14.0 && vh_db > -22.0) {
       classification_class = 3; 
   }
-  // 5. CLASE 2: Suelo Desnudo / Urbano (Queda por defecto si no es ninguna de las anteriores)
+  // 5. CLASE 2: Suelo Desnudo / Urbano (Else block)
   else {
       classification_class = 2;
   }
   
-  return [classification_class]; 
+  // 🚨 CORRECCIÓN CLAVE: Multiplicar por 50 para hacer la imagen VISIBLE.
+  // La clase 5 será 250, y la clase 1 será 50.
+  return [classification_class * 50]; 
 }`;
 };
 
