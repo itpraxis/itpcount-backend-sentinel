@@ -683,6 +683,244 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
 };
 
 
+// ==============================================
+// FUNCIÓN AUXILIAR: Genera el evalscript para CLASIFICACIÓN 5-CLASES
+// ==============================================
+/**
+ * Genera el evalscript para la clasificación de 5 clases de cobertura Sentinel-1 (VV/VH).
+ * Clases: 1=Agua, 2=Suelo/Urbano, 3=Vegetación Baja, 4=Bosque, 5=Vegetación Densa.
+ * @returns {string} El evalscript correspondiente.
+ */
+const getClassification5ClassesEvalscript = () => {
+    // Usamos el modo Dual (VH y VV) ya que es necesario para la clasificación estructural.
+    return `//VERSION=3
+function setup() {
+  return {
+    input: [{ bands: ["VV", "VH", "dataMask"], units: "LINEAR_POWER" }],
+    // Salida de 1 banda, UINT8 para la clase (0-5)
+    output: { bands: 1, sampleType: "UINT8", format: "image/png" }
+  };
+}
+
+function evaluatePixel(samples) {
+  let vv = samples.VV;
+  let vh = samples.VH;
+  let dm = samples.dataMask;
+  
+  if (dm === 0) {
+    return [0]; // CLASE 0: Sin Datos / Área No Válida
+  }
+
+  // Verificar si hay valores inválidos antes de log10
+  if (vv <= 0 || vh <= 0) {
+      return [0];
+  }
+  
+  // Convertir a Decibelios
+  let vv_db = 10 * Math.log10(vv);
+  let vh_db = 10 * Math.log10(vh);
+  
+  // --- CLASIFICACIÓN SECUENCIAL (Cascada) ---
+  // Las clases se definen por números enteros de 1 a 5.
+  let classification_class = 2; // Valor por defecto: Suelo Desnudo / Urbano (Clase 2)
+
+  // 1. CLASE 1: Agua Tranquila (Muy baja señal de retorno en ambas polarizaciones)
+  if (vv_db < -20.0 && vh_db < -25.0) {
+      classification_class = 1;
+  }
+  // 2. CLASE 5: Vegetación Densa (Alta Dispersión Volumétrica - Alta señal VH)
+  else if (vh_db > -15.0) {
+      classification_class = 5; 
+  }
+  // 3. CLASE 4: Bosque (Dispersión Volumétrica Moderada/Alta)
+  else if (vh_db > -18.0) {
+      classification_class = 4;
+  }
+  // 4. CLASE 3: Vegetación Baja (Cultivos, Arbustos, Vegetación Rala)
+  // Utilizamos la combinación de VV bajo y VH moderado.
+  else if (vv_db < -14.0 && vh_db > -22.0) {
+      classification_class = 3; 
+  }
+  // 5. CLASE 2: Suelo Desnudo / Urbano (Queda por defecto si no es ninguna de las anteriores)
+  else {
+      classification_class = 2;
+  }
+  
+  return [classification_class]; 
+}`;
+};
+
+// ==============================================
+// FUNCIÓN PRINCIPAL para CLASIFICACIÓN 5-CLASES
+// ==============================================
+/**
+ * Obtiene la imagen de clasificación de 5 clases para Sentinel-1.
+ * (Copia de fetchSentinel1Radar pero usando el nuevo evalscript y forzando salida de 1 banda).
+ */
+const fetchSentinel1Classification = async ({ geometry, date }) => {
+    // Declaración de variables clave (Reutiliza tu lógica)
+    let foundDate;
+    let tileId;
+    let pol;
+    
+    const accessToken = await getAccessToken();
+    const bbox = polygonToBbox(geometry);
+    if (!bbox) {
+        throw new Error('No se pudo calcular el bounding box del polígono.');
+    }
+
+    try {
+        const areaInSquareMeters = calculatePolygonArea(bbox);
+        // Usamos una resolución fija (ej. 10m) para calcular el tamaño óptimo de imagen
+        const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10);
+        const finalWidth = Math.max(sizeInPixels, 512);
+        const finalHeight = Math.max(sizeInPixels, 512);
+
+        // Búsqueda en el Catálogo (Mismo proceso que el original)
+        const fromDate = new Date(date);
+        const toDate = new Date(date);
+        fromDate.setDate(fromDate.getDate() - 0); // Buscar solo en la fecha
+        toDate.setDate(toDate.getDate() + 0);
+
+        const catalogUrl = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search';
+        const catalogPayload = {
+            "bbox": bbox,
+            "datetime": `${fromDate.toISOString().split('T')[0]}T00:00:00Z/${toDate.toISOString().split('T')[0]}T23:59:59Z`,
+            "collections": ["sentinel-1-grd"],
+            "limit": 10
+        };
+
+        const catalogResponse = await fetch(catalogUrl, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${accessToken}`
+            },
+            body: JSON.stringify(catalogPayload)
+        });
+
+        if (!catalogResponse.ok) {
+            const errorText = await catalogResponse.text();
+            throw new Error(`Error en consulta al catálogo: ${errorText}`);
+        }
+
+        const catalogData = await catalogResponse.json();
+        if (catalogData.features.length === 0) {
+            throw new Error("No se encontraron datos de Sentinel-1 para esta ubicación.");
+        }
+
+        const feature = catalogData.features[0];
+        foundDate = feature.properties.datetime.split('T')[0];
+        tileId = feature.id;
+
+        // Determinación de Polarización (usamos la lógica original pero solo para obtener la fecha/tile)
+        const determinePolarization = (id) => {
+            if (id.includes('1SDV')) return { primary: 'DV', mode: 'IW', bands: 3 };
+            if (id.includes('1SDH')) return { primary: 'DH', mode: 'IW', bands: 3 };
+            if (id.includes('1SSV')) return { primary: 'VV', mode: 'IW', bands: 1 };
+            if (id.includes('1SSH')) return { primary: 'HH', mode: 'IW', bands: 1 };
+            return { primary: 'VV', mode: 'IW', bands: 1 };
+        };
+        
+        pol = determinePolarization(tileId);
+        // Usamos Dual Pol para la clasificación, independientemente de lo que determine el tile:
+        const finalPolarization = pol.primary.includes('D') ? pol.primary : 'DV'; // Forzamos a DV/DH
+
+        const tryRequest = async () => {
+            // 🚨 CAMBIO CLAVE: Usamos el nuevo Evalscript.
+            const evalscript = getClassification5ClassesEvalscript(); 
+            const outputBands = 1; // 🚨 CLAVE: Siempre 1 banda para clasificación.
+
+            const payload = {
+                input: {
+                    bounds: {
+                        geometry: {
+                            type: "Polygon",
+                            coordinates: geometry
+                        }
+                    },
+                    data: [{
+                        dataFilter: {
+                            timeRange: {
+                                from: `${foundDate}T00:00:00Z`,
+                                to: `${foundDate}T23:59:59Z`
+                            },
+                            // Aseguramos la polarización Dual para el evalscript de 5 clases.
+                            polarization: 'DV', 
+                            instrumentMode: pol.mode
+                        },
+                        processing: {
+                            mosaicking: "ORBIT"
+                        },
+                        type: "sentinel-1-grd"
+                    }]
+                },
+                output: {
+                    width: finalWidth,
+                    height: finalHeight,
+                    format: "image/png",
+                    sampleType: "UINT8",
+                    bands: outputBands 
+                },
+                evalscript: evalscript
+            };
+
+            const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${accessToken}`
+                },
+                body: JSON.stringify(payload)
+            });
+
+            if (!imageResponse.ok) {
+                const errorText = await imageResponse.text();
+                throw new Error(`Solicitud de clasificación 5-Clases falló: ${errorText}`);
+            }
+            return imageResponse;
+        };
+
+        const response = await tryRequest();
+        const buffer = await response.arrayBuffer();
+        const base64 = Buffer.from(buffer).toString('base64');
+        
+        // El frontend deberá usar esta información para mapear 1->Agua, 2->Suelo, etc.
+        const classificationStatus = "Clasificación 5-Clases (Agua, Suelo, Veg. Baja, Bosque, Veg. Densa)";
+        
+        return {
+            url: `data:image/png;base64,${base64}`,
+            usedDate: foundDate,
+            polarization: finalPolarization,
+            sourceTile: tileId,
+            status: classificationStatus,
+            bbox: bbox
+        };
+        
+    } catch (error) {
+        console.error('❌ Error en la imagen Sentinel-1 (Clasificación 5-Clases):', error.message);
+        throw error;
+    }
+};
+
+// ==============================================
+// ✅ NUEVO ENDPOINT: /api/sentinel1classification
+// ==============================================
+app.post('/api/sentinel1classification', async (req, res) => {
+    const { coordinates, date } = req.body;
+    if (!coordinates || !date) {
+        return res.status(400).json({ error: 'Faltan parámetros: coordinates y date' });
+    }
+    try {
+        const result = await fetchSentinel1Classification({ geometry: coordinates, date: date });
+        res.json(result);
+    } catch (error) {
+        console.error('❌ Error en el endpoint /api/sentinel1classification:', error.message);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+
 
 /**
  * ✅ FUNCIÓN CORREGIDA: Obtiene el valor promedio de NDVI y porcentaje de cobertura vegetal
