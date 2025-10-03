@@ -1111,7 +1111,7 @@ app.post('/api/get-valid-dates', async (req, res) => {
         return res.status(400).json({ error: 'Formato de coordenadas de polígono inválido.' });
     }
     try {
-        let availableDates = await getAvailableDates(bbox, 60);
+        let availableDates = await getAvailableDates(bbox, 50);
         if (availableDates.length === 0) {
             availableDates = await getAvailableDates(bbox, 100);
         }
