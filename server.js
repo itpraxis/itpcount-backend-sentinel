@@ -1122,7 +1122,7 @@ app.post('/api/get-valid-dates', async (req, res) => {
         res.json({
             hasCoverage: true,
             totalDates: availableDates.length,
-            availableDates: availableDates.slice(0, 30),
+            availableDates: availableDates.slice(0, 90),
             message: `Se encontraron ${availableDates.length} fechas con datos disponibles`
         });
     } catch (error) {
