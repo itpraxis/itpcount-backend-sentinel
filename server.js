@@ -103,7 +103,7 @@ const getAvailableDates = async (bbox, maxCloudCoverage) => {
             "bbox": bbox,
             "datetime": `${startDate}T00:00:00Z/${endDate}T23:59:59Z`,
             "collections": ["sentinel-2-l2a"],
-            "limit": 200,
+            "limit": 100,
             "filter": `eo:cloud_cover < ${maxCloudCoverage}`
         };
         
