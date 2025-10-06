@@ -1,7 +1,43 @@
-// server.js (versión corregida - obtención de NDVI promedio)
+// server.js (versión con monitoreo de Processing Units - PU y envío a Google Sheet)
 require('dotenv').config();
 console.log('🔑 CLIENT_ID cargado:', process.env.CLIENT_ID ? '✅ Sí' : '❌ No');
 console.log('🔐 CLIENT_SECRET cargado:', process.env.CLIENT_SECRET ? '✅ Sí' : '❌ No');
+
+// ==============================================
+// ✅ NUEVA FUNCIÓN: Calcula y envía el consumo de PU a Google Sheets
+// ==============================================
+/**
+ * Calcula y envía el consumo estimado de Processing Units (PU) para una solicitud al Process API.
+ * @param {number} width - Ancho de la imagen solicitada (en píxeles).
+ * @param {number} height - Alto de la imagen solicitada (en píxeles).
+ * @param {number} bands - Número de bandas solicitadas.
+ * @param {string} endpointName - Nombre del endpoint para identificar el uso en logs (ej: "NDVI", "TrueColor").
+ */
+async function logProcessingUnits(width, height, bands, endpointName = "Process API") {
+    const pu = Math.ceil((width * height * bands) / (512 * 512));
+    const logData = {
+        endpointName,
+        width,
+        height,
+        bands,
+        pu
+    };
+
+    // Imprimir en consola (opcional, para debugging)
+    console.log(`📊 [PU Estimadas] ${endpointName} | ${width}x${height} | Bandas: ${bands} | PU: ${pu}`);
+
+    // Enviar a Google Sheet
+    const SHEET_URL = 'https://script.google.com/macros/s/AKfycbxCgdiQmDnpis92rS7iIK0H_F_PwJ0SY9Y3NnueRgbtb0yKMvC9IGHIXpubgJUc4IieqA/exec';
+    try {
+        await fetch(SHEET_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(logData)
+        });
+    } catch (err) {
+        console.error('⚠️ No se pudo enviar el log a Google Sheet:', err.message);
+    }
+}
 
 const express = require('express');
 const cors = require('cors');
@@ -14,9 +50,7 @@ app.use(cors({
   allowedHeaders: ['Content-Type'],
   credentials: true
 }));
-
 app.use(express.json());
-
 const port = process.env.PORT || 3001;
 
 // Función auxiliar para convertir polígono a bbox
@@ -62,7 +96,6 @@ const getNearbyDates = (baseDate, days) => {
 // ==============================================
 // LÓGICA REUTILIZABLE
 // ==============================================
-
 /**
  * Obtiene el token de acceso de Sentinel-Hub.
  * @returns {string} El token de acceso.
@@ -91,14 +124,11 @@ const getAvailableDates = async (bbox, maxCloudCoverage) => {
     try {
         const accessToken = await getAccessToken();
         const catalogUrl = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search';
-        
         const now = new Date();
         const oneYearAgo = new Date();
         oneYearAgo.setFullYear(now.getFullYear() - 1);
-
         const startDate = oneYearAgo.toISOString().split('T')[0];
         const endDate = now.toISOString().split('T')[0];
-
         const payload = {
             "bbox": bbox,
             "datetime": `${startDate}T00:00:00Z/${endDate}T23:59:59Z`,
@@ -106,9 +136,7 @@ const getAvailableDates = async (bbox, maxCloudCoverage) => {
             "limit": 100,
             "filter": `eo:cloud_cover < ${maxCloudCoverage}`
         };
-        
         console.log('Sending payload to catalog:', JSON.stringify(payload));
-        
         const catalogResponse = await fetch(catalogUrl, {
             method: 'POST', 
             headers: {
@@ -117,12 +145,10 @@ const getAvailableDates = async (bbox, maxCloudCoverage) => {
             },
             body: JSON.stringify(payload)
         });
-        
         if (!catalogResponse.ok) {
             const error = await catalogResponse.text();
             throw new Error(`Error getting data from Catalog: ${error}`);
         }
-        
         const catalogData = await catalogResponse.json();
         const availableDates = catalogData.features
             .map(feature => ({
@@ -133,14 +159,12 @@ const getAvailableDates = async (bbox, maxCloudCoverage) => {
                 self.findIndex(f => f.date === value.date) === index
             )
             .sort((a, b) => new Date(b.date) - new Date(a.date));
-            
         return availableDates;
     } catch (error) {
         console.error('❌ Error in getAvailableDates:', error.message);
         return [];
     }
 };
-
 
 /**
  * Consulta el catálogo de Sentinel-1 para obtener fechas disponibles
@@ -151,18 +175,14 @@ const getAvailableDates = async (bbox, maxCloudCoverage) => {
 const getSentinel1Dates = async ({ geometry }) => {
     const accessToken = await getAccessToken();
     const bbox = polygonToBbox(geometry);
-
     if (!bbox) {
         throw new Error('No se pudo calcular el bounding box del polígono para buscar fechas S1.');
     }
-
     const today = new Date();
     const eighteenMonthsAgo = new Date();
     eighteenMonthsAgo.setMonth(today.getMonth() - 18);
     const datetimeRange = `${eighteenMonthsAgo.toISOString()}/${today.toISOString()}`;
-
     const catalogUrl = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search';
-    
     // 🚩 CLAVE DE LA CORRECCIÓN: Definimos el payload base que se usará en TODAS las solicitudes POST.
     const basePayload = {
         "bbox": bbox,
@@ -170,35 +190,28 @@ const getSentinel1Dates = async ({ geometry }) => {
         "collections": ["sentinel-1-grd"],
         "limit": 100 
     };
-
     let allFeatures = [];
     let nextUrl = catalogUrl;
     // 🚩 Usamos el payload base para la primera llamada.
     let payload = basePayload; 
-    
     // Iteramos para manejar la paginación
     while (nextUrl) {
-        
         // 🚩 Si nextUrl no es el catalogUrl base, debemos usar el endpoint base
         //    y añadir el token de paginación al cuerpo del POST.
         if (nextUrl !== catalogUrl) {
             // El API del Catálogo requiere que usemos el endpoint base para el POST,
             // y que el token de la URL 'next' se envíe en el cuerpo como 'next'.
-            
             // 1. Extraemos el token 'next' de la URL de paginación
             const urlParams = new URLSearchParams(new URL(nextUrl).search);
             const nextToken = urlParams.get('next');
-            
             // 2. Usamos el payload base y le añadimos la clave 'next' para la paginación
             payload = { 
                 ...basePayload, // Mantiene 'collections', 'datetime', y 'bbox'
                 "next": nextToken 
             };
-
             // 3. Reseteamos nextUrl a catalogUrl para que el fetch use el endpoint base
             nextUrl = catalogUrl;
         }
-
         const response = await fetch(nextUrl, {
             method: 'POST',
             headers: {
@@ -207,15 +220,12 @@ const getSentinel1Dates = async ({ geometry }) => {
             },
             body: JSON.stringify(payload)
         });
-
         if (!response.ok) {
             const errorText = await response.text();
             throw new Error(`Error en consulta al catálogo de S1: ${errorText}`);
         }
-
         const data = await response.json();
         allFeatures.push(...data.features);
-
         // Manejo de paginación (busca el link 'next')
         const nextLink = data.links.find(link => link.rel === 'next');
         if (nextLink) {
@@ -224,22 +234,18 @@ const getSentinel1Dates = async ({ geometry }) => {
         } else {
             nextUrl = null;
         }
-
         // Limitamos el total de tiles procesados
         if (allFeatures.length >= 500) break;
     }
-
     // Extraemos y filtramos las fechas únicas
     const uniqueDates = new Set();
     allFeatures.forEach(feature => {
         const datePart = feature.properties.datetime.split('T')[0];
         uniqueDates.add(datePart);
     });
-
     const sortedDates = Array.from(uniqueDates).sort().reverse();
     return sortedDates;
 };
-
 
 /**
  * ✅ NUEVA: Calcula el área aproximada de un polígono a partir de su bounding box.
@@ -248,19 +254,15 @@ const getSentinel1Dates = async ({ geometry }) => {
  */
 function calculatePolygonArea(bbox) {
     const [minLon, minLat, maxLon, maxLat] = bbox;
-
     // Aproximación usando la fórmula del área de un rectángulo en la superficie de la Tierra.
     // La precisión es suficiente para nuestro propósito de escalar la imagen.
     const earthRadius = 6371000; // Radio de la Tierra en metros
-
     const lat1Rad = minLat * Math.PI / 180;
     const lat2Rad = maxLat * Math.PI / 180;
     const deltaLat = (maxLat - minLat) * Math.PI / 180;
     const deltaLon = (maxLon - minLon) * Math.PI / 180;
-
     // Área = (R^2) * Δλ * (sin(φ2) - sin(φ1))
     const area = Math.pow(earthRadius, 2) * deltaLon * (Math.sin(lat2Rad) - Math.sin(lat1Rad));
-
     return Math.abs(area);
 }
 
@@ -273,14 +275,11 @@ function calculatePolygonArea(bbox) {
 function calculateOptimalImageSize(areaInSquareMeters, resolutionInMeters) {
     // Calcular la longitud del lado de un cuadrado con el mismo área
     const sideLengthInMeters = Math.sqrt(areaInSquareMeters);
-
     // Calcular el número de píxeles necesarios para cubrir ese lado
     let sizeInPixels = Math.round(sideLengthInMeters / resolutionInMeters);
-
     // 🆕 AJUSTE CLAVE: Reducir el tamaño mínimo de 256 a 128 píxeles
     // Esto permite que polígonos muy pequeños se soliciten con una resolución más adecuada
     sizeInPixels = Math.max(128, Math.min(2048, sizeInPixels));
-
     return sizeInPixels;
 }
 
@@ -295,7 +294,6 @@ function calculateOptimalImageSize(areaInSquareMeters, resolutionInMeters) {
  */
 const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) => {
     const accessToken = await getAccessToken();
-    
     // ✅ NUEVO: Calcular el bbox y el área para determinar el tamaño óptimo
     const bbox = geometryType === 'Polygon' ? polygonToBbox(geometry) : geometry;
     if (!bbox) {
@@ -303,6 +301,9 @@ const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) 
     }
     const areaInSquareMeters = calculatePolygonArea(bbox);
     const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10); // 10m de resolución
+
+    // 🔹 REGISTRO DE PU
+    logProcessingUnits(sizeInPixels, sizeInPixels, 1, "NDVI");
 
     const payload = {
         input: {
@@ -365,7 +366,6 @@ const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) 
     };
 };
 
-
 /**
  * Intenta obtener una imagen de Sentinel-Hub con reintentos.
  * @param {object} params - Parámetros de la solicitud.
@@ -377,7 +377,6 @@ const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) 
  */
 const fetchSentinelImageTC = async ({ geometry, date, geometryType = 'Polygon' }) => {
     const accessToken = await getAccessToken();
-
     // Calcular el bbox y el área para determinar el tamaño óptimo
     const bbox = geometryType === 'Polygon' ? polygonToBbox(geometry) : geometry;
     if (!bbox) {
@@ -385,6 +384,9 @@ const fetchSentinelImageTC = async ({ geometry, date, geometryType = 'Polygon' }
     }
     const areaInSquareMeters = calculatePolygonArea(bbox);
     const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10); // 10m de resolución
+
+    // 🔹 REGISTRO DE PU
+    logProcessingUnits(sizeInPixels, sizeInPixels, 3, "TrueColor");
 
     const payload = {
         input: {
@@ -418,7 +420,6 @@ function evaluatePixel(sample) {
 }
 `
     };
-
     const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
         method: 'POST',
         headers: {
@@ -427,23 +428,19 @@ function evaluatePixel(sample) {
         },
         body: JSON.stringify(payload)
     });
-
     if (!imageResponse.ok) {
         const error = await imageResponse.text();
         console.error('❌ Error en la API de Sentinel-Hub:', error);
         throw new Error(`Error en la imagen para ${date}: ${error}`);
     }
-
     const buffer = await imageResponse.arrayBuffer();
     const base64 = Buffer.from(buffer).toString('base64');
-
     return {
         url: `data:image/png;base64,${base64}`,
         usedDate: date,
         bbox: bbox
     };
 };
-
 
 // ==============================================
 // FUNCIÓN AUXILIAR: Genera el evalscript para clasificación RGB
@@ -457,7 +454,6 @@ const getClassificationEvalscript = (polarization) => {
     // Rango de contraste definitivo para garantizar VISIBILIDAD
     const min_db_visible = -80; 
     const max_db = 5; 
-
     if (polarization === 'DV' || polarization === 'DH') {
         // --- Script DUAL (RGB para clasificación) ---
         return `//VERSION=3
@@ -467,38 +463,29 @@ function setup() {
     output: { bands: 3, sampleType: "UINT8", format: "image/png" }
   };
 }
-
 function evaluatePixel(samples) {
   let vv = samples.VV;
   let vh = samples.VH;
   let dm = samples.dataMask;
-  
   if (vv <= 0 || vh <= 0 || dm === 0) {
     return [0, 0, 0];
   }
-  
   let vv_db = 10 * Math.log10(vv);
   let vh_db = 10 * Math.log10(vh);
-  
   const min_db = ${min_db_visible}; 
   const normalize = (value) => Math.max(0, Math.min(1, (value - min_db) / (${max_db} - min_db)));
-  
   let vv_norm = normalize(vv_db);
   let vh_norm = normalize(vh_db);
-  
   let ratio_db = vv_db - vh_db;
   let ratio_norm = Math.max(0, Math.min(1, ratio_db / 20)); 
-
   let r = vv_norm * 255;
   let g = vh_norm * 255;
   let b = ratio_norm * 255;
-  
   return [r, g, b];
 }`;
     } else {
         // --- Script SIMPLE (Monobanda, con -80 dB para visibilidad y SIN dataMask) ---
         const band = polarization === 'VV' || polarization === 'VH' ? polarization : 'VV';
-        
         return `//VERSION=3
 function setup() {
     return {
@@ -521,7 +508,6 @@ function evaluatePixel(samples) {
     }
 };
 
-
 // ==============================================
 // FUNCIÓN PRINCIPAL MODIFICADA (fetchSentinel1Radar) Gemini
 // ==============================================
@@ -531,13 +517,11 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
     let tileId;
     let pol;
     let finalPolarization;
-    
     const accessToken = await getAccessToken();
     const bbox = polygonToBbox(geometry);
     if (!bbox) {
         throw new Error('No se pudo calcular el bounding box del polígono.');
     }
-
     try {
         const areaInSquareMeters = calculatePolygonArea(bbox);
         const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10);
@@ -551,7 +535,6 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
         // toDate.setDate(toDate.getDate() + 7);
         fromDate.setDate(fromDate.getDate() - 0);
         toDate.setDate(toDate.getDate() + 0);
-
         const catalogUrl = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search';
         const catalogPayload = {
             "bbox": bbox,
@@ -561,7 +544,6 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
             // "limit": 1
         };
         // FIN CÓDIGO DEL CATÁLOGO
-
         const catalogResponse = await fetch(catalogUrl, {
             method: 'POST',
             headers: {
@@ -570,21 +552,17 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
             },
             body: JSON.stringify(catalogPayload)
         });
-
         if (!catalogResponse.ok) {
             const errorText = await catalogResponse.text();
             throw new Error(`Error en consulta al catálogo: ${errorText}`);
         }
-
         const catalogData = await catalogResponse.json();
         if (catalogData.features.length === 0) {
             throw new Error("No se encontraron datos de Sentinel-1 para esta ubicación.");
         }
-
         const feature = catalogData.features[0];
         foundDate = feature.properties.datetime.split('T')[0];
         tileId = feature.id;
-
         // LÓGICA DE DETERMINACIÓN DE POLARIZACIÓN (FINAL Y ROBUSTA)
         const determinePolarization = (id) => {
              // 1. DUAL (Clasificación RGB) - Buscar 1SDV o 1SDH
@@ -604,14 +582,15 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
             // 3. Fallback 
             return { primary: 'VV', mode: 'IW', bands: 1 }; 
         };
-        
         pol = determinePolarization(tileId);
         finalPolarization = pol.primary;
+
+        // 🔹 REGISTRO DE PU
+        logProcessingUnits(finalWidth, finalHeight, pol.bands, `Sentinel1Radar (${pol.primary})`);
 
         const tryRequest = async () => {
             const evalscript = getClassificationEvalscript(finalPolarization); 
             const outputBands = pol.bands;
-
             const payload = {
                 input: {
                     bounds: {
@@ -644,7 +623,6 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
                 },
                 evalscript: evalscript
             };
-
             const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
                 method: 'POST',
                 headers: {
@@ -653,20 +631,16 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
                 },
                 body: JSON.stringify(payload)
             });
-
             if (!imageResponse.ok) {
                 const errorText = await imageResponse.text();
                 throw new Error(`Solicitud con polarización ${finalPolarization} falló: ${errorText}`);
             }
             return imageResponse;
         };
-
         const response = await tryRequest();
         const buffer = await response.arrayBuffer();
         const base64 = Buffer.from(buffer).toString('base64');
-        
         const classificationStatus = pol.bands === 3 ? "Clasificación RGB (Dual)" : "Escala de Grises (Simple)";
-        
         return {
             url: `data:image/png;base64,${base64}`,
             usedDate: foundDate,
@@ -675,13 +649,11 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
             status: classificationStatus,
             bbox: bbox
         };
-        
     } catch (error) {
         console.error('❌ Error en la imagen Sentinel-1 (Final):', error.message);
         throw error;
     }
 };
-
 
 // ==============================================
 // FUNCIÓN AUXILIAR: Genera el evalscript para CLASIFICACIÓN 5-CLASES
@@ -709,28 +681,22 @@ function setup() {
     output: { bands: 1, sampleType: "UINT8", format: "image/png" }
   };
 }
-
 function evaluatePixel(samples) {
   let vv = samples.VV;
   let vh = samples.VH;
   let dm = samples.dataMask;
-  
   if (dm === 0) {
     return [0]; // CLASE 0: Sin Datos / Área No Válida
   }
-
   // Verificar si hay valores inválidos antes de log10
   if (vv <= 0 || vh <= 0) {
       return [0];
   }
-  
   // Convertir a Decibelios
   let vv_db = 10 * Math.log10(vv);
   let vh_db = 10 * Math.log10(vh);
-  
   // --- CLASIFICACIÓN SECUENCIAL (Cascada) ---
   let classification_class = 2; // Valor por defecto: Suelo Desnudo / Urbano (Clase 2)
-
   // 1. CLASE 1: Agua Tranquila
   if (vv_db < -20.0 && vh_db < -25.0) {
       classification_class = 1;
@@ -751,7 +717,6 @@ function evaluatePixel(samples) {
   else {
       classification_class = 2;
   }
-  
   // 🚨 CORRECCIÓN CLAVE: Multiplicar por 50 para hacer la imagen VISIBLE.
   // La clase 5 será 250, y la clase 1 será 50.
   return [classification_class * 50]; 
@@ -770,13 +735,11 @@ const fetchSentinel1Classification = async ({ geometry, date }) => {
     let foundDate;
     let tileId;
     let pol;
-    
     const accessToken = await getAccessToken();
     const bbox = polygonToBbox(geometry);
     if (!bbox) {
         throw new Error('No se pudo calcular el bounding box del polígono.');
     }
-
     try {
         const areaInSquareMeters = calculatePolygonArea(bbox);
         // Usamos una resolución fija (ej. 10m) para calcular el tamaño óptimo de imagen
@@ -784,12 +747,14 @@ const fetchSentinel1Classification = async ({ geometry, date }) => {
         const finalWidth = Math.max(sizeInPixels, 512);
         const finalHeight = Math.max(sizeInPixels, 512);
 
+        // 🔹 REGISTRO DE PU
+        logProcessingUnits(finalWidth, finalHeight, 1, "Sentinel1-Classification-5Clases");
+
         // Búsqueda en el Catálogo (Mismo proceso que el original)
         const fromDate = new Date(date);
         const toDate = new Date(date);
         fromDate.setDate(fromDate.getDate() - 0); // Buscar solo en la fecha
         toDate.setDate(toDate.getDate() + 0);
-
         const catalogUrl = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search';
         const catalogPayload = {
             "bbox": bbox,
@@ -797,7 +762,6 @@ const fetchSentinel1Classification = async ({ geometry, date }) => {
             "collections": ["sentinel-1-grd"],
             "limit": 10
         };
-
         const catalogResponse = await fetch(catalogUrl, {
             method: 'POST',
             headers: {
@@ -806,21 +770,17 @@ const fetchSentinel1Classification = async ({ geometry, date }) => {
             },
             body: JSON.stringify(catalogPayload)
         });
-
         if (!catalogResponse.ok) {
             const errorText = await catalogResponse.text();
             throw new Error(`Error en consulta al catálogo: ${errorText}`);
         }
-
         const catalogData = await catalogResponse.json();
         if (catalogData.features.length === 0) {
             throw new Error("No se encontraron datos de Sentinel-1 para esta ubicación.");
         }
-
         const feature = catalogData.features[0];
         foundDate = feature.properties.datetime.split('T')[0];
         tileId = feature.id;
-
         // Determinación de Polarización (usamos la lógica original pero solo para obtener la fecha/tile)
         const determinePolarization = (id) => {
             if (id.includes('1SDV')) return { primary: 'DV', mode: 'IW', bands: 3 };
@@ -829,16 +789,13 @@ const fetchSentinel1Classification = async ({ geometry, date }) => {
             if (id.includes('1SSH')) return { primary: 'HH', mode: 'IW', bands: 1 };
             return { primary: 'VV', mode: 'IW', bands: 1 };
         };
-        
         pol = determinePolarization(tileId);
         // Usamos Dual Pol para la clasificación, independientemente de lo que determine el tile:
         const finalPolarization = pol.primary.includes('D') ? pol.primary : 'DV'; // Forzamos a DV/DH
-
         const tryRequest = async () => {
             // 🚨 CAMBIO CLAVE: Usamos el nuevo Evalscript.
             const evalscript = getClassification5ClassesEvalscript(); 
             const outputBands = 1; // 🚨 CLAVE: Siempre 1 banda para clasificación.
-
             const payload = {
                 input: {
                     bounds: {
@@ -872,7 +829,6 @@ const fetchSentinel1Classification = async ({ geometry, date }) => {
                 },
                 evalscript: evalscript
             };
-
             const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
                 method: 'POST',
                 headers: {
@@ -881,21 +837,17 @@ const fetchSentinel1Classification = async ({ geometry, date }) => {
                 },
                 body: JSON.stringify(payload)
             });
-
             if (!imageResponse.ok) {
                 const errorText = await imageResponse.text();
                 throw new Error(`Solicitud de clasificación 5-Clases falló: ${errorText}`);
             }
             return imageResponse;
         };
-
         const response = await tryRequest();
         const buffer = await response.arrayBuffer();
         const base64 = Buffer.from(buffer).toString('base64');
-        
         // El frontend deberá usar esta información para mapear 1->Agua, 2->Suelo, etc.
         const classificationStatus = "Clasificación 5-Clases (Agua, Suelo, Veg. Baja, Bosque, Veg. Densa)";
-        
         return {
             url: `data:image/png;base64,${base64}`,
             usedDate: foundDate,
@@ -904,7 +856,6 @@ const fetchSentinel1Classification = async ({ geometry, date }) => {
             status: classificationStatus,
             bbox: bbox
         };
-        
     } catch (error) {
         console.error('❌ Error en la imagen Sentinel-1 (Clasificación 5-Clases):', error.message);
         throw error;
@@ -928,8 +879,6 @@ app.post('/api/sentinel1classification', async (req, res) => {
     }
 });
 
-
-
 /**
  * ✅ FUNCIÓN CORREGIDA: Obtiene el valor promedio de NDVI y porcentaje de cobertura vegetal
  * @param {object} params - Parámetros de la solicitud.
@@ -948,6 +897,9 @@ const getNdviAverage2 = async ({ geometry, date }) => {
         }
         const areaInSquareMeters = calculatePolygonArea(bbox);
         const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10); // 10m de resolución
+
+        // 🔹 REGISTRO DE PU
+        logProcessingUnits(sizeInPixels, sizeInPixels, 1, "NDVI-Average");
 
         const payload = {
             input: {
@@ -986,11 +938,9 @@ function evaluatePixel(samples) {
   if (samples.dataMask === 0) {
     return [0]; // Fondo/No datos
   }
-  
   const nir = samples.B08;
   const red = samples.B04;
   const ndvi = (nir - red) / (nir + red);
-  
   // Umbral ajustado para bosque templado (> 0.4)
   if (ndvi > 0.4) {
     return [255]; // Vegetación significativa
@@ -999,7 +949,6 @@ function evaluatePixel(samples) {
   }
 }`
         };
-
         const response = await fetch('https://services.sentinel-hub.com/api/v1/process', {
             method: 'POST',
             headers: {
@@ -1008,41 +957,33 @@ function evaluatePixel(samples) {
             },
             body: JSON.stringify(payload)
         });
-
         if (!response.ok) {
             const error = await response.text();
             throw new Error(`Error en la API de Sentinel-Hub: ${error}`);
         }
-
         const buffer = await response.arrayBuffer();
         const imageData = new Uint8Array(buffer);
-        
         let sum = 0;
         let count = 0;
         let vegetationPixels = 0;
         let totalPixels = 0;
-        
         for (let i = 0; i < imageData.length; i += 4) {
             const value = imageData[i];
             if (value !== 0) { // Pixel válido (no fondo)
                 totalPixels++;
-                
                 // Calcular NDVI real para el promedio
                 const normalizedValue = value / 255.0;
                 const ndvi = (normalizedValue * 2) - 1;
                 sum += ndvi;
                 count++;
-                
                 // Contar píxeles con vegetación significativa
                 if (value === 255) {
                     vegetationPixels++;
                 }
             }
         }
-        
         const avgNdvi = count > 0 ? sum / count : null;
         const vegetationPercentage = totalPixels > 0 ? (vegetationPixels / totalPixels) * 100 : 0;
-        
         return {
             avgNdvi: avgNdvi,
             vegetationPercentage: vegetationPercentage,
@@ -1058,7 +999,6 @@ function evaluatePixel(samples) {
 // ==============================================
 // ENDPOINTS DE IMÁGENES CON LÓGICA DE REINTENTO
 // ==============================================
-
 app.post('/api/sentinel2', async (req, res) => {
     const { coordinates, date } = req.body;
     if (!coordinates || !date) {
@@ -1079,13 +1019,11 @@ app.post('/api/sentinel2', async (req, res) => {
 app.post('/api/get-valid-dates1', async (req, res) => {
     // Coordenadas de prueba para Londres
     const testBbox = [-0.161, 51.488, 0.057, 51.52];
-
     try {
         let availableDates = await getAvailableDates(testBbox, 90);
         if (availableDates.length === 0) {
             availableDates = await getAvailableDates(testBbox, 100);
         }
-
         if (availableDates.length === 0) {
             return res.json({ hasCoverage: false, message: "No se encontraron imágenes para esta ubicación en el rango de fechas." });
         }
@@ -1115,7 +1053,6 @@ app.post('/api/get-valid-dates', async (req, res) => {
         if (availableDates.length === 0) {
             availableDates = await getAvailableDates(bbox, 100);
         }
-
         if (availableDates.length === 0) {
             return res.json({ hasCoverage: false, message: "No se encontraron imágenes para esta ubicación en el rango de fechas." });
         }
@@ -1137,11 +1074,9 @@ app.post('/api/get-valid-dates', async (req, res) => {
 app.post('/api/get-valid-dates-s1', async (req, res) => {
     // El frontend enviará las coordenadas del polígono
     const { coordinates } = req.body; 
-
     if (!coordinates) {
         return res.status(400).json({ error: 'Faltan parámetros: coordinates.' });
     }
-
     try {
         const dates = await getSentinel1Dates({ geometry: coordinates });
         res.json({ dates });
@@ -1168,7 +1103,6 @@ app.post('/api/sentinel2simple', async (req, res) => {
     }
 });
 
-
 app.post('/api/sentinel2simple2', async (req, res) => {
     const { coordinates, date } = req.body;
     const bbox = polygonToBbox(coordinates);
@@ -1188,11 +1122,9 @@ app.post('/api/sentinel2simple2', async (req, res) => {
     }
 });
 
-
 // ==============================================
 // ✅ NUEVO ENDPOINT PARA OBTENER LOS PROMEDIOS DE NDVI
 // ==============================================
-
 app.post('/api/get-ndvi-averages', async (req, res) => {
     const { coordinates, dates } = req.body;
     if (!coordinates || !dates || dates.length < 2) {
@@ -1203,7 +1135,6 @@ app.post('/api/get-ndvi-averages', async (req, res) => {
             getNdviAverage2({ geometry: coordinates, date: dates[0] }),
             getNdviAverage2({ geometry: coordinates, date: dates[1] })
         ]);
-
         res.json({
             date1: dates[0],
             avgNdvi1: avg1,
@@ -1219,7 +1150,6 @@ app.post('/api/get-ndvi-averages', async (req, res) => {
 // ==============================================
 // ENDPOINTS DE METADATOS CON BBOX
 // ==============================================
-
 app.post('/api/check-coverage', async (req, res) => {
     const { coordinates } = req.body;
     if (!coordinates) {
@@ -1250,7 +1180,9 @@ app.post('/api/check-coverage', async (req, res) => {
                 height: 50,
                 format: "application/json"
             },
-            evalscript: `// VERSION=3\nfunction setup() { return { input: ["B04"], output: { bands: 1 } }; }\nfunction evaluatePixel(sample) { return [1]; }`,
+            evalscript: `// VERSION=3
+function setup() { return { input: ["B04"], output: { bands: 1 } }; }
+function evaluatePixel(sample) { return [1]; }`,
             meta: { "availableDates": true }
         };
         const metadataResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
@@ -1296,7 +1228,6 @@ app.post('/api/catalogo-coverage', async (req, res) => {
     try {
         const accessToken = await getAccessToken();
         const catalogUrl = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search';
-        
         const payload = {
             "bbox": bbox,
             "datetime": "2020-01-01T00:00:00Z/2025-01-01T23:59:59Z",
@@ -1308,7 +1239,6 @@ app.post('/api/catalogo-coverage', async (req, res) => {
                 "value": 100
             }
         };
-
         const catalogResponse = await fetch(catalogUrl, {
             method: 'POST',
             headers: {
@@ -1317,7 +1247,6 @@ app.post('/api/catalogo-coverage', async (req, res) => {
             },
             body: JSON.stringify(payload)
         });
-        
         if (!catalogResponse.ok) {
             const error = await catalogResponse.text();
             throw new Error(`Error al obtener datos del Catálogo: ${error}`);
@@ -1386,11 +1315,9 @@ app.post('/api/sentinel2truecolor', async (req, res) => {
     }
 });
 
-
 // ==============================================
 // ✅ NUEVO ENDPOINT: /api/sentinel2highlight - Highlight Optimized Natural Color (MEJORADO)
 // ==============================================
-
 /**
  * Obtiene una imagen Sentinel-2 con visualización "Highlight Optimized Natural Color".
  * @param {object} params - Parámetros de la solicitud.
@@ -1401,16 +1328,16 @@ app.post('/api/sentinel2truecolor', async (req, res) => {
  */
 const fetchSentinelImageHighlight = async ({ geometry, date, bbox }) => {
     const accessToken = await getAccessToken();
-
     // ✅ NUEVO: Calcular el área aproximada del polígono en metros cuadrados
     const areaInSquareMeters = calculatePolygonArea(bbox);
-
     // ✅ NUEVO: Definir la resolución objetivo en metros por píxel
     // Sentinel-2 L2A tiene una resolución nativa de 10m para las bandas RGB.
     const targetResolutionInMeters = 10;
-
     // ✅ NUEVO: Calcular el tamaño de la imagen en píxeles basado en el área y la resolución
     const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, targetResolutionInMeters);
+
+    // 🔹 REGISTRO DE PU
+    logProcessingUnits(sizeInPixels, sizeInPixels, 4, "Highlight");
 
     const payload = {
         input: {
@@ -1462,29 +1389,24 @@ function setup() {
         }
     };
 }
-
 // Función para aplicar el ajuste de rango dinámico (DRA) a un canal
 function evaluatePixel(sample) {
     // Valores para el ajuste de rango dinámico (DRA) - Estos son valores típicos para EO Browser
     let minVal = 0.0;
     let maxVal = 0.4; // Este es el valor clave que controla el brillo. 0.4 es un buen punto de partida.
-
     // Aplicar DRA a cada canal
     let red = (sample.B04 - minVal) / (maxVal - minVal);
     let green = (sample.B03 - minVal) / (maxVal - minVal);
     let blue = (sample.B02 - minVal) / (maxVal - minVal);
-
     // Recortar valores fuera del rango [0, 1]
     red = Math.max(0, Math.min(1, red));
     green = Math.max(0, Math.min(1, green));
     blue = Math.max(0, Math.min(1, blue));
-
     // Devolver el color RGB y la máscara de datos (para transparencia)
     return [red * 255, green * 255, blue * 255, sample.dataMask * 255];
 }
         `
     };
-
     const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
         method: 'POST',
         headers: {
@@ -1493,16 +1415,13 @@ function evaluatePixel(sample) {
         },
         body: JSON.stringify(payload)
     });
-
     if (!imageResponse.ok) {
         const error = await imageResponse.text();
         console.error('❌ Error en la API de Sentinel-Hub (Highlight):', error);
         throw new Error(`Error en la imagen Highlight para ${date}: ${error}`);
     }
-
     const buffer = await imageResponse.arrayBuffer();
     const base64 = Buffer.from(buffer).toString('base64');
-
     return {
         url: `data:image/png;base64,${base64}`,
         usedDate: date,
@@ -1516,20 +1435,17 @@ app.post('/api/sentinel2highlight', async (req, res) => {
     if (!coordinates || !date) {
         return res.status(400).json({ error: 'Faltan parámetros: coordinates y date' });
     }
-
     try {
         // Calcular el bbox del polígono
         const bbox = polygonToBbox(coordinates);
         if (!bbox) {
             throw new Error('No se pudo calcular el bounding box del polígono.');
         }
-
         const result = await fetchSentinelImageHighlight({
             geometry: coordinates,
             date: date,
             bbox: bbox // ✅ Pasamos el bbox para el cálculo del área
         });
-
         res.json(result);
     } catch (error) {
         console.error('❌ Error en /sentinel2highlight:', error.message);
@@ -1540,11 +1456,9 @@ app.post('/api/sentinel2highlight', async (req, res) => {
     }
 });
 
-
 // ==============================================
 // ✅ FUNCIÓN CORREGIDA FINAL: Obtiene el valor de retrodispersión promedio de Sentinel-1
 // ==============================================
-
 /**
  * Obtiene el valor de retrodispersión promedio de Sentinel-1 (banda VH)
  * para una fecha y geometría específicas.
@@ -1563,6 +1477,9 @@ const getSentinel1Biomass = async ({ geometry, date }) => {
         }
         const areaInSquareMeters = calculatePolygonArea(bbox);
         const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10); // 10m de resolución
+
+        // 🔹 REGISTRO DE PU
+        logProcessingUnits(sizeInPixels, sizeInPixels, 1, "S1-Biomass-Average");
 
         const payload = {
             input: {
@@ -1603,18 +1520,14 @@ function evaluatePixel(samples) {
   if (samples.dataMask === 0) {
     return [0];
   }
-  
   const vh_linear = samples.VH;
   const vh_db = 10 * Math.log10(vh_linear);
-
   const minDb = -20;
   const maxDb = 5;
   const mappedValue = Math.round((vh_db - minDb) / (maxDb - minDb) * 65535);
-
   return [mappedValue];
 }`
         };
-
         const response = await fetch('https://services.sentinel-hub.com/api/v1/process', {
             method: 'POST',
             headers: {
@@ -1623,20 +1536,16 @@ function evaluatePixel(samples) {
             },
             body: JSON.stringify(payload)
         });
-
         if (!response.ok) {
             const error = await response.text();
             throw new Error(`Error en la API de Sentinel-Hub: ${error}`);
         }
-
         const buffer = await response.arrayBuffer();
         const uint16Array = new Uint16Array(buffer); // ✅ CAMBIO A Uint16Array
-        
         let sum = 0;
         let count = 0;
         const minDb = -20;
         const maxDb = 5;
-        
         for (let i = 0; i < uint16Array.length; i++) {
             const value = uint16Array[i];
             if (value > 0) { // ✅ Verificamos que no sea el valor de fondo
@@ -1646,15 +1555,12 @@ function evaluatePixel(samples) {
                 count++;
             }
         }
-        
         const avgBiomassProxy = count > 0 ? sum / count : null;
-        
         return {
             avgBiomassProxy: avgBiomassProxy,
             totalPixels: uint16Array.length,
             validPixels: count
         };
-
     } catch (error) {
         console.error('❌ Error en getSentinel1Biomass:', error.message);
         throw error;
@@ -1664,7 +1570,6 @@ function evaluatePixel(samples) {
 // ==============================================
 // ✅ ENDPOINT FINAL: /api/get-s1-averages
 // ==============================================
-
 app.post('/api/get-s1-averages', async (req, res) => {
     const { coordinates, dates } = req.body;
     if (!coordinates || !dates || dates.length < 2) {
@@ -1675,7 +1580,6 @@ app.post('/api/get-s1-averages', async (req, res) => {
             getSentinel1Biomass({ geometry: coordinates, date: dates[0] }),
             getSentinel1Biomass({ geometry: coordinates, date: dates[1] })
         ]);
-
         res.json({
             date1: dates[0],
             avgBiomass1: avg1,
@@ -1705,8 +1609,6 @@ app.post('/api/sentinel1radar', async (req, res) => {
     }
 });
 
-
 app.listen(port, '0.0.0.0', () => {
     console.log(`✅ Backend listo en http://localhost:${port}`);
 });
-
