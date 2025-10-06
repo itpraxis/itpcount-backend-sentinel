@@ -26,7 +26,8 @@ async function logProcessingUnits(width, height, bands, endpointName = "Process 
 
     // 1. Imprimir en consola (siempre visible en Render)
     console.log('📊 [PU Estimadas]', logData);
-
+	
+	/*
     // 2. Enviar a Google Sheet
     const SHEET_URL = 'https://script.google.com/macros/s/AKfycbxCgdiQmDnpis92rS7iIK0H_F_PwJ0SY9Y3NnueRgbtb0yKMvC9IGHIXpubgJUc4IieqA/exec';
     
@@ -46,6 +47,7 @@ async function logProcessingUnits(width, height, bands, endpointName = "Process 
     } catch (err) {
         console.error('⚠️ Excepción al enviar a Google Sheet:', err.message);
     }
+	*/
 }
 
 const express = require('express');
@@ -312,7 +314,7 @@ const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) 
     const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10); // 10m de resolución
 
     // 🔹 REGISTRO DE PU
-    await logProcessingUnits(sizeInPixels, sizeInPixels, 1, "NDVI");
+    logProcessingUnits(sizeInPixels, sizeInPixels, 1, "NDVI");
 
     const payload = {
         input: {
@@ -395,7 +397,7 @@ const fetchSentinelImageTC = async ({ geometry, date, geometryType = 'Polygon' }
     const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10); // 10m de resolución
 
     // 🔹 REGISTRO DE PU
-    await logProcessingUnits(sizeInPixels, sizeInPixels, 3, "TrueColor");
+    logProcessingUnits(sizeInPixels, sizeInPixels, 3, "TrueColor");
 
     const payload = {
         input: {
@@ -595,7 +597,7 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
         finalPolarization = pol.primary;
 
         // 🔹 REGISTRO DE PU
-        await logProcessingUnits(finalWidth, finalHeight, pol.bands, `Sentinel1Radar (${pol.primary})`);
+        logProcessingUnits(finalWidth, finalHeight, pol.bands, `Sentinel1Radar (${pol.primary})`);
 
         const tryRequest = async () => {
             const evalscript = getClassificationEvalscript(finalPolarization); 
@@ -757,7 +759,7 @@ const fetchSentinel1Classification = async ({ geometry, date }) => {
         const finalHeight = Math.max(sizeInPixels, 512);
 
         // 🔹 REGISTRO DE PU
-        await logProcessingUnits(finalWidth, finalHeight, 1, "Sentinel1-Classification-5Clases");
+        logProcessingUnits(finalWidth, finalHeight, 1, "Sentinel1-Classification-5Clases");
 
         // Búsqueda en el Catálogo (Mismo proceso que el original)
         const fromDate = new Date(date);
@@ -908,7 +910,7 @@ const getNdviAverage2 = async ({ geometry, date }) => {
         const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10); // 10m de resolución
 
         // 🔹 REGISTRO DE PU
-        await logProcessingUnits(sizeInPixels, sizeInPixels, 1, "NDVI-Average");
+        logProcessingUnits(sizeInPixels, sizeInPixels, 1, "NDVI-Average");
 
         const payload = {
             input: {
@@ -1346,7 +1348,7 @@ const fetchSentinelImageHighlight = async ({ geometry, date, bbox }) => {
     const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, targetResolutionInMeters);
 
     // 🔹 REGISTRO DE PU
-    await logProcessingUnits(sizeInPixels, sizeInPixels, 4, "Highlight");
+    logProcessingUnits(sizeInPixels, sizeInPixels, 4, "Highlight");
 
     const payload = {
         input: {
@@ -1488,7 +1490,7 @@ const getSentinel1Biomass = async ({ geometry, date }) => {
         const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10); // 10m de resolución
 
         // 🔹 REGISTRO DE PU
-        await logProcessingUnits(sizeInPixels, sizeInPixels, 1, "S1-Biomass-Average");
+        logProcessingUnits(sizeInPixels, sizeInPixels, 1, "S1-Biomass-Average");
 
         const payload = {
             input: {
