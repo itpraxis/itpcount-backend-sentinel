@@ -336,7 +336,9 @@ const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) 
             upsampling: "NEAREST",
             downsampling: "NEAREST",
             bands: 1,
-            sampleType: "UINT8" // ⬅️ CORRECCIÓN: Cambiado de AUTO a UINT8 para imágenes
+            sampleType: "UINT8", // ⬅️ CORRECCIÓN: Cambiado de AUTO a UINT8 para imágenes
+            // ✅ CORRECCIÓN CLAVE: Forzar proyección WGS84
+            crs: "http://www.opengis.net/def/crs/OGC/1.3/CRS84"			
         },
         evalscript: `
             //VERSION=3
@@ -417,7 +419,9 @@ const fetchSentinelImageTC = async ({ geometry, date, geometryType = 'Polygon' }
         },
         output: {
             width: sizeInPixels,
-            height: sizeInPixels
+            height: sizeInPixels,
+            // ✅ CORRECCIÓN CLAVE: Forzar proyección WGS84
+            crs: "http://www.opengis.net/def/crs/OGC/1.3/CRS84"			
         },
         evalscript: `//VERSION=3
 function setup() {
@@ -630,7 +634,9 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
                     height: finalHeight,
                     format: "image/png",
                     sampleType: "UINT8",
-                    bands: outputBands 
+                    bands: outputBands ,
+					// ✅ CORRECCIÓN CLAVE: Forzar proyección WGS84
+					crs: "http://www.opengis.net/def/crs/OGC/1.3/CRS84"
                 },
                 evalscript: evalscript
             };
@@ -836,7 +842,9 @@ const fetchSentinel1Classification = async ({ geometry, date }) => {
                     height: finalHeight,
                     format: "image/png",
                     sampleType: "UINT8",
-                    bands: outputBands 
+                    bands: outputBands,
+					// ✅ CORRECCIÓN CLAVE: Forzar proyección WGS84
+					crs: "http://www.opengis.net/def/crs/OGC/1.3/CRS84"
                 },
                 evalscript: evalscript
             };
@@ -936,7 +944,9 @@ const getNdviAverage2 = async ({ geometry, date }) => {
             output: {
                 width: sizeInPixels, // ✅ Tamaño adaptativo
                 height: sizeInPixels, // ✅ Tamaño adaptativo
-                format: "image/png"
+                format: "image/png",
+				// ✅ CORRECCIÓN CLAVE: Forzar proyección WGS84
+				crs: "http://www.opengis.net/def/crs/OGC/1.3/CRS84"
             },
             evalscript: `//VERSION=3
 function setup() {
@@ -1379,7 +1389,9 @@ const fetchSentinelImageHighlight = async ({ geometry, date, bbox }) => {
             upsampling: "BICUBIC", // Mejor para ampliar
             downsampling: "BICUBIC", // Mejor para reducir
             bands: 4, // 3 bandas de color + 1 de máscara (alpha)
-            sampleType: "UINT8"
+            sampleType: "UINT8",
+            // ✅ CORRECCIÓN CLAVE: Forzar proyección WGS84
+            crs: "http://www.opengis.net/def/crs/OGC/1.3/CRS84"
         },
         evalscript: `
 //VERSION=3
@@ -1518,7 +1530,9 @@ const getSentinel1Biomass = async ({ geometry, date }) => {
                 width: sizeInPixels,
                 height: sizeInPixels,
                 format: "image/tiff",
-                sampleType: "UINT16" // ✅ CAMBIO A UINT16
+                sampleType: "UINT16", // ✅ CAMBIO A UINT16
+				// ✅ CORRECCIÓN CLAVE: Forzar proyección WGS84
+				crs: "http://www.opengis.net/def/crs/OGC/1.3/CRS84"
             },
             evalscript: `//VERSION=3
 function setup() {
