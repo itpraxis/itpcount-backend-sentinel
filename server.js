@@ -312,7 +312,7 @@ const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) 
     const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10); // 10m de resolución
 
     // 🔹 REGISTRO DE PU
-    logProcessingUnits(sizeInPixels, sizeInPixels, 1, "NDVI");
+    await logProcessingUnits(sizeInPixels, sizeInPixels, 1, "NDVI");
 
     const payload = {
         input: {
@@ -395,7 +395,7 @@ const fetchSentinelImageTC = async ({ geometry, date, geometryType = 'Polygon' }
     const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10); // 10m de resolución
 
     // 🔹 REGISTRO DE PU
-    logProcessingUnits(sizeInPixels, sizeInPixels, 3, "TrueColor");
+    await logProcessingUnits(sizeInPixels, sizeInPixels, 3, "TrueColor");
 
     const payload = {
         input: {
@@ -595,7 +595,7 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
         finalPolarization = pol.primary;
 
         // 🔹 REGISTRO DE PU
-        logProcessingUnits(finalWidth, finalHeight, pol.bands, `Sentinel1Radar (${pol.primary})`);
+        await logProcessingUnits(finalWidth, finalHeight, pol.bands, `Sentinel1Radar (${pol.primary})`);
 
         const tryRequest = async () => {
             const evalscript = getClassificationEvalscript(finalPolarization); 
@@ -757,7 +757,7 @@ const fetchSentinel1Classification = async ({ geometry, date }) => {
         const finalHeight = Math.max(sizeInPixels, 512);
 
         // 🔹 REGISTRO DE PU
-        logProcessingUnits(finalWidth, finalHeight, 1, "Sentinel1-Classification-5Clases");
+        await logProcessingUnits(finalWidth, finalHeight, 1, "Sentinel1-Classification-5Clases");
 
         // Búsqueda en el Catálogo (Mismo proceso que el original)
         const fromDate = new Date(date);
@@ -908,7 +908,7 @@ const getNdviAverage2 = async ({ geometry, date }) => {
         const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10); // 10m de resolución
 
         // 🔹 REGISTRO DE PU
-        logProcessingUnits(sizeInPixels, sizeInPixels, 1, "NDVI-Average");
+        await logProcessingUnits(sizeInPixels, sizeInPixels, 1, "NDVI-Average");
 
         const payload = {
             input: {
@@ -1346,7 +1346,7 @@ const fetchSentinelImageHighlight = async ({ geometry, date, bbox }) => {
     const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, targetResolutionInMeters);
 
     // 🔹 REGISTRO DE PU
-    logProcessingUnits(sizeInPixels, sizeInPixels, 4, "Highlight");
+    await logProcessingUnits(sizeInPixels, sizeInPixels, 4, "Highlight");
 
     const payload = {
         input: {
@@ -1488,7 +1488,7 @@ const getSentinel1Biomass = async ({ geometry, date }) => {
         const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10); // 10m de resolución
 
         // 🔹 REGISTRO DE PU
-        logProcessingUnits(sizeInPixels, sizeInPixels, 1, "S1-Biomass-Average");
+        await logProcessingUnits(sizeInPixels, sizeInPixels, 1, "S1-Biomass-Average");
 
         const payload = {
             input: {
