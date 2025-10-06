@@ -20,22 +20,31 @@ async function logProcessingUnits(width, height, bands, endpointName = "Process 
         width,
         height,
         bands,
-        pu
+        pu,
+        timestamp: new Date().toISOString()
     };
 
-    // Imprimir en consola (opcional, para debugging)
-    console.log(`📊 [PU Estimadas] ${endpointName} | ${width}x${height} | Bandas: ${bands} | PU: ${pu}`);
+    // 1. Imprimir en consola (siempre visible en Render)
+    console.log('📊 [PU Estimadas]', logData);
 
-    // Enviar a Google Sheet
+    // 2. Enviar a Google Sheet
     const SHEET_URL = 'https://script.google.com/macros/s/AKfycbxCgdiQmDnpis92rS7iIK0H_F_PwJ0SY9Y3NnueRgbtb0yKMvC9IGHIXpubgJUc4IieqA/exec';
+    
     try {
-        await fetch(SHEET_URL, {
+        const response = await fetch(SHEET_URL, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(logData)
         });
+
+        // 3. Log del resultado de la solicitud
+        if (response.ok) {
+            console.log('✅ Log enviado correctamente a Google Sheet');
+        } else {
+            console.error('❌ Error al enviar a Google Sheet:', response.status, await response.text());
+        }
     } catch (err) {
-        console.error('⚠️ No se pudo enviar el log a Google Sheet:', err.message);
+        console.error('⚠️ Excepción al enviar a Google Sheet:', err.message);
     }
 }
 
