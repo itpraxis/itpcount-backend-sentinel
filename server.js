@@ -1065,6 +1065,7 @@ app.post('/api/get-valid-dates1', async (req, res) => {
 });
 
 app.post('/api/get-valid-dates', async (req, res) => {
+	console.log('🔑 /api/get-valid-dates');
 	console.log('🕒 Inicio de solicitud /get-valid-dates');
     const { coordinates } = req.body;
     if (!coordinates) {
@@ -1103,6 +1104,7 @@ app.post('/api/get-valid-dates', async (req, res) => {
 // =============================================
 app.post('/api/get-valid-dates-s1', async (req, res) => {
     // El frontend enviará las coordenadas del polígono
+	console.log('🔑 /api/get-valid-dates-s1');
 	console.log('🕒 Inicio de solicitud /get-valid-dates-s1');
     const { coordinates } = req.body; 
     if (!coordinates) {
