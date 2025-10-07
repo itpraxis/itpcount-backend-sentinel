@@ -64,44 +64,8 @@ app.use(cors({
 app.use(express.json());
 const port = process.env.PORT || 3001;
 
-
-// Función auxiliar para convertir polígono a bbox con buffer del 5%
-const polygonToBbox = (coordinates) => {
-    if (!coordinates || coordinates.length === 0 || !Array.isArray(coordinates[0])) {
-        return null;
-    }
-    const polygonCoords = coordinates[0];
-    if (!Array.isArray(polygonCoords)) {
-        return null;
-    }
-    let minLon = Infinity, minLat = Infinity, maxLon = -Infinity, maxLat = -Infinity;
-    polygonCoords.forEach(coord => {
-        if (Array.isArray(coord) && coord.length >= 2) {
-            const [lon, lat] = coord;
-            minLon = Math.min(minLon, lon);
-            minLat = Math.min(minLat, lat);
-            maxLon = Math.max(maxLon, lon);
-            maxLat = Math.max(maxLat, lat);
-        }
-    });
-    if (minLon === Infinity) {
-        return null;
-    }
-
-    // ✅ Añadir buffer del 5%
-    const bufferLon = (maxLon - minLon) * 0.05;
-    const bufferLat = (maxLat - minLat) * 0.05;
-    return [
-        minLon - bufferLon,
-        minLat - bufferLat,
-        maxLon + bufferLon,
-        maxLat + bufferLat
-    ];
-};
-
-
 // Función auxiliar para convertir polígono a bbox
-const polygonToBbox_Old = (coordinates) => {
+const polygonToBbox = (coordinates) => {
     if (!coordinates || coordinates.length === 0 || !Array.isArray(coordinates[0])) {
         return null;
     }
