@@ -19,7 +19,8 @@ app.use(cors({
 app.use(express.json());
 
 // const port = process.env.PORT || 3001;
-const port = process.env.PORT; // Render siempre define esta variable
+// const port = process.env.PORT; // Render siempre define esta variable
+const port = process.env.PORT || 10000; // ✅ Usa 10000 como fallback en Render
 /*  */
 
 // ==============================================
