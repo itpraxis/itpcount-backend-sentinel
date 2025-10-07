@@ -183,7 +183,7 @@ const getAvailableDates = async (bbox, maxCloudCoverage) => {
 
 /**
  * Consulta el catálogo de Sentinel-1 para obtener fechas disponibles
- * en una región durante los últimos 18 meses.
+ * en una región durante los últimos 12 meses.
  * @param {object} options.geometry Coordenadas GeoJSON del polígono.
  * @returns {Array<string>} Lista de fechas únicas en formato 'YYYY-MM-DD', ordenadas descendentemente.
  */
@@ -195,7 +195,7 @@ const getSentinel1Dates = async ({ geometry }) => {
     }
     const today = new Date();
     const eighteenMonthsAgo = new Date();
-    eighteenMonthsAgo.setMonth(today.getMonth() - 18);
+    eighteenMonthsAgo.setMonth(today.getMonth() - 12);
     const datetimeRange = `${eighteenMonthsAgo.toISOString()}/${today.toISOString()}`;
     const catalogUrl = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search';
     // 🚩 CLAVE DE LA CORRECCIÓN: Definimos el payload base que se usará en TODAS las solicitudes POST.
@@ -1065,6 +1065,7 @@ app.post('/api/get-valid-dates1', async (req, res) => {
 });
 
 app.post('/api/get-valid-dates', async (req, res) => {
+	console.log('🕒 Inicio de solicitud /get-valid-dates');
     const { coordinates } = req.body;
     if (!coordinates) {
         return res.status(400).json({ error: 'Faltan parámetros requeridos: coordinates' });
@@ -1074,6 +1075,7 @@ app.post('/api/get-valid-dates', async (req, res) => {
         return res.status(400).json({ error: 'Formato de coordenadas de polígono inválido.' });
     }
     try {
+		const start = Date.now();
         let availableDates = await getAvailableDates(bbox, 50);
         if (availableDates.length === 0) {
             availableDates = await getAvailableDates(bbox, 100);
@@ -1081,6 +1083,8 @@ app.post('/api/get-valid-dates', async (req, res) => {
         if (availableDates.length === 0) {
             return res.json({ hasCoverage: false, message: "No se encontraron imágenes para esta ubicación en el rango de fechas." });
         }
+        const duration = Date.now() - start;
+		console.log(`✅ /get-valid-dates completado en ${duration}ms. Fechas encontradas: ${availableDates.length}`);
         res.json({
             hasCoverage: true,
             totalDates: availableDates.length,
@@ -1093,17 +1097,22 @@ app.post('/api/get-valid-dates', async (req, res) => {
     }
 });
 
+
 // =============================================
 // ✅ NUEVO ENDPOINT: /api/get-valid-dates-s1 (Sentinel-1)
 // =============================================
 app.post('/api/get-valid-dates-s1', async (req, res) => {
     // El frontend enviará las coordenadas del polígono
+	console.log('🕒 Inicio de solicitud /get-valid-dates-s1');
     const { coordinates } = req.body; 
     if (!coordinates) {
         return res.status(400).json({ error: 'Faltan parámetros: coordinates.' });
     }
     try {
+		const start = Date.now();
         const dates = await getSentinel1Dates({ geometry: coordinates });
+        const duration = Date.now() - start;
+		console.log(`✅ /get-valid-dates-s1 completado en ${duration}ms. Fechas encontradas: ${dates.length}`);
         res.json({ dates });
     } catch (error) {
         console.error('❌ Error en el endpoint /api/get-valid-dates-s1:', error.message);
