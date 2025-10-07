@@ -1,7 +1,7 @@
 // server.js (versión con monitoreo de Processing Units - PU y envío a Google Sheet)
 require('dotenv').config();
-console.log('🔑 CLIENT_ID cargado:', process.env.CLIENT_ID ? '✅ Sí' : '❌ No');
-console.log('🔐 CLIENT_SECRET cargado:', process.env.CLIENT_SECRET ? '✅ Sí' : '❌ No');
+console.log('🔑 xCLIENT_ID cargado:', process.env.CLIENT_ID ? '✅ Sí' : '❌ No');
+console.log('🔐 xCLIENT_SECRET cargado:', process.env.CLIENT_SECRET ? '✅ Sí' : '❌ No');
 
 /*  */
 const express = require('express');
@@ -1068,7 +1068,7 @@ app.post('/api/get-valid-dates1', async (req, res) => {
 
 app.post('/api/get-valid-dates', async (req, res) => {
 	console.log('🔑 /api/get-valid-dates');
-	console.warn('🕒 Inicio de solicitud /get-valid-dates');
+	console.error('🕒 Inicio de solicitud /get-valid-dates');
     const { coordinates } = req.body;
     if (!coordinates) {
         return res.status(400).json({ error: 'Faltan parámetros requeridos: coordinates' });
@@ -1087,7 +1087,7 @@ app.post('/api/get-valid-dates', async (req, res) => {
             return res.json({ hasCoverage: false, message: "No se encontraron imágenes para esta ubicación en el rango de fechas." });
         }
         const duration = Date.now() - start;
-		console.warn(`✅ /get-valid-dates completado en ${duration}ms. Fechas encontradas: ${availableDates.length}`);
+		console.error(`✅ /get-valid-dates completado en ${duration}ms. Fechas encontradas: ${availableDates.length}`);
         res.json({
             hasCoverage: true,
             totalDates: availableDates.length,
