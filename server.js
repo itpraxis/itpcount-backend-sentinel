@@ -1066,7 +1066,7 @@ app.post('/api/get-valid-dates1', async (req, res) => {
 
 app.post('/api/get-valid-dates', async (req, res) => {
 	console.log('🔑 /api/get-valid-dates');
-	console.log('🕒 Inicio de solicitud /get-valid-dates');
+	console.warn('🕒 Inicio de solicitud /get-valid-dates');
     const { coordinates } = req.body;
     if (!coordinates) {
         return res.status(400).json({ error: 'Faltan parámetros requeridos: coordinates' });
@@ -1085,7 +1085,7 @@ app.post('/api/get-valid-dates', async (req, res) => {
             return res.json({ hasCoverage: false, message: "No se encontraron imágenes para esta ubicación en el rango de fechas." });
         }
         const duration = Date.now() - start;
-		console.log(`✅ /get-valid-dates completado en ${duration}ms. Fechas encontradas: ${availableDates.length}`);
+		console.warn(`✅ /get-valid-dates completado en ${duration}ms. Fechas encontradas: ${availableDates.length}`);
         res.json({
             hasCoverage: true,
             totalDates: availableDates.length,
@@ -1105,7 +1105,7 @@ app.post('/api/get-valid-dates', async (req, res) => {
 app.post('/api/get-valid-dates-s1', async (req, res) => {
     // El frontend enviará las coordenadas del polígono
 	console.log('🔑 /api/get-valid-dates-s1');
-	console.log('🕒 Inicio de solicitud /get-valid-dates-s1');
+	console.warn('🕒 Inicio de solicitud /get-valid-dates-s1');
     const { coordinates } = req.body; 
     if (!coordinates) {
         return res.status(400).json({ error: 'Faltan parámetros: coordinates.' });
@@ -1114,7 +1114,7 @@ app.post('/api/get-valid-dates-s1', async (req, res) => {
 		const start = Date.now();
         const dates = await getSentinel1Dates({ geometry: coordinates });
         const duration = Date.now() - start;
-		console.log(`✅ /get-valid-dates-s1 completado en ${duration}ms. Fechas encontradas: ${dates.length}`);
+		console.warn(`✅ /get-valid-dates-s1 completado en ${duration}ms. Fechas encontradas: ${dates.length}`);
         res.json({ dates });
     } catch (error) {
         console.error('❌ Error en el endpoint /api/get-valid-dates-s1:', error.message);
