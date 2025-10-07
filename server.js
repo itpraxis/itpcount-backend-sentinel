@@ -3,6 +3,24 @@ require('dotenv').config();
 console.log('🔑 CLIENT_ID cargado:', process.env.CLIENT_ID ? '✅ Sí' : '❌ No');
 console.log('🔐 CLIENT_SECRET cargado:', process.env.CLIENT_SECRET ? '✅ Sí' : '❌ No');
 
+/*  */
+const express = require('express');
+const cors = require('cors');
+const app = express();
+
+// ✅ Configuración CORS mejorada 
+// ✅ CORRECCIÓN 1: Middleware CORS al inicio ABSOLUTO y SIN restringir métodos
+app.use(cors({
+  origin: ['https://itpraxis.cl', 'https://www.itpraxis.cl'],
+  credentials: true
+  // ⚠️ NO se especifica 'methods' ni 'allowedHeaders' → cors() lo maneja automáticamente
+}));
+
+app.use(express.json());
+
+const port = process.env.PORT || 3001;
+/*  */
+
 // ==============================================
 // ✅ NUEVA FUNCIÓN: Calcula y envía el consumo de PU a Google Sheets
 // ==============================================
@@ -49,20 +67,6 @@ async function logProcessingUnits(width, height, bands, endpointName = "Process 
     }
 	*/
 }
-
-const express = require('express');
-const cors = require('cors');
-const app = express();
-
-// ✅ Configuración CORS mejorada (sin espacios al final)
-app.use(cors({
-  origin: ['https://itpraxis.cl', 'https://www.itpraxis.cl'], // ✅ ESPACIOS ELIMINADOS
-  methods: ['POST', 'GET'],
-  allowedHeaders: ['Content-Type'],
-  credentials: true
-}));
-app.use(express.json());
-const port = process.env.PORT || 3001;
 
 // Función auxiliar para convertir polígono a bbox
 const polygonToBbox = (coordinates) => {
@@ -1634,6 +1638,18 @@ app.post('/api/sentinel1radar', async (req, res) => {
     }
 });
 
+/*  */
+// Al final del archivo, justo antes de app.listen, agregamos un manejador global de errores
+// para asegurar que incluso en fallos internos se respeten los headers CORS (aunque ya están
+// cubiertos por el middleware inicial, esto evita que Express responda con HTML sin CORS).
+
+app.use((err, req, res, next) => {
+  console.error('❌ Error no capturado:', err);
+  res.status(500).json({ error: 'Error interno del servidor' });
+});
+
 app.listen(port, '0.0.0.0', () => {
     console.log(`✅ Backend listo en http://localhost:${port}`);
 });
+/*  */
+
