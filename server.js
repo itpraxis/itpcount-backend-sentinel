@@ -397,7 +397,9 @@ const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) 
     return {
         url: `data:image/png;base64,${base64}`,
         usedDate: date,
-        bbox: bbox // ✅ Usamos el bbox calculado
+        bbox: bbox, // ✅ Usamos el bbox calculado
+		width: sizeInPixels,   // <-- Añade esta línea
+		height: sizeInPixels   // <-- Añade esta línea		
     };
 };
 /**
@@ -490,7 +492,9 @@ function evaluatePixel(sample) {
     return {
         url: `data:image/png;base64,${base64}`,
         usedDate: date,
-        bbox: bbox
+        bbox: bbox,
+		width: sizeInPixels,   // <-- Añade esta línea
+		height: sizeInPixels   // <-- Añade esta línea				
     };
 };
 // ==============================================
@@ -1528,7 +1532,9 @@ function evaluatePixel(sample) {
     return {
         url: `data:image/png;base64,${base64}`,
         usedDate: date,
-        bbox: bbox
+        bbox: bbox,
+		width: sizeInPixels,   // <-- Añade esta línea
+		height: sizeInPixels   // <-- Añade esta línea		
     };
 };
 // Endpoint para el frontend
