@@ -398,8 +398,8 @@ const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) 
         url: `data:image/png;base64,${base64}`,
         usedDate: date,
         bbox: bbox, // ✅ Usamos el bbox calculado
-		width: sizeInPixels,   // <-- Añade esta línea
-		height: sizeInPixels   // <-- Añade esta línea		
+		width: width,   // <-- Añade esta línea
+		height: height   // <-- Añade esta línea		
     };
 };
 /**
@@ -493,8 +493,8 @@ function evaluatePixel(sample) {
         url: `data:image/png;base64,${base64}`,
         usedDate: date,
         bbox: bbox,
-		width: sizeInPixels,   // <-- Añade esta línea
-		height: sizeInPixels   // <-- Añade esta línea				
+		width: width,   // <-- Añade esta línea
+		height: height   // <-- Añade esta línea				
     };
 };
 // ==============================================
@@ -716,8 +716,8 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
             sourceTile: tileId,
             status: classificationStatus,
 			bbox: bbox,
-			width: finalWidth,     // <-- Añadido
-			height: finalHeight    // <-- Añadido
+			width: width,     // <-- Añadido
+			height: height    // <-- Añadido
         };
     } catch (error) {
         console.error('❌ Error en la imagen Sentinel-1 (Final):', error.message);
@@ -937,8 +937,8 @@ const fetchSentinel1Classification = async ({ geometry, date }) => {
             sourceTile: tileId,
             status: classificationStatus,
             bbox: bbox,
-			width: finalWidth,     // <-- Añadido
-			height: finalHeight    // <-- Añadido			
+			width: width,     // <-- Añadido
+			height: height    // <-- Añadido			
         };
     } catch (error) {
         console.error('❌ Error en la imagen Sentinel-1 (Clasificación 5-Clases):', error.message);
@@ -1537,8 +1537,8 @@ function evaluatePixel(sample) {
         url: `data:image/png;base64,${base64}`,
         usedDate: date,
         bbox: bbox,
-		width: sizeInPixels,   // <-- Añade esta línea
-		height: sizeInPixels   // <-- Añade esta línea		
+		width: width,   // <-- Añade esta línea
+		height: height   // <-- Añade esta línea		
     };
 };
 // Endpoint para el frontend
