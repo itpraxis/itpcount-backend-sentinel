@@ -2,26 +2,21 @@
 require('dotenv').config();
 console.log('🔑 xCLIENT_ID cargado:', process.env.CLIENT_ID ? '✅ Sí' : '❌ No');
 console.log('🔐 xCLIENT_SECRET cargado:', process.env.CLIENT_SECRET ? '✅ Sí' : '❌ No');
-
 const express = require('express');
 const cors = require('cors');
 const app = express();
-
 // ✅ CORRECCIÓN 1: Middleware CORS al inicio ABSOLUTO
 app.use(cors({
   origin: ['https://itpraxis.cl', 'https://www.itpraxis.cl'],
   credentials: true
 }));
-
 // ✅ CORRECCIÓN 2: Middleware de logging global (ANTES de express.json)
 app.use((req, res, next) => {
   console.warn(`📥 Nueva solicitud entrante: ${req.method} ${req.originalUrl}`);
   next();
 });
-
 // ✅ CORRECCIÓN 3: Aumentar límite de JSON y manejar errores de parsing
 app.use(express.json({ limit: '10mb' }));
-
 // Manejo de errores de parsing de JSON
 app.use((error, req, res, next) => {
   if (error instanceof SyntaxError && error.status === 400 && 'body' in error) {
@@ -30,10 +25,8 @@ app.use((error, req, res, next) => {
   }
   next();
 });
-
 const port = process.env.PORT || 10000;
 /*  */
-
 // ==============================================
 // ✅ NUEVA FUNCIÓN: Calcula y envía el consumo de PU a Google Sheets
 // ==============================================
@@ -54,21 +47,17 @@ async function logProcessingUnits(width, height, bands, endpointName = "Process 
         pu,
         timestamp: new Date().toISOString()
     };
-
     // 1. Imprimir en consola (siempre visible en Render)
     console.log('📊 [PU Estimadas]', logData);
-	
 	/*
     // 2. Enviar a Google Sheet
     const SHEET_URL = 'https://script.google.com/macros/s/AKfycbxCgdiQmDnpis92rS7iIK0H_F_PwJ0SY9Y3NnueRgbtb0yKMvC9IGHIXpubgJUc4IieqA/exec';
-    
     try {
         const response = await fetch(SHEET_URL, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(logData)
         });
-
         // 3. Log del resultado de la solicitud
         if (response.ok) {
             console.log('✅ Log enviado correctamente a Google Sheet');
@@ -80,7 +69,6 @@ async function logProcessingUnits(width, height, bands, endpointName = "Process 
     }
 	*/
 }
-
 // Función auxiliar para convertir polígono a bbox
 const polygonToBbox = (coordinates) => {
     if (!coordinates || coordinates.length === 0 || !Array.isArray(coordinates[0])) {
@@ -105,7 +93,6 @@ const polygonToBbox = (coordinates) => {
     }
     return [minLon, minLat, maxLon, maxLat];
 };
-
 // Función auxiliar para obtener fechas cercanas
 const getNearbyDates = (baseDate, days) => {
     const dates = [];
@@ -120,7 +107,6 @@ const getNearbyDates = (baseDate, days) => {
     }
     return dates;
 };
-
 // ==============================================
 // LÓGICA REUTILIZABLE
 // ==============================================
@@ -147,7 +133,6 @@ const getAccessToken = async () => {
     const tokenData = await tokenResponse.json();
     return tokenData.access_token;
 };
-
 const getAvailableDates = async (bbox, maxCloudCoverage) => {
     try {
         const accessToken = await getAccessToken();
@@ -193,7 +178,6 @@ const getAvailableDates = async (bbox, maxCloudCoverage) => {
         return [];
     }
 };
-
 /**
  * Consulta el catálogo de Sentinel-1 para obtener fechas disponibles
  * en una región durante los últimos 12 meses.
@@ -274,11 +258,10 @@ const getSentinel1Dates = async ({ geometry }) => {
     const sortedDates = Array.from(uniqueDates).sort().reverse();
     return sortedDates;
 };
-
 /**
- * ✅ NUEVA: Calcula el área aproximada de un polígono a partir de su bounding box.
+ * ✅ NUEVA: Calcula el área aproximada de un polígono a partir de su bounding box y su relación de aspecto.
  * @param {array} bbox - [minLon, minLat, maxLon, maxLat]
- * @returns {number} Área en metros cuadrados.
+ * @returns {object} Objeto con el área y la relación de aspecto: { area, aspectRatio }
  */
 function calculatePolygonArea(bbox) {
     const [minLon, minLat, maxLon, maxLat] = bbox;
@@ -291,14 +274,18 @@ function calculatePolygonArea(bbox) {
     const deltaLon = (maxLon - minLon) * Math.PI / 180;
     // Área = (R^2) * Δλ * (sin(φ2) - sin(φ1))
     const area = Math.pow(earthRadius, 2) * deltaLon * (Math.sin(lat2Rad) - Math.sin(lat1Rad));
-    return Math.abs(area);
+    // Calcular la relación de aspecto (ancho/altura)
+    const aspectRatio = deltaLon / deltaLat;
+    return {
+        area: Math.abs(area),
+        aspectRatio: aspectRatio
+    };
 }
-
 /**
- * ✅ NUEVA: Calcula el tamaño óptimo de la imagen en píxeles.
+ * ✅ NUEVA: Calcula el tamaño óptimo de la imagen en píxeles, manteniendo la relación de aspecto.
  * @param {number} areaInSquareMeters - Área del polígono en metros cuadrados.
  * @param {number} resolutionInMeters - Resolución deseada en metros por píxel.
- * @returns {number} Tamaño en píxeles (ancho y alto).
+ * @returns {object} Objeto con las dimensiones en píxeles: { width, height }
  */
 function calculateOptimalImageSize(areaInSquareMeters, resolutionInMeters) {
     // Calcular la longitud del lado de un cuadrado con el mismo área
@@ -308,9 +295,11 @@ function calculateOptimalImageSize(areaInSquareMeters, resolutionInMeters) {
     // 🆕 AJUSTE CLAVE: Reducir el tamaño mínimo de 256 a 128 píxeles
     // Esto permite que polígonos muy pequeños se soliciten con una resolución más adecuada
     sizeInPixels = Math.max(128, Math.min(2048, sizeInPixels));
-    return sizeInPixels;
+    return {
+        width: sizeInPixels,
+        height: sizeInPixels
+    };
 }
-
 /**
  * Intenta obtener una imagen de Sentinel-Hub con reintentos.
  * @param {object} params - Parámetros de la solicitud.
@@ -327,12 +316,28 @@ const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) 
     if (!bbox) {
         throw new Error('No se pudo calcular el bounding box.');
     }
-    const areaInSquareMeters = calculatePolygonArea(bbox);
+    const areaResult = calculatePolygonArea(bbox);
+    const areaInSquareMeters = areaResult.area;
+    const aspectRatio = areaResult.aspectRatio;
     const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10); // 10m de resolución
-
+    // Calcular width y height manteniendo la relación de aspecto
+    let width = sizeInPixels.width;
+    let height = sizeInPixels.height;
+    if (aspectRatio > 1) {
+        // Área más ancha que alta → ajustar altura
+        height = Math.round(width / aspectRatio);
+    } else {
+        // Área más alta que ancha → ajustar ancho
+        width = Math.round(height * aspectRatio);
+    }
+    // Asegurar que los valores mínimos sean 128
+    width = Math.max(128, width);
+    height = Math.max(128, height);
+    // Limitar el tamaño máximo
+    width = Math.min(2048, width);
+    height = Math.min(2048, height);
     // 🔹 REGISTRO DE PU
-    // logProcessingUnits(sizeInPixels, sizeInPixels, 1, "NDVI");
-
+    // logProcessingUnits(width, height, 1, "NDVI");
     const payload = {
         input: {
             bounds: geometryType === 'Polygon' ? { geometry: { type: "Polygon", coordinates: geometry } } : { bbox: geometry },
@@ -347,8 +352,8 @@ const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) 
             ]
         },
         output: {
-            width: sizeInPixels, // ✅ Tamaño adaptativo
-            height: sizeInPixels, // ✅ Tamaño adaptativo
+            width: width, // ✅ Tamaño adaptativo
+            height: height, // ✅ Tamaño adaptativo
             format: "image/png",
             upsampling: "NEAREST",
             downsampling: "NEAREST",
@@ -395,7 +400,6 @@ const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) 
         bbox: bbox // ✅ Usamos el bbox calculado
     };
 };
-
 /**
  * Intenta obtener una imagen de Sentinel-Hub con reintentos.
  * @param {object} params - Parámetros de la solicitud.
@@ -412,12 +416,28 @@ const fetchSentinelImageTC = async ({ geometry, date, geometryType = 'Polygon' }
     if (!bbox) {
         throw new Error('No se pudo calcular el bounding box.');
     }
-    const areaInSquareMeters = calculatePolygonArea(bbox);
+    const areaResult = calculatePolygonArea(bbox);
+    const areaInSquareMeters = areaResult.area;
+    const aspectRatio = areaResult.aspectRatio;
     const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10); // 10m de resolución
-
+    // Calcular width y height manteniendo la relación de aspecto
+    let width = sizeInPixels.width;
+    let height = sizeInPixels.height;
+    if (aspectRatio > 1) {
+        // Área más ancha que alta → ajustar altura
+        height = Math.round(width / aspectRatio);
+    } else {
+        // Área más alta que ancha → ajustar ancho
+        width = Math.round(height * aspectRatio);
+    }
+    // Asegurar que los valores mínimos sean 128
+    width = Math.max(128, width);
+    height = Math.max(128, height);
+    // Limitar el tamaño máximo
+    width = Math.min(2048, width);
+    height = Math.min(2048, height);
     // 🔹 REGISTRO DE PU
-    // logProcessingUnits(sizeInPixels, sizeInPixels, 3, "TrueColor");
-
+    // logProcessingUnits(width, height, 3, "TrueColor");
     const payload = {
         input: {
             bounds: geometryType === 'Polygon'
@@ -435,8 +455,8 @@ const fetchSentinelImageTC = async ({ geometry, date, geometryType = 'Polygon' }
             ]
         },
         output: {
-            width: sizeInPixels,
-            height: sizeInPixels,
+            width: width,
+            height: height,
             // ✅ CORRECCIÓN CLAVE: Forzar proyección WGS84
             crs: "http://www.opengis.net/def/crs/OGC/1.3/CRS84"			
         },
@@ -473,7 +493,6 @@ function evaluatePixel(sample) {
         bbox: bbox
     };
 };
-
 // ==============================================
 // FUNCIÓN AUXILIAR: Genera el evalscript para clasificación RGB
 // ==============================================
@@ -539,7 +558,6 @@ function evaluatePixel(samples) {
 }`;
     }
 };
-
 // ==============================================
 // FUNCIÓN PRINCIPAL MODIFICADA (fetchSentinel1Radar) Gemini
 // ==============================================
@@ -555,11 +573,25 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
         throw new Error('No se pudo calcular el bounding box del polígono.');
     }
     try {
-        const areaInSquareMeters = calculatePolygonArea(bbox);
+        const areaResult = calculatePolygonArea(bbox);
+        const areaInSquareMeters = areaResult.area;
+        const aspectRatio = areaResult.aspectRatio;
         const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10);
-        const finalWidth = Math.max(sizeInPixels, 512);
-        const finalHeight = Math.max(sizeInPixels, 512);
-
+        let width = sizeInPixels.width;
+        let height = sizeInPixels.height;
+        if (aspectRatio > 1) {
+            // Área más ancha que alta → ajustar altura
+            height = Math.round(width / aspectRatio);
+        } else {
+            // Área más alta que ancha → ajustar ancho
+            width = Math.round(height * aspectRatio);
+        }
+        // Asegurar que los valores mínimos sean 128
+        width = Math.max(128, width);
+        height = Math.max(128, height);
+        // Limitar el tamaño máximo
+        width = Math.min(2048, width);
+        height = Math.min(2048, height);
         // CLAVE: CÓDIGO DEL CATÁLOGO REINSERTADO
         const fromDate = new Date(date);
         const toDate = new Date(date);
@@ -616,10 +648,8 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
         };
         pol = determinePolarization(tileId);
         finalPolarization = pol.primary;
-
         // 🔹 REGISTRO DE PU
-        // logProcessingUnits(finalWidth, finalHeight, pol.bands, `Sentinel1Radar (${pol.primary})`);
-
+        // logProcessingUnits(width, height, pol.bands, `Sentinel1Radar (${pol.primary})`);
         const tryRequest = async () => {
             const evalscript = getClassificationEvalscript(finalPolarization); 
             const outputBands = pol.bands;
@@ -647,8 +677,8 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
                     }]
                 },
                 output: {
-                    width: finalWidth,
-                    height: finalHeight,
+                    width: width,
+                    height: height,
                     format: "image/png",
                     sampleType: "UINT8",
                     bands: outputBands ,
@@ -688,7 +718,6 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
         throw error;
     }
 };
-
 // ==============================================
 // FUNCIÓN AUXILIAR: Genera el evalscript para CLASIFICACIÓN 5-CLASES
 // ==============================================
@@ -756,7 +785,6 @@ function evaluatePixel(samples) {
   return [classification_class * 50]; 
 }`;
 };
-
 // ==============================================
 // FUNCIÓN PRINCIPAL para CLASIFICACIÓN 5-CLASES
 // ==============================================
@@ -775,15 +803,27 @@ const fetchSentinel1Classification = async ({ geometry, date }) => {
         throw new Error('No se pudo calcular el bounding box del polígono.');
     }
     try {
-        const areaInSquareMeters = calculatePolygonArea(bbox);
-        // Usamos una resolución fija (ej. 10m) para calcular el tamaño óptimo de imagen
+        const areaResult = calculatePolygonArea(bbox);
+        const areaInSquareMeters = areaResult.area;
+        const aspectRatio = areaResult.aspectRatio;
         const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10);
-        const finalWidth = Math.max(sizeInPixels, 512);
-        const finalHeight = Math.max(sizeInPixels, 512);
-
+        let width = sizeInPixels.width;
+        let height = sizeInPixels.height;
+        if (aspectRatio > 1) {
+            // Área más ancha que alta → ajustar altura
+            height = Math.round(width / aspectRatio);
+        } else {
+            // Área más alta que ancha → ajustar ancho
+            width = Math.round(height * aspectRatio);
+        }
+        // Asegurar que los valores mínimos sean 128
+        width = Math.max(128, width);
+        height = Math.max(128, height);
+        // Limitar el tamaño máximo
+        width = Math.min(2048, width);
+        height = Math.min(2048, height);
         // 🔹 REGISTRO DE PU
-        // logProcessingUnits(finalWidth, finalHeight, 1, "Sentinel1-Classification-5Clases");
-
+        // logProcessingUnits(width, height, 1, "Sentinel1-Classification-5Clases");
         // Búsqueda en el Catálogo (Mismo proceso que el original)
         const fromDate = new Date(date);
         const toDate = new Date(date);
@@ -855,8 +895,8 @@ const fetchSentinel1Classification = async ({ geometry, date }) => {
                     }]
                 },
                 output: {
-                    width: finalWidth,
-                    height: finalHeight,
+                    width: width,
+                    height: height,
                     format: "image/png",
                     sampleType: "UINT8",
                     bands: outputBands,
@@ -897,7 +937,6 @@ const fetchSentinel1Classification = async ({ geometry, date }) => {
         throw error;
     }
 };
-
 // ==============================================
 // ✅ NUEVO ENDPOINT: /api/sentinel1classification
 // ==============================================
@@ -914,7 +953,6 @@ app.post('/api/sentinel1classification', async (req, res) => {
         res.status(500).json({ error: error.message });
     }
 });
-
 /**
  * ✅ FUNCIÓN CORREGIDA: Obtiene el valor promedio de NDVI y porcentaje de cobertura vegetal
  * @param {object} params - Parámetros de la solicitud.
@@ -931,12 +969,28 @@ const getNdviAverage2 = async ({ geometry, date }) => {
         if (!bbox) {
             throw new Error('No se pudo calcular el bounding box.');
         }
-        const areaInSquareMeters = calculatePolygonArea(bbox);
+        const areaResult = calculatePolygonArea(bbox);
+        const areaInSquareMeters = areaResult.area;
+        const aspectRatio = areaResult.aspectRatio;
         const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10); // 10m de resolución
-
+        // Calcular width y height manteniendo la relación de aspecto
+        let width = sizeInPixels.width;
+        let height = sizeInPixels.height;
+        if (aspectRatio > 1) {
+            // Área más ancha que alta → ajustar altura
+            height = Math.round(width / aspectRatio);
+        } else {
+            // Área más alta que ancha → ajustar ancho
+            width = Math.round(height * aspectRatio);
+        }
+        // Asegurar que los valores mínimos sean 128
+        width = Math.max(128, width);
+        height = Math.max(128, height);
+        // Limitar el tamaño máximo
+        width = Math.min(2048, width);
+        height = Math.min(2048, height);
         // 🔹 REGISTRO DE PU
-        // logProcessingUnits(sizeInPixels, sizeInPixels, 1, "NDVI-Average");
-
+        // logProcessingUnits(width, height, 1, "NDVI-Average");
         const payload = {
             input: {
                 bounds: {
@@ -959,8 +1013,8 @@ const getNdviAverage2 = async ({ geometry, date }) => {
                 ]
             },
             output: {
-                width: sizeInPixels, // ✅ Tamaño adaptativo
-                height: sizeInPixels, // ✅ Tamaño adaptativo
+                width: width, // ✅ Tamaño adaptativo
+                height: height, // ✅ Tamaño adaptativo
                 format: "image/png",
 				// ✅ CORRECCIÓN CLAVE: Forzar proyección WGS84
 				crs: "http://www.opengis.net/def/crs/OGC/1.3/CRS84"
@@ -1033,7 +1087,6 @@ function evaluatePixel(samples) {
         throw error;
     }
 };
-
 // ==============================================
 // ENDPOINTS DE IMÁGENES CON LÓGICA DE REINTENTO
 // ==============================================
@@ -1053,7 +1106,6 @@ app.post('/api/sentinel2', async (req, res) => {
         });
     }
 });
-
 app.post('/api/get-valid-dates1', async (req, res) => {
     // Coordenadas de prueba para Londres
     const testBbox = [-0.161, 51.488, 0.057, 51.52];
@@ -1076,7 +1128,6 @@ app.post('/api/get-valid-dates1', async (req, res) => {
         res.status(500).json({ error: error.message, suggestion: "Verifica que las coordenadas sean válidas y el área esté en tierra firme." });
     }
 });
-
 app.post('/api/get-valid-dates', async (req, res) => {
 	console.log('🔑 /api/get-valid-dates');
 	console.error('🕒 Inicio de solicitud /get-valid-dates');
@@ -1110,8 +1161,6 @@ app.post('/api/get-valid-dates', async (req, res) => {
         res.status(500).json({ error: error.message, suggestion: "Verifica que las coordenadas sean válidas y el área esté en tierra firme." });
     }
 });
-
-
 // =============================================
 // ✅ NUEVO ENDPOINT: /api/get-valid-dates-s1 (Sentinel-1)
 // =============================================
@@ -1134,7 +1183,6 @@ app.post('/api/get-valid-dates-s1', async (req, res) => {
         res.status(500).json({ error: error.message });
     }
 });
-
 app.post('/api/sentinel2simple', async (req, res) => {
     const { coordinates, date } = req.body;
     if (!coordinates || !date) {
@@ -1151,7 +1199,6 @@ app.post('/api/sentinel2simple', async (req, res) => {
         });
     }
 });
-
 app.post('/api/sentinel2simple2', async (req, res) => {
     const { coordinates, date } = req.body;
     const bbox = polygonToBbox(coordinates);
@@ -1170,7 +1217,6 @@ app.post('/api/sentinel2simple2', async (req, res) => {
         });
     }
 });
-
 // ==============================================
 // ✅ NUEVO ENDPOINT PARA OBTENER LOS PROMEDIOS DE NDVI
 // ==============================================
@@ -1195,7 +1241,6 @@ app.post('/api/get-ndvi-averages', async (req, res) => {
         res.status(500).json({ error: error.message });
     }
 });
-
 // ==============================================
 // ENDPOINTS DE METADATOS CON BBOX
 // ==============================================
@@ -1264,7 +1309,6 @@ function evaluatePixel(sample) { return [1]; }`,
         res.status(500).json({ error: error.message, suggestion: "Verifica que las coordenadas sean válidas y el área esté en tierra firme." });
     }
 });
-
 app.post('/api/catalogo-coverage', async (req, res) => {
     const { coordinates } = req.body;
     if (!coordinates) {
@@ -1322,7 +1366,6 @@ app.post('/api/catalogo-coverage', async (req, res) => {
         });
     }
 });
-
 // ==============================================
 // ✅ NUEVO ENDPOINT PARA PRUEBAS (POSTMAN)
 // ==============================================
@@ -1346,7 +1389,6 @@ app.post('/api/test-ndvi', async (req, res) => {
         });
     }
 });
-
 app.post('/api/sentinel2truecolor', async (req, res) => {
     const { coordinates, date } = req.body;
     if (!coordinates || !date) {
@@ -1363,7 +1405,6 @@ app.post('/api/sentinel2truecolor', async (req, res) => {
         });
     }
 });
-
 // ==============================================
 // ✅ NUEVO ENDPOINT: /api/sentinel2highlight - Highlight Optimized Natural Color (MEJORADO)
 // ==============================================
@@ -1378,16 +1419,27 @@ app.post('/api/sentinel2truecolor', async (req, res) => {
 const fetchSentinelImageHighlight = async ({ geometry, date, bbox }) => {
     const accessToken = await getAccessToken();
     // ✅ NUEVO: Calcular el área aproximada del polígono en metros cuadrados
-    const areaInSquareMeters = calculatePolygonArea(bbox);
-    // ✅ NUEVO: Definir la resolución objetivo en metros por píxel
-    // Sentinel-2 L2A tiene una resolución nativa de 10m para las bandas RGB.
-    const targetResolutionInMeters = 10;
-    // ✅ NUEVO: Calcular el tamaño de la imagen en píxeles basado en el área y la resolución
-    const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, targetResolutionInMeters);
-
+    const areaResult = calculatePolygonArea(bbox);
+    const areaInSquareMeters = areaResult.area;
+    const aspectRatio = areaResult.aspectRatio;
+    const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10);
+    let width = sizeInPixels.width;
+    let height = sizeInPixels.height;
+    if (aspectRatio > 1) {
+        // Área más ancha que alta → ajustar altura
+        height = Math.round(width / aspectRatio);
+    } else {
+        // Área más alta que ancha → ajustar ancho
+        width = Math.round(height * aspectRatio);
+    }
+    // Asegurar que los valores mínimos sean 128
+    width = Math.max(128, width);
+    height = Math.max(128, height);
+    // Limitar el tamaño máximo
+    width = Math.min(2048, width);
+    height = Math.min(2048, height);
     // 🔹 REGISTRO DE PU
-    // logProcessingUnits(sizeInPixels, sizeInPixels, 4, "Highlight");
-
+    // logProcessingUnits(width, height, 4, "Highlight");
     const payload = {
         input: {
             bounds: {
@@ -1411,8 +1463,8 @@ const fetchSentinelImageHighlight = async ({ geometry, date, bbox }) => {
             ]
         },
         output: {
-            width: sizeInPixels,
-            height: sizeInPixels,
+            width: width,
+            height: height,
             format: "image/png",
             upsampling: "BICUBIC", // Mejor para ampliar
             downsampling: "BICUBIC", // Mejor para reducir
@@ -1479,7 +1531,6 @@ function evaluatePixel(sample) {
         bbox: bbox
     };
 };
-
 // Endpoint para el frontend
 app.post('/api/sentinel2highlight', async (req, res) => {
     const { coordinates, date } = req.body;
@@ -1506,7 +1557,6 @@ app.post('/api/sentinel2highlight', async (req, res) => {
         });
     }
 });
-
 // ==============================================
 // ✅ FUNCIÓN CORREGIDA FINAL: Obtiene el valor de retrodispersión promedio de Sentinel-1
 // ==============================================
@@ -1526,12 +1576,28 @@ const getSentinel1Biomass = async ({ geometry, date }) => {
         if (!bbox) {
             throw new Error('No se pudo calcular el bounding box.');
         }
-        const areaInSquareMeters = calculatePolygonArea(bbox);
+        const areaResult = calculatePolygonArea(bbox);
+        const areaInSquareMeters = areaResult.area;
+        const aspectRatio = areaResult.aspectRatio;
         const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10); // 10m de resolución
-
+        // Calcular width y height manteniendo la relación de aspecto
+        let width = sizeInPixels.width;
+        let height = sizeInPixels.height;
+        if (aspectRatio > 1) {
+            // Área más ancha que alta → ajustar altura
+            height = Math.round(width / aspectRatio);
+        } else {
+            // Área más alta que ancha → ajustar ancho
+            width = Math.round(height * aspectRatio);
+        }
+        // Asegurar que los valores mínimos sean 128
+        width = Math.max(128, width);
+        height = Math.max(128, height);
+        // Limitar el tamaño máximo
+        width = Math.min(2048, width);
+        height = Math.min(2048, height);
         // 🔹 REGISTRO DE PU
-        // logProcessingUnits(sizeInPixels, sizeInPixels, 1, "S1-Biomass-Average");
-
+        // logProcessingUnits(width, height, 1, "S1-Biomass-Average");
         const payload = {
             input: {
                 bounds: {
@@ -1555,8 +1621,8 @@ const getSentinel1Biomass = async ({ geometry, date }) => {
                 ]
             },
             output: {
-                width: sizeInPixels,
-                height: sizeInPixels,
+                width: width,
+                height: height,
                 format: "image/tiff",
                 sampleType: "UINT16", // ✅ CAMBIO A UINT16
 				// ✅ CORRECCIÓN CLAVE: Forzar proyección WGS84
@@ -1619,7 +1685,6 @@ function evaluatePixel(samples) {
         throw error;
     }
 };
-
 // ==============================================
 // ✅ ENDPOINT FINAL: /api/get-s1-averages
 // ==============================================
@@ -1644,7 +1709,6 @@ app.post('/api/get-s1-averages', async (req, res) => {
         res.status(500).json({ error: error.message });
     }
 });
-
 // ==============================================
 // ✅ NUEVO ENDPOINT: /api/sentinel1radar
 // ==============================================
@@ -1661,19 +1725,15 @@ app.post('/api/sentinel1radar', async (req, res) => {
         res.status(500).json({ error: error.message });
     }
 });
-
 /*  */
 // Al final del archivo, justo antes de app.listen, agregamos un manejador global de errores
 // para asegurar que incluso en fallos internos se respeten los headers CORS (aunque ya están
 // cubiertos por el middleware inicial, esto evita que Express responda con HTML sin CORS).
-
 app.use((err, req, res, next) => {
   console.error('❌ Error no capturado:', err);
   res.status(500).json({ error: 'Error interno del servidor' });
 });
-
 app.listen(port, '0.0.0.0', () => {
     console.log(`✅ Backend listo en http://localhost:${port}`);
 });
 /*  */
-
