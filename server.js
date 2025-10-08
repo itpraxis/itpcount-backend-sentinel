@@ -3,24 +3,35 @@ require('dotenv').config();
 console.log('🔑 xCLIENT_ID cargado:', process.env.CLIENT_ID ? '✅ Sí' : '❌ No');
 console.log('🔐 xCLIENT_SECRET cargado:', process.env.CLIENT_SECRET ? '✅ Sí' : '❌ No');
 
-/*  */
 const express = require('express');
 const cors = require('cors');
 const app = express();
 
-// ✅ Configuración CORS mejorada 
-// ✅ CORRECCIÓN 1: Middleware CORS al inicio ABSOLUTO y SIN restringir métodos
+// ✅ CORRECCIÓN 1: Middleware CORS al inicio ABSOLUTO
 app.use(cors({
   origin: ['https://itpraxis.cl', 'https://www.itpraxis.cl'],
   credentials: true
-  // ⚠️ NO se especifica 'methods' ni 'allowedHeaders' → cors() lo maneja automáticamente
 }));
 
-app.use(express.json());
+// ✅ CORRECCIÓN 2: Middleware de logging global (ANTES de express.json)
+app.use((req, res, next) => {
+  console.warn(`📥 Nueva solicitud entrante: ${req.method} ${req.originalUrl}`);
+  next();
+});
 
-// const port = process.env.PORT || 3001;
-// const port = process.env.PORT; // Render siempre define esta variable
-const port = process.env.PORT || 10000; // ✅ Usa 10000 como fallback en Render
+// ✅ CORRECCIÓN 3: Aumentar límite de JSON y manejar errores de parsing
+app.use(express.json({ limit: '10mb' }));
+
+// Manejo de errores de parsing de JSON
+app.use((error, req, res, next) => {
+  if (error instanceof SyntaxError && error.status === 400 && 'body' in error) {
+    console.error('❌ Error al parsear el cuerpo de la solicitud:', error.message);
+    return res.status(400).json({ error: 'Cuerpo de la solicitud inválido o demasiado grande.' });
+  }
+  next();
+});
+
+const port = process.env.PORT || 10000;
 /*  */
 
 // ==============================================
