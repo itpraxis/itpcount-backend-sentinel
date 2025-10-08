@@ -715,7 +715,9 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
             polarization: finalPolarization,
             sourceTile: tileId,
             status: classificationStatus,
-            bbox: bbox
+			bbox: bbox,
+			width: finalWidth,     // <-- Añadido
+			height: finalHeight    // <-- Añadido
         };
     } catch (error) {
         console.error('❌ Error en la imagen Sentinel-1 (Final):', error.message);
@@ -934,7 +936,9 @@ const fetchSentinel1Classification = async ({ geometry, date }) => {
             polarization: finalPolarization,
             sourceTile: tileId,
             status: classificationStatus,
-            bbox: bbox
+            bbox: bbox,
+			width: finalWidth,     // <-- Añadido
+			height: finalHeight    // <-- Añadido			
         };
     } catch (error) {
         console.error('❌ Error en la imagen Sentinel-1 (Clasificación 5-Clases):', error.message);
