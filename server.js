@@ -282,22 +282,33 @@ function calculatePolygonArea(bbox) {
     };
 }
 /**
- * ✅ NUEVA: Calcula el tamaño óptimo de la imagen en píxeles, manteniendo la relación de aspecto.
+ * ✅ MODIFICADA: Calcula el tamaño óptimo de la imagen en píxeles, manteniendo la relación de aspecto del polígono.
  * @param {number} areaInSquareMeters - Área del polígono en metros cuadrados.
  * @param {number} resolutionInMeters - Resolución deseada en metros por píxel.
+ * @param {number} aspectRatio - Relación de aspecto del polígono (ancho/altura).
  * @returns {object} Objeto con las dimensiones en píxeles: { width, height }
  */
-function calculateOptimalImageSize(areaInSquareMeters, resolutionInMeters) {
+function calculateOptimalImageSize(areaInSquareMeters, resolutionInMeters, aspectRatio = 1) {
     // Calcular la longitud del lado de un cuadrado con el mismo área
     const sideLengthInMeters = Math.sqrt(areaInSquareMeters);
     // Calcular el número de píxeles necesarios para cubrir ese lado
-    let sizeInPixels = Math.round(sideLengthInMeters / resolutionInMeters);
-    // 🆕 AJUSTE CLAVE: Reducir el tamaño mínimo de 256 a 128 píxeles
-    // Esto permite que polígonos muy pequeños se soliciten con una resolución más adecuada
-    sizeInPixels = Math.max(128, Math.min(2048, sizeInPixels));
+    let baseSizeInPixels = Math.round(sideLengthInMeters / resolutionInMeters);
+    // Asegurar que el tamaño mínimo sea 128 píxeles y máximo 2048
+    baseSizeInPixels = Math.max(128, Math.min(2048, baseSizeInPixels));
+    // Calcular width y height basado en la relación de aspecto
+    let width, height;
+    if (aspectRatio > 1) {
+        // El polígono es más ancho que alto
+        width = Math.round(baseSizeInPixels * Math.sqrt(aspectRatio));
+        height = Math.round(width / aspectRatio);
+    } else {
+        // El polígono es más alto que ancho o es cuadrado
+        height = Math.round(baseSizeInPixels * Math.sqrt(1 / aspectRatio));
+        width = Math.round(height * aspectRatio);
+    }
     return {
-        width: sizeInPixels,
-        height: sizeInPixels
+        width: Math.max(128, Math.min(2048, width)),
+        height: Math.max(128, Math.min(2048, height))
     };
 }
 /**
@@ -319,23 +330,9 @@ const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) 
     const areaResult = calculatePolygonArea(bbox);
     const areaInSquareMeters = areaResult.area;
     const aspectRatio = areaResult.aspectRatio;
-    const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10); // 10m de resolución
-    // Calcular width y height manteniendo la relación de aspecto
-    let width = sizeInPixels.width;
-    let height = sizeInPixels.height;
-    if (aspectRatio > 1) {
-        // Área más ancha que alta → ajustar altura
-        height = Math.round(width / aspectRatio);
-    } else {
-        // Área más alta que ancha → ajustar ancho
-        width = Math.round(height * aspectRatio);
-    }
-    // Asegurar que los valores mínimos sean 128
-    width = Math.max(128, width);
-    height = Math.max(128, height);
-    // Limitar el tamaño máximo
-    width = Math.min(2048, width);
-    height = Math.min(2048, height);
+    const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10, aspectRatio); // 10m de resolución
+    const width = sizeInPixels.width;
+    const height = sizeInPixels.height;
     // 🔹 REGISTRO DE PU
     // logProcessingUnits(width, height, 1, "NDVI");
     const payload = {
@@ -421,23 +418,9 @@ const fetchSentinelImageTC = async ({ geometry, date, geometryType = 'Polygon' }
     const areaResult = calculatePolygonArea(bbox);
     const areaInSquareMeters = areaResult.area;
     const aspectRatio = areaResult.aspectRatio;
-    const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10); // 10m de resolución
-    // Calcular width y height manteniendo la relación de aspecto
-    let width = sizeInPixels.width;
-    let height = sizeInPixels.height;
-    if (aspectRatio > 1) {
-        // Área más ancha que alta → ajustar altura
-        height = Math.round(width / aspectRatio);
-    } else {
-        // Área más alta que ancha → ajustar ancho
-        width = Math.round(height * aspectRatio);
-    }
-    // Asegurar que los valores mínimos sean 128
-    width = Math.max(128, width);
-    height = Math.max(128, height);
-    // Limitar el tamaño máximo
-    width = Math.min(2048, width);
-    height = Math.min(2048, height);
+    const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10, aspectRatio); // 10m de resolución
+    const width = sizeInPixels.width;
+    const height = sizeInPixels.height;
     // 🔹 REGISTRO DE PU
     // logProcessingUnits(width, height, 3, "TrueColor");
     const payload = {
@@ -580,22 +563,9 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
         const areaResult = calculatePolygonArea(bbox);
         const areaInSquareMeters = areaResult.area;
         const aspectRatio = areaResult.aspectRatio;
-        const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10);
-        let width = sizeInPixels.width;
-        let height = sizeInPixels.height;
-        if (aspectRatio > 1) {
-            // Área más ancha que alta → ajustar altura
-            height = Math.round(width / aspectRatio);
-        } else {
-            // Área más alta que ancha → ajustar ancho
-            width = Math.round(height * aspectRatio);
-        }
-        // Asegurar que los valores mínimos sean 128
-        width = Math.max(128, width);
-        height = Math.max(128, height);
-        // Limitar el tamaño máximo
-        width = Math.min(2048, width);
-        height = Math.min(2048, height);
+        const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10, aspectRatio);
+        const width = sizeInPixels.width;
+        const height = sizeInPixels.height;
         // CLAVE: CÓDIGO DEL CATÁLOGO REINSERTADO
         const fromDate = new Date(date);
         const toDate = new Date(date);
@@ -812,22 +782,9 @@ const fetchSentinel1Classification = async ({ geometry, date }) => {
         const areaResult = calculatePolygonArea(bbox);
         const areaInSquareMeters = areaResult.area;
         const aspectRatio = areaResult.aspectRatio;
-        const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10);
-        let width = sizeInPixels.width;
-        let height = sizeInPixels.height;
-        if (aspectRatio > 1) {
-            // Área más ancha que alta → ajustar altura
-            height = Math.round(width / aspectRatio);
-        } else {
-            // Área más alta que ancha → ajustar ancho
-            width = Math.round(height * aspectRatio);
-        }
-        // Asegurar que los valores mínimos sean 128
-        width = Math.max(128, width);
-        height = Math.max(128, height);
-        // Limitar el tamaño máximo
-        width = Math.min(2048, width);
-        height = Math.min(2048, height);
+        const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10, aspectRatio);
+        const width = sizeInPixels.width;
+        const height = sizeInPixels.height;
         // 🔹 REGISTRO DE PU
         // logProcessingUnits(width, height, 1, "Sentinel1-Classification-5Clases");
         // Búsqueda en el Catálogo (Mismo proceso que el original)
@@ -980,23 +937,9 @@ const getNdviAverage2 = async ({ geometry, date }) => {
         const areaResult = calculatePolygonArea(bbox);
         const areaInSquareMeters = areaResult.area;
         const aspectRatio = areaResult.aspectRatio;
-        const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10); // 10m de resolución
-        // Calcular width y height manteniendo la relación de aspecto
-        let width = sizeInPixels.width;
-        let height = sizeInPixels.height;
-        if (aspectRatio > 1) {
-            // Área más ancha que alta → ajustar altura
-            height = Math.round(width / aspectRatio);
-        } else {
-            // Área más alta que ancha → ajustar ancho
-            width = Math.round(height * aspectRatio);
-        }
-        // Asegurar que los valores mínimos sean 128
-        width = Math.max(128, width);
-        height = Math.max(128, height);
-        // Limitar el tamaño máximo
-        width = Math.min(2048, width);
-        height = Math.min(2048, height);
+        const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10, aspectRatio); // 10m de resolución
+        const width = sizeInPixels.width;
+        const height = sizeInPixels.height;
         // 🔹 REGISTRO DE PU
         // logProcessingUnits(width, height, 1, "NDVI-Average");
         const payload = {
@@ -1430,22 +1373,9 @@ const fetchSentinelImageHighlight = async ({ geometry, date, bbox }) => {
     const areaResult = calculatePolygonArea(bbox);
     const areaInSquareMeters = areaResult.area;
     const aspectRatio = areaResult.aspectRatio;
-    const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10);
-    let width = sizeInPixels.width;
-    let height = sizeInPixels.height;
-    if (aspectRatio > 1) {
-        // Área más ancha que alta → ajustar altura
-        height = Math.round(width / aspectRatio);
-    } else {
-        // Área más alta que ancha → ajustar ancho
-        width = Math.round(height * aspectRatio);
-    }
-    // Asegurar que los valores mínimos sean 128
-    width = Math.max(128, width);
-    height = Math.max(128, height);
-    // Limitar el tamaño máximo
-    width = Math.min(2048, width);
-    height = Math.min(2048, height);
+    const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10, aspectRatio);
+    const width = sizeInPixels.width;
+    const height = sizeInPixels.height;
     // 🔹 REGISTRO DE PU
     // logProcessingUnits(width, height, 4, "Highlight");
     const payload = {
@@ -1589,23 +1519,9 @@ const getSentinel1Biomass = async ({ geometry, date }) => {
         const areaResult = calculatePolygonArea(bbox);
         const areaInSquareMeters = areaResult.area;
         const aspectRatio = areaResult.aspectRatio;
-        const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10); // 10m de resolución
-        // Calcular width y height manteniendo la relación de aspecto
-        let width = sizeInPixels.width;
-        let height = sizeInPixels.height;
-        if (aspectRatio > 1) {
-            // Área más ancha que alta → ajustar altura
-            height = Math.round(width / aspectRatio);
-        } else {
-            // Área más alta que ancha → ajustar ancho
-            width = Math.round(height * aspectRatio);
-        }
-        // Asegurar que los valores mínimos sean 128
-        width = Math.max(128, width);
-        height = Math.max(128, height);
-        // Limitar el tamaño máximo
-        width = Math.min(2048, width);
-        height = Math.min(2048, height);
+        const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10, aspectRatio); // 10m de resolución
+        const width = sizeInPixels.width;
+        const height = sizeInPixels.height;
         // 🔹 REGISTRO DE PU
         // logProcessingUnits(width, height, 1, "S1-Biomass-Average");
         const payload = {
