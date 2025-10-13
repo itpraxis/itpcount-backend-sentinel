@@ -761,6 +761,76 @@ function evaluatePixel(samples) {
   return [classification_class * 50]; 
 }`;
 };
+
+
+/**
+ * Genera el evalscript para la clasificación de 5 clases de cobertura Sentinel-1 (VV/VH).
+ * Clases: 1=Agua Tranquila, 2=Suelo/Urbano, 3=Vegetación Baja, 4=Bosque, 5=Vegetación Densa.
+ * La salida se escala por 50 para hacerla VISIBLE en UINT8.
+ */
+const getClassification5ClassesEvalscript2 = () => {
+    // Usamos el modo Dual (VH y VV) ya que es necesario para la clasificación estructural.
+    return `//VERSION=3
+function setup() {
+  return {
+    input: [{ bands: ["VV", "VH", "dataMask"], units: "LINEAR_POWER" }],
+    // Salida de 1 banda, UINT8 para la clase (0-5)
+    output: { bands: 1, sampleType: "UINT8", format: "image/png" }
+  };
+}
+function evaluatePixel(samples) {
+  let vv = samples.VV;
+  let vh = samples.VH;
+  let dm = samples.dataMask;
+  if (dm === 0) {
+    return [0]; // CLASE 0: Sin Datos / Área No Válida
+  }
+  // Verificar si hay valores inválidos antes de log10
+  if (vv <= 0 || vh <= 0) { 
+    return [0];
+  }
+  // Convertir a Decibelios
+  let vv_db = 10 * Math.log10(vv);
+  let vh_db = 10 * Math.log10(vh);
+
+  // --- CLASIFICACIÓN SECUENCIAL (Cascada) - AJUSTADA ---
+  let classification_class = 2; // Valor por defecto: Suelo Desnudo / Urbano (Clase 2)
+
+  // 1. CLASE 1: Agua Tranquila (MUY BAJA retrodispersión)
+  //   - Umbral muy bajo para evitar falsos positivos
+  if (vv_db < -22.0 && vh_db < -27.0) {
+      classification_class = 1;
+  }
+  // 2. CLASE 5: Vegetación Densa (ALTA retrodispersión y alto ratio VV/VH)
+  //   - Este es el cambio clave: ahora requiere VH > -12.0 y un ratio mayor
+  else if (vh_db > -12.0 && (vv_db - vh_db) > 0.5) {
+      classification_class = 5; 
+  }
+  // 3. CLASE 4: Bosque (ALTA retrodispersión pero con ratio menor)
+  //   - Se mantiene similar, pero con un umbral ligeramente más alto para VH
+  else if (vh_db > -16.0 && (vv_db - vh_db) > 0.0) {
+      classification_class = 4;
+  }
+  // 4. CLASE 3: Vegetación Baja (RETRODISPERSIÓN MODERADA)
+  //   - Este es otro cambio clave: ampliamos el rango para capturar más vegetación baja
+  else if (vh_db > -20.0 && vv_db < -14.0) {
+      classification_class = 3; 
+  }
+  // 5. CLASE 2: Suelo Desnudo / Urbano (RESTO)
+  //   - Ya está como default, no necesitamos un else
+  // else {
+  //     classification_class = 2;
+  // }
+
+  // 🚨 CORRECCIÓN CLAVE: Multiplicar por 50 para hacer la imagen VISIBLE.
+  // La clase 5 será 250, y la clase 1 será 50.
+  return [classification_class * 50]; 
+}`;
+};
+
+
+
+
 // ==============================================
 // FUNCIÓN PRINCIPAL para CLASIFICACIÓN 5-CLASES
 // ==============================================
@@ -831,7 +901,7 @@ const fetchSentinel1Classification = async ({ geometry, date }) => {
         const finalPolarization = pol.primary.includes('D') ? pol.primary : 'DV'; // Forzamos a DV/DH
         const tryRequest = async () => {
             // 🚨 CAMBIO CLAVE: Usamos el nuevo Evalscript.
-            const evalscript = getClassification5ClassesEvalscript(); 
+            const evalscript = getClassification5ClassesEvalscript2(); 
             const outputBands = 1; // 🚨 CLAVE: Siempre 1 banda para clasificación.
             const payload = {
                 input: {
