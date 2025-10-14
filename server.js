@@ -93,6 +93,27 @@ const polygonToBbox = (coordinates) => {
     }
     return [minLon, minLat, maxLon, maxLat];
 };
+
+// LÓGICA DE DETERMINACIÓN DE POLARIZACIÓN (FINAL Y ROBUSTA)
+const determinePolarization = (id) => {
+     // 1. DUAL (Clasificación RGB) - Buscar 1SDV o 1SDH
+     if (id.includes('1SDV')) {
+        return { primary: 'DV', mode: 'IW', bands: 3 }; 
+    }
+    if (id.includes('1SDH')) {
+        return { primary: 'DH', mode: 'IW', bands: 3 }; 
+    }
+    // 2. SIMPLE (Visualización Escala de Grises) - Buscar 1SSV o 1SSH
+    if (id.includes('1SSV')) {
+        return { primary: 'VV', mode: 'IW', bands: 1 };
+    }
+    if (id.includes('1SSH')) {
+        return { primary: 'HH', mode: 'IW', bands: 1 };
+    }
+    // 3. Fallback 
+    return { primary: 'VV', mode: 'IW', bands: 1 }; 
+};
+
 // Función auxiliar para obtener fechas cercanas
 const getNearbyDates = (baseDate, days) => {
     const dates = [];
@@ -601,25 +622,7 @@ const fetchSentinel1Radar = async ({ geometry, date }) => {
         const feature = catalogData.features[0];
         foundDate = feature.properties.datetime.split('T')[0];
         tileId = feature.id;
-        // LÓGICA DE DETERMINACIÓN DE POLARIZACIÓN (FINAL Y ROBUSTA)
-        const determinePolarization = (id) => {
-             // 1. DUAL (Clasificación RGB) - Buscar 1SDV o 1SDH
-             if (id.includes('1SDV')) {
-                return { primary: 'DV', mode: 'IW', bands: 3 }; 
-            }
-            if (id.includes('1SDH')) {
-                return { primary: 'DH', mode: 'IW', bands: 3 }; 
-            }
-            // 2. SIMPLE (Visualización Escala de Grises) - Buscar 1SSV o 1SSH
-            if (id.includes('1SSV')) {
-                return { primary: 'VV', mode: 'IW', bands: 1 };
-            }
-            if (id.includes('1SSH')) {
-                return { primary: 'HH', mode: 'IW', bands: 1 };
-            }
-            // 3. Fallback 
-            return { primary: 'VV', mode: 'IW', bands: 1 }; 
-        };
+
         pol = determinePolarization(tileId);
         finalPolarization = pol.primary;
         // 🔹 REGISTRO DE PU
@@ -1189,8 +1192,6 @@ function evaluatePixel(samples) {
     }
 };
 
-
-
 // ==============================================
 // ✅ NUEVO ENDPOINT: /api/sentinel1vhindex - Índice continuo de VH (dB)
 // ==============================================
@@ -1207,11 +1208,6 @@ app.post('/api/sentinel1vhindex', async (req, res) => {
         res.status(500).json({ error: error.message });
     }
 });
-
-
-
-
-
 
 
 /**
