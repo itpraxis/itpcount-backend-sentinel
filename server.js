@@ -1126,29 +1126,29 @@ function evaluatePixel(samples) {
         const buffer = await imageResponse.arrayBuffer();
         const base64 = Buffer.from(buffer).toString('base64');
 
-        // --- CÁLCULO DEL ÍNDICE PROMEDIO EN dB ---
-        // Para esto, necesitamos hacer una segunda llamada al Process API para obtener los datos en bruto (TIFF)
-        const tiffPayload = {
-            ...payload,
-            output: {
-                ...payload.output,
-                format: "image/tiff",
-                sampleType: "FLOAT32" // Obtenemos el valor en dB directamente
-            },
-            evalscript: `//VERSION=3
-function setup() {
-    return {
-        input: [{ bands: ["VH", "dataMask"], units: "LINEAR_POWER" }],
-        output: { bands: 1, sampleType: "FLOAT32" }
-    };
-}
-function evaluatePixel(samples) {
-    if (samples.dataMask === 0 || samples.VH <= 0) {
-        return [NaN]; // Valores inválidos como NaN
-    }
-    return [10 * Math.log10(samples.VH)]; // Devolvemos VH en dB
-}`
-        };
+		// --- CÁLCULO DEL ÍNDICE PROMEDIO EN dB ---
+		// Para esto, necesitamos hacer una segunda llamada al Process API para obtener los datos en bruto (TIFF)
+		const tiffPayload = {
+			...payload,
+			output: {
+				...payload.output,
+				format: "image/tiff", // ✅ CORREGIDO: TIFF soporta FLOAT32
+				sampleType: "FLOAT32"
+			},
+			evalscript: `//VERSION=3
+		function setup() {
+			return {
+				input: [{ bands: ["VH", "dataMask"], units: "LINEAR_POWER" }],
+				output: { bands: 1, sampleType: "FLOAT32" }
+			};
+		}
+		function evaluatePixel(samples) {
+			if (samples.dataMask === 0 || samples.VH <= 0) {
+				return [NaN]; // Valores inválidos como NaN
+			}
+			return [10 * Math.log10(samples.VH)]; // Devolvemos VH en dB
+		}`
+		};
 
         const tiffResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
             method: 'POST',
