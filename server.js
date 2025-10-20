@@ -1128,25 +1128,50 @@ function evaluatePixel(samples) {
 
 		// --- CÁLCULO DEL ÍNDICE PROMEDIO EN dB ---
 		// Para esto, necesitamos hacer una segunda llamada al Process API para obtener los datos en bruto (TIFF)
+		// Construimos el payload para TIFF desde cero para evitar conflictos
 		const tiffPayload = {
-			...payload,
+			input: {
+				bounds: {
+					geometry: {
+						type: "Polygon",
+						coordinates: geometry
+					}
+				},
+				 [{
+					dataFilter: {
+						timeRange: {
+							from: `${foundDate}T00:00:00Z`,
+							to: `${foundDate}T23:59:59Z`
+						},
+						polarization: "VH",
+						instrumentMode: pol.mode
+					},
+					processing: {
+						mosaicking: "ORBIT"
+					},
+					type: "sentinel-1-grd"
+				}]
+			},
 			output: {
-				...payload.output,
-				format: "image/tiff", // ✅ CORREGIDO: TIFF soporta FLOAT32
-				sampleType: "FLOAT32"
+				width: width,
+				height: height,
+				format: "image/tiff", // ✅ CORRECTO para FLOAT32
+				sampleType: "FLOAT32", // ✅ CORRECTO
+				bands: 1,
+				crs: "http://www.opengis.net/def/crs/OGC/1.3/CRS84"
 			},
 			evalscript: `//VERSION=3
 		function setup() {
-			return {
-				input: [{ bands: ["VH", "dataMask"], units: "LINEAR_POWER" }],
-				output: { bands: 1, sampleType: "FLOAT32" }
-			};
+		  return {
+			input: [{ bands: ["VH", "dataMask"], units: "LINEAR_POWER" }],
+			output: { bands: 1, sampleType: "FLOAT32" }
+		  };
 		}
 		function evaluatePixel(samples) {
-			if (samples.dataMask === 0 || samples.VH <= 0) {
-				return [NaN]; // Valores inválidos como NaN
-			}
-			return [10 * Math.log10(samples.VH)]; // Devolvemos VH en dB
+		  if (samples.dataMask === 0 || samples.VH <= 0) {
+			return [NaN];
+		  }
+		  return [10 * Math.log10(samples.VH)]; // Devolvemos VH en dB
 		}`
 		};
 
