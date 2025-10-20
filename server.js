@@ -1137,7 +1137,7 @@ function evaluatePixel(samples) {
 						coordinates: geometry
 					}
 				},
-				 [{
+				data: [{
 					dataFilter: {
 						timeRange: {
 							from: `${foundDate}T00:00:00Z`,
