@@ -1244,7 +1244,13 @@ function evaluatePixel(samples) {
             evalscript: evalscript
         };
 
-
+		// 🔍 DEBUG: Verificar payload antes de enviar
+		console.log('🔍 [DEBUG] Payload enviado a Sentinel Hub Process API:');
+		console.log('   - output.format:', payload.output.format);
+		console.log('   - output.sampleType:', payload.output.sampleType);
+		console.log('   - dataFilter.polarization:', payload.input.data[0].dataFilter.polarization);
+		console.log('   - evalscript preview:', evalscript.substring(0, 100) + '...');
+		
         // ✅ CORREGIDO: URL sin espacios
         const tiffResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
             method: 'POST',
@@ -2044,5 +2050,7 @@ app.use((err, req, res, next) => {
 });
 app.listen(port, '0.0.0.0', () => {
     console.log(`✅ Backend listo en http://localhost:${port}`);
+    console.log(`📦 Versión del código: sentinel1vhaverage-v2 (con image/tiff y pol.primary)`);
 });
+
 /*  */
