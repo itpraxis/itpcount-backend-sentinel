@@ -1070,7 +1070,7 @@ const fetchSentinel1VHImage = async ({ geometry, date }) => {
 			let normalized = (vh_db - minDb) / (maxDb - minDb);
 			normalized = Math.max(0, Math.min(1, normalized));
 			return [normalized * 255];
-}`
+		}`
     };
 
     const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
