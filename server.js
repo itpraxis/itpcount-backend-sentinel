@@ -1244,6 +1244,7 @@ function evaluatePixel(samples) {
             evalscript: evalscript
         };
 
+
         // ✅ CORREGIDO: URL sin espacios
         const tiffResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
             method: 'POST',
