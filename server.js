@@ -1203,7 +1203,7 @@ const fetchSentinel1VHAverage = async ({ geometry, date }) => {
 				output: { 
 					bands: 1, 
 					sampleType: "FLOAT32",
-					format: "image/tiff"   // ← ¡ESTA LÍNEA ES OBLIGATORIA!
+					format: "image/tiff"
 				}
 			};
 		}
@@ -1212,8 +1212,7 @@ const fetchSentinel1VHAverage = async ({ geometry, date }) => {
 				return [NaN];
 			}
 			return [10 * Math.log10(samples.VH)];
-		}`;
-
+		}`;		
         const payload = {
             input: {
                 bounds: {
@@ -1241,10 +1240,10 @@ const fetchSentinel1VHAverage = async ({ geometry, date }) => {
 				width: width,
 				height: height,
 				bands: 1,
-				format: "image/tiff",      // ← redundante pero necesario
-				sampleType: "FLOAT32",     // ← debe coincidir
+				format: "image/tiff",
+				sampleType: "FLOAT32",
 				crs: "http://www.opengis.net/def/crs/OGC/1.3/CRS84"
-			},
+			},			
             evalscript: evalscript
         };
 
