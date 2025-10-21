@@ -1199,8 +1199,8 @@ const fetchSentinel1VHAverage = async ({ geometry, date }) => {
 		const evalscript = `//VERSION=3
 		function setup() {
 			return {
-				input: [{ bands: ["VH", "dataMask"], units: "LINEAR_POWER" }]
-				// ⬅️ ¡NO incluyas "output" aquí!
+				input: [{ bands: ["VH", "dataMask"], units: "LINEAR_POWER" }],
+				output: { bands: 1, sampleType: "FLOAT32" }  // ← ¡Esta línea es obligatoria!
 			};
 		}
 		function evaluatePixel(samples) {
