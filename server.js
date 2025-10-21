@@ -1051,25 +1051,25 @@ const fetchSentinel1VHImage = async ({ geometry, date }) => {
             // ✅ CORRECCIÓN CLAVE: Forzar proyección WGS84
             crs: "http://www.opengis.net/def/crs/OGC/1.3/CRS84"
         },
-        evalscript: `
-//VERSION=3
-function setup() {
-    return {
-        input: [{ bands: ["VH", "dataMask"], units: "LINEAR_POWER" }],
-        output: { bands: 1, sampleType: "UINT8" }
-    };
-}
-function evaluatePixel(samples) {
-    if (samples.dataMask === 0 || samples.VH <= 0) {
-        return [0]; // Sin datos o valor inválido -> Negro
-    }
-    const vh_db = 10 * Math.log10(samples.VH);
-    // Rango típico para zonas agrícolas del sur de Chile: -30 dB a 0 dB
-    const minDb = -30.0;
-    const maxDb = 0.0;
-    let normalized = (vh_db - minDb) / (maxDb - minDb);
-    normalized = Math.max(0, Math.min(1, normalized));
-    return [normalized * 255];
+		evalscript: `
+		//VERSION=3
+		function setup() {
+			return {
+				input: [{ bands: ["VH", "dataMask"], units: "LINEAR_POWER" }],
+				output: { bands: 1, sampleType: "UINT8" }
+			};
+		}
+		function evaluatePixel(samples) {
+			if (samples.dataMask === 0 || samples.VH <= 0) {
+				return [0]; // Sin datos o valor inválido -> Negro
+			}
+			const vh_db = 10 * Math.log10(samples.VH);
+			// Rango ajustado para el sur de Chile / zonas agrícolas reales
+			const minDb = -28.0;
+			const maxDb = -10.0;
+			let normalized = (vh_db - minDb) / (maxDb - minDb);
+			normalized = Math.max(0, Math.min(1, normalized));
+			return [normalized * 255];
 }`
     };
 
