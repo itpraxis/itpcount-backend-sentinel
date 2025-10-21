@@ -993,41 +993,31 @@ app.post('/api/sentinel1classification', async (req, res) => {
 });
 
 
-
-
-
 // ==============================================
-// ✅ NUEVA FUNCIÓN: Obtiene un índice continuo de vegetación/biomasa basado en VH (dB)
+// ✅ NUEVO ENDPOINT: /api/sentinel1vhimage - Imagen de VH en escala de grises
 // ==============================================
 /**
- * Obtiene un índice continuo de vegetación/biomasa para Sentinel-1.
- * El índice es el promedio de la banda VH en decibelios (dB) dentro del polígono.
+ * Obtiene una imagen en escala de grises de la banda VH de Sentinel-1.
  * @param {object} params - Parámetros de la solicitud.
  * @param {array} params.geometry - Coordenadas del polígono.
  * @param {string} params.date - Fecha de la imagen.
- * @returns {object} Un objeto con la URL de la imagen en escala de grises y el índice promedio en dB.
+ * @returns {object} Un objeto con la URL de la imagen PNG y metadatos.
  */
-/**
- * Obtiene un índice continuo de vegetación/biomasa para Sentinel-1 basado en VH (dB).
- * @param {object} params - Parámetros de la solicitud.
- * @param {array} params.geometry - Coordenadas del polígono.
- * @param {string} params.date - Fecha de la imagen.
- * @returns {object} Un objeto con la URL de la imagen en escala de grises y el índice promedio en dB.
- */
-const fetchSentinel1VHIndex = async ({ geometry, date }) => {
+const fetchSentinel1VHImage = async ({ geometry, date }) => {
     const accessToken = await getAccessToken();
     const bbox = polygonToBbox(geometry);
     if (!bbox) {
         throw new Error('No se pudo calcular el bounding box del polígono.');
     }
-
     try {
         const areaResult = calculatePolygonArea(bbox);
-        const sizeInPixels = calculateOptimalImageSize(areaResult.area, 10, areaResult.aspectRatio);
+        const areaInSquareMeters = areaResult.area;
+        const aspectRatio = areaResult.aspectRatio;
+        const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10, aspectRatio);
         const width = sizeInPixels.width;
         const height = sizeInPixels.height;
 
-        // Paso 1: Buscar en el catálogo
+        // Búsqueda en el Catálogo
         const fromDate = new Date(date);
         const toDate = new Date(date);
         const catalogUrl = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search';
@@ -1037,7 +1027,6 @@ const fetchSentinel1VHIndex = async ({ geometry, date }) => {
             "collections": ["sentinel-1-grd"],
             "limit": 10
         };
-
         const catalogResponse = await fetch(catalogUrl, {
             method: 'POST',
             headers: {
@@ -1046,56 +1035,30 @@ const fetchSentinel1VHIndex = async ({ geometry, date }) => {
             },
             body: JSON.stringify(catalogPayload)
         });
-
         if (!catalogResponse.ok) {
-            throw new Error(`Error en consulta al catálogo: ${await catalogResponse.text()}`);
+            const errorText = await catalogResponse.text();
+            throw new Error(`Error en consulta al catálogo: ${errorText}`);
         }
-
         const catalogData = await catalogResponse.json();
         if (catalogData.features.length === 0) {
             throw new Error("No se encontraron datos de Sentinel-1 para esta ubicación.");
         }
-
         const feature = catalogData.features[0];
         const foundDate = feature.properties.datetime.split('T')[0];
+        const tileId = feature.id;
+        const pol = determinePolarization(tileId);
 
-        // Paso 2: Generar la imagen para visualización (PNG, UINT8)
-        const pngPayload = {
-            input: {
-                bounds: {
-                    geometry: {
-                        type: "Polygon",
-                        coordinates: geometry
-                    }
-                },
-                data: [{
-                    dataFilter: {
-                        timeRange: {
-                            from: `${foundDate}T00:00:00Z`,
-                            to: `${foundDate}T23:59:59Z`
-                        },
-                        polarization: "VH",
-                        instrumentMode: "IW"
-                    },
-                    type: "sentinel-1-grd"
-                }]
-            },
-            output: {
-                width: width,
-                height: height,
-                format: "image/png",
-                sampleType: "UINT8"
-            },
-            evalscript: `//VERSION=3
+        // Evalscript para imagen PNG en escala de grises
+        const evalscript = `//VERSION=3
 function setup() {
     return {
         input: [{ bands: ["VH", "dataMask"], units: "LINEAR_POWER" }],
-        output: { bands: 1, sampleType: "UINT8" }
+        output: { bands: 1, sampleType: "UINT8", format: "image/png" }
     };
 }
 function evaluatePixel(samples) {
     if (samples.dataMask === 0 || samples.VH <= 0) {
-        return [0];
+        return [0]; // Sin datos o valor inválido -> Negro
     }
     const vh_db = 10 * Math.log10(samples.VH);
     // Rango típico para zonas agrícolas del sur de Chile: -25 dB a -5 dB
@@ -1104,28 +1067,9 @@ function evaluatePixel(samples) {
     let normalized = (vh_db - minDb) / (maxDb - minDb);
     normalized = Math.max(0, Math.min(1, normalized));
     return [normalized * 255];
-}`
-        };
+}`;
 
-        const pngResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${accessToken}`
-            },
-            body: JSON.stringify(pngPayload)
-        });
-
-        if (!pngResponse.ok) {
-            throw new Error(`Solicitud de imagen PNG falló: ${await pngResponse.text()}`);
-        }
-
-        const pngBuffer = await pngResponse.arrayBuffer();
-        const pngBase64 = Buffer.from(pngBuffer).toString('base64');
-
-        // Paso 3: Obtener los datos en bruto para el cálculo del promedio (TIFF, FLOAT32)
-        // ¡ESTA ES LA LLAMADA CORREGIDA! No hereda de ningún otro payload.
-        const tiffPayload = {
+        const payload = {
             input: {
                 bounds: {
                     geometry: {
@@ -1140,7 +1084,10 @@ function evaluatePixel(samples) {
                             to: `${foundDate}T23:59:59Z`
                         },
                         polarization: "VH",
-                        instrumentMode: "IW"
+                        instrumentMode: pol.mode
+                    },
+                    processing: {
+                        mosaicking: "ORBIT"
                     },
                     type: "sentinel-1-grd"
                 }]
@@ -1148,10 +1095,117 @@ function evaluatePixel(samples) {
             output: {
                 width: width,
                 height: height,
-                format: "image/tiff", // ✅ CORRECTO para FLOAT32
-                sampleType: "FLOAT32" // ✅ CORRECTO
+                format: "image/png",
+                sampleType: "UINT8",
+                bands: 1,
+                crs: "http://www.opengis.net/def/crs/OGC/1.3/CRS84"
             },
-            evalscript: `//VERSION=3
+            evalscript: evalscript
+        };
+
+        const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${accessToken}`
+            },
+            body: JSON.stringify(payload)
+        });
+
+        if (!imageResponse.ok) {
+            const errorText = await imageResponse.text();
+            throw new Error(`Solicitud de imagen VH falló: ${errorText}`);
+        }
+
+        const buffer = await imageResponse.arrayBuffer();
+        const base64 = Buffer.from(buffer).toString('base64');
+
+        return {
+            url: `image/png;base64,${base64}`,
+            usedDate: foundDate,
+            bbox: bbox,
+            width: width,
+            height: height
+        };
+    } catch (error) {
+        console.error('❌ Error en fetchSentinel1VHImage:', error.message);
+        throw error;
+    }
+};
+
+// Endpoint para el frontend
+app.post('/api/sentinel1vhimage', async (req, res) => {
+    const { coordinates, date } = req.body;
+    if (!coordinates || !date) {
+        return res.status(400).json({ error: 'Faltan parámetros: coordinates y date' });
+    }
+    try {
+        const result = await fetchSentinel1VHImage({ geometry: coordinates, date: date });
+        res.json(result);
+    } catch (error) {
+        console.error('❌ Error en el endpoint /api/sentinel1vhimage:', error.message);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+
+// ==============================================
+// ✅ NUEVO ENDPOINT: /api/sentinel1vhaverage - Valor promedio de VH en dB
+// ==============================================
+/**
+ * Obtiene el valor promedio de la retrodispersión de la banda VH de Sentinel-1 en dB.
+ * @param {object} params - Parámetros de la solicitud.
+ * @param {array} params.geometry - Coordenadas del polígono.
+ * @param {string} params.date - Fecha de la imagen.
+ * @returns {object} Un objeto con el promedio en dB y estadísticas.
+ */
+const fetchSentinel1VHAverage = async ({ geometry, date }) => {
+    const accessToken = await getAccessToken();
+    const bbox = polygonToBbox(geometry);
+    if (!bbox) {
+        throw new Error('No se pudo calcular el bounding box del polígono.');
+    }
+    try {
+        const areaResult = calculatePolygonArea(bbox);
+        const areaInSquareMeters = areaResult.area;
+        const aspectRatio = areaResult.aspectRatio;
+        const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10, aspectRatio);
+        const width = sizeInPixels.width;
+        const height = sizeInPixels.height;
+
+        // Búsqueda en el Catálogo (igual que antes)
+        const fromDate = new Date(date);
+        const toDate = new Date(date);
+        const catalogUrl = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search';
+        const catalogPayload = {
+            "bbox": bbox,
+            "datetime": `${fromDate.toISOString().split('T')[0]}T00:00:00Z/${toDate.toISOString().split('T')[0]}T23:59:59Z`,
+            "collections": ["sentinel-1-grd"],
+            "limit": 10
+        };
+        const catalogResponse = await fetch(catalogUrl, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${accessToken}`
+            },
+            body: JSON.stringify(catalogPayload)
+        });
+        if (!catalogResponse.ok) {
+            const errorText = await catalogResponse.text();
+            throw new Error(`Error en consulta al catálogo: ${errorText}`);
+        }
+        const catalogData = await catalogResponse.json();
+        if (catalogData.features.length === 0) {
+            throw new Error("No se encontraron datos de Sentinel-1 para esta ubicación.");
+        }
+        const feature = catalogData.features[0];
+        const foundDate = feature.properties.datetime.split('T')[0];
+        const tileId = feature.id;
+        const pol = determinePolarization(tileId);
+
+        // Evalscript para datos en bruto (TIFF, FLOAT32)
+        const evalscript = `//VERSION=3
 function setup() {
     return {
         input: [{ bands: ["VH", "dataMask"], units: "LINEAR_POWER" }],
@@ -1160,10 +1214,43 @@ function setup() {
 }
 function evaluatePixel(samples) {
     if (samples.dataMask === 0 || samples.VH <= 0) {
-        return [NaN];
+        return [NaN]; // Valores inválidos como NaN
     }
     return [10 * Math.log10(samples.VH)]; // Devolvemos VH en dB directamente
-}`
+}`;
+
+        const payload = {
+            input: {
+                bounds: {
+                    geometry: {
+                        type: "Polygon",
+                        coordinates: geometry
+                    }
+                },
+                data: [{
+                    dataFilter: {
+                        timeRange: {
+                            from: `${foundDate}T00:00:00Z`,
+                            to: `${foundDate}T23:59:59Z`
+                        },
+                        polarization: "VH",
+                        instrumentMode: pol.mode
+                    },
+                    processing: {
+                        mosaicking: "ORBIT"
+                    },
+                    type: "sentinel-1-grd"
+                }]
+            },
+            output: {
+                width: width,
+                height: height,
+                format: "image/tiff", // ✅ CORRECTO para FLOAT32
+                sampleType: "FLOAT32", // ✅ CORRECTO
+                bands: 1,
+                crs: "http://www.opengis.net/def/crs/OGC/1.3/CRS84"
+            },
+            evalscript: evalscript
         };
 
         const tiffResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
@@ -1172,16 +1259,16 @@ function evaluatePixel(samples) {
                 'Content-Type': 'application/json',
                 'Authorization': `Bearer ${accessToken}`
             },
-            body: JSON.stringify(tiffPayload)
+            body: JSON.stringify(payload)
         });
 
         if (!tiffResponse.ok) {
-            throw new Error(`Solicitud de datos en bruto falló: ${await tiffResponse.text()}`);
+            const errorText = await tiffResponse.text();
+            throw new Error(`Error al obtener datos en bruto para cálculo del promedio: ${errorText}`);
         }
 
         const tiffBuffer = await tiffResponse.arrayBuffer();
         const float32Array = new Float32Array(tiffBuffer);
-
         let sum = 0;
         let count = 0;
         for (let i = 0; i < float32Array.length; i++) {
@@ -1191,39 +1278,31 @@ function evaluatePixel(samples) {
                 count++;
             }
         }
-
         const avgVhDb = count > 0 ? sum / count : null;
 
         return {
-            url: `image/png;base64,${pngBase64}`,
-            usedDate: foundDate,
             avgVhDb: avgVhDb,
             totalPixels: float32Array.length,
             validPixels: count,
-            bbox: bbox,
-            width: width,
-            height: height
+            usedDate: foundDate
         };
-
     } catch (error) {
-        console.error('❌ Error en fetchSentinel1VHIndex:', error.message);
+        console.error('❌ Error en fetchSentinel1VHAverage:', error.message);
         throw error;
     }
 };
 
-// ==============================================
-// ✅ NUEVO ENDPOINT: /api/sentinel1vhindex - Índice continuo de VH (dB)
-// ==============================================
-app.post('/api/sentinel1vhindex', async (req, res) => {
+// Endpoint para el frontend
+app.post('/api/sentinel1vhaverage', async (req, res) => {
     const { coordinates, date } = req.body;
     if (!coordinates || !date) {
         return res.status(400).json({ error: 'Faltan parámetros: coordinates y date' });
     }
     try {
-        const result = await fetchSentinel1VHIndex({ geometry: coordinates, date: date });
+        const result = await fetchSentinel1VHAverage({ geometry: coordinates, date: date });
         res.json(result);
     } catch (error) {
-        console.error('❌ Error en el endpoint /api/sentinel1vhindex:', error.message);
+        console.error('❌ Error en el endpoint /api/sentinel1vhaverage:', error.message);
         res.status(500).json({ error: error.message });
     }
 });
