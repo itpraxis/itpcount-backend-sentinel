@@ -1202,8 +1202,7 @@ const fetchSentinel1VHAverage = async ({ geometry, date }) => {
 				input: [{ bands: ["VH", "dataMask"], units: "LINEAR_POWER" }],
 				output: { 
 					bands: 1, 
-					sampleType: "FLOAT32",
-					format: "image/tiff"
+					sampleType: "FLOAT32"
 				}
 			};
 		}
