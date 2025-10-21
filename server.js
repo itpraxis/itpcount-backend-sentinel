@@ -1196,23 +1196,23 @@ const fetchSentinel1VHAverage = async ({ geometry, date }) => {
         }
 
         // Evalscript para datos en bruto (TIFF, FLOAT32)
-const evalscript = `//VERSION=3
-function setup() {
-    return {
-        input: [{ bands: ["VH", "dataMask"], units: "LINEAR_POWER" }],
-        output: { 
-            bands: 1, 
-            sampleType: "FLOAT32",
-            format: "image/tiff"   // ← ¡Esta línea es obligatoria para FLOAT32!
-        }
-    };
-}
-function evaluatePixel(samples) {
-    if (samples.dataMask === 0 || samples.VH <= 0) {
-        return [NaN];
-    }
-    return [10 * Math.log10(samples.VH)];
-}`;
+		const evalscript = `//VERSION=3
+		function setup() {
+			return {
+				input: [{ bands: ["VH", "dataMask"], units: "LINEAR_POWER" }],
+				output: { 
+					bands: 1, 
+					sampleType: "FLOAT32",
+					format: "image/tiff"   // ← ¡ESTA LÍNEA ES OBLIGATORIA!
+				}
+			};
+		}
+		function evaluatePixel(samples) {
+			if (samples.dataMask === 0 || samples.VH <= 0) {
+				return [NaN];
+			}
+			return [10 * Math.log10(samples.VH)];
+		}`;
 
         const payload = {
             input: {
@@ -1241,8 +1241,8 @@ function evaluatePixel(samples) {
 				width: width,
 				height: height,
 				bands: 1,
-				format: "image/tiff",
-				sampleType: "FLOAT32",
+				format: "image/tiff",      // ← redundante pero necesario
+				sampleType: "FLOAT32",     // ← debe coincidir
 				crs: "http://www.opengis.net/def/crs/OGC/1.3/CRS84"
 			},
             evalscript: evalscript
