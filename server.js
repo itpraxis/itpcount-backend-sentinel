@@ -1073,6 +1073,7 @@ const fetchSentinel1VHImage = async ({ geometry, date }) => {
 		}`
     };
 
+
     const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
         method: 'POST',
         headers: {
