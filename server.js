@@ -1005,74 +1005,94 @@ app.post('/api/sentinel1classification', async (req, res) => {
  */
 const fetchSentinel1VHImage = async ({ geometry, date }) => {
     const accessToken = await getAccessToken();
-    // ✅ Calcular el bbox del polígono
     const bbox = polygonToBbox(geometry);
     if (!bbox) {
         throw new Error('No se pudo calcular el bounding box del polígono.');
     }
-    // ✅ Calcular el área y el tamaño óptimo de la imagen
-    const areaResult = calculatePolygonArea(bbox);
-    const areaInSquareMeters = areaResult.area;
-    const aspectRatio = areaResult.aspectRatio;
-    const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10, aspectRatio);
-    const width = sizeInPixels.width;
-    const height = sizeInPixels.height;
 
-    const payload = {
-        input: {
-            bounds: {
-                geometry: {
-                    type: "Polygon",
-                    coordinates: geometry
-                }
-            },
-            data: [
-                {
-                    type: "sentinel-1-grd",
-                    dataFilter: {
-                        timeRange: {
-                            from: `${date}T00:00:00Z`,
-                            to: `${date}T23:59:59Z`
-                        },
-                        polarization: "VH",
-                        instrumentMode: "IW"
-                    },
-                    processing: {
-                        mosaicking: "ORBIT"
-                    }
-                }
-            ]
-        },
-        output: {
-            width: width,
-            height: height,
-            format: "image/png",
-            sampleType: "UINT8",
-            // ✅ CORRECCIÓN CLAVE: Forzar proyección WGS84
-            crs: "http://www.opengis.net/def/crs/OGC/1.3/CRS84"
-        },
-		evalscript: `
-		//VERSION=3
-		function setup() {
-			return {
-				input: [{ bands: ["VH", "dataMask"], units: "LINEAR_POWER" }],
-				output: { bands: 1, sampleType: "UINT8" }
-			};
-		}
-		function evaluatePixel(samples) {
-			if (samples.dataMask === 0 || samples.VH <= 0) {
-				return [0]; // Sin datos o valor inválido -> Negro
-			}
-			const vh_db = 10 * Math.log10(samples.VH);
-			// Rango ajustado para el sur de Chile / zonas agrícolas reales
-			const minDb = -28.0;
-			const maxDb = -10.0;
-			let normalized = (vh_db - minDb) / (maxDb - minDb);
-			normalized = Math.max(0, Math.min(1, normalized));
-			return [normalized * 255];
-		}`
+    // 🔍 PASO 1: Consultar el catálogo para asegurar que hay datos
+    const fromDate = new Date(date);
+    const toDate = new Date(date);
+    const catalogUrl = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search';
+    const catalogPayload = {
+        "bbox": bbox,
+        "datetime": `${fromDate.toISOString().split('T')[0]}T00:00:00Z/${toDate.toISOString().split('T')[0]}T23:59:59Z`,
+        "collections": ["sentinel-1-grd"],
+        "limit": 10
     };
 
+    const catalogResponse = await fetch(catalogUrl, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${accessToken}`
+        },
+        body: JSON.stringify(catalogPayload)
+    });
+
+    if (!catalogResponse.ok) {
+        const errorText = await catalogResponse.text();
+        throw new Error(`Error en catálogo S1: ${errorText}`);
+    }
+
+    const catalogData = await catalogResponse.json();
+    if (catalogData.features.length === 0) {
+        throw new Error("No hay datos de Sentinel-1 disponibles en la fecha solicitada.");
+    }
+
+    // ✅ Usamos la fecha real del primer feature
+    const foundDate = catalogData.features[0].properties.datetime.split('T')[0];
+
+    // ✅ Calcular tamaño óptimo
+    const areaResult = calculatePolygonArea(bbox);
+    const sizeInPixels = calculateOptimalImageSize(areaResult.area, 10, areaResult.aspectRatio);
+    const { width, height } = sizeInPixels;
+
+    // ✅ Payload con foundDate y VH
+    const payload = {
+        input: {
+            bounds: { geometry: { type: "Polygon", coordinates: geometry } },
+            data: [{
+                type: "sentinel-1-grd",
+                dataFilter: {
+                    timeRange: {
+                        from: `${foundDate}T00:00:00Z`,
+                        to: `${foundDate}T23:59:59Z`
+                    },
+                    polarization: "VH",
+                    instrumentMode: "IW"
+                },
+                processing: { mosaicking: "ORBIT" }
+            }]
+        },
+        output: {
+            width,
+            height,
+            format: "image/png",
+            sampleType: "UINT8",
+            crs: "http://www.opengis.net/def/crs/OGC/1.3/CRS84"
+        },
+        evalscript: `
+//VERSION=3
+function setup() {
+    return {
+        input: [{ bands: ["VH", "dataMask"], units: "LINEAR_POWER" }],
+        output: { bands: 1, sampleType: "UINT8" }
+    };
+}
+function evaluatePixel(samples) {
+    if (samples.dataMask === 0 || samples.VH <= 0) {
+        return [0];
+    }
+    const vh_db = 10 * Math.log10(samples.VH);
+    // Rango ajustado según tus umbrales reales
+    const minDb = -28.0;
+    const maxDb = -10.0;
+    let normalized = (vh_db - minDb) / (maxDb - minDb);
+    normalized = Math.max(0, Math.min(1, normalized));
+    return [normalized * 255];
+}`
+    };
 
     const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
         method: 'POST',
@@ -1085,20 +1105,18 @@ const fetchSentinel1VHImage = async ({ geometry, date }) => {
 
     if (!imageResponse.ok) {
         const error = await imageResponse.text();
-        console.error('❌ Error en la API de Sentinel-Hub (VH Image):', error);
-        throw new Error(`Error en la imagen VH para ${date}: ${error}`);
+        throw new Error(`Error en Process API: ${error}`);
     }
 
     const buffer = await imageResponse.arrayBuffer();
     const base64 = Buffer.from(buffer).toString('base64');
 
-    // ✅ CORRECCIÓN FINAL: Devolver bbox, width y height
     return {
-        url: `data:image/png;base64,${base64}`, // ✅ Usa data:image/png;base64, para ser consistente con otros endpoints
-        usedDate: date,
-        bbox: bbox, // ✅ Incluido
-        width: width, // ✅ Incluido
-        height: height // ✅ Incluido
+        url: `data:image/png;base64,${base64}`,
+        usedDate: foundDate,
+        bbox,
+        width,
+        height
     };
 };
 
