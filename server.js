@@ -1253,23 +1253,36 @@ function evaluatePixel(samples) {
 
 		console.log('🔍 [DEBUG] Payload.output real:', JSON.stringify(payload.output));
 		
-        // ✅ CORREGIDO: URL sin espacios
-        const tiffResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${accessToken}`
-            },
-            body: JSON.stringify(payload)
-        });
+		const tiffResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+				'Authorization': `Bearer ${accessToken}`
+			},
+			body: JSON.stringify(payload)
+		});
 
-        if (!tiffResponse.ok) {
-            const errorText = await tiffResponse.text();
-            throw new Error(`Error al obtener datos en bruto para cálculo del promedio: ${errorText}`);
-        }
+		if (!tiffResponse.ok) {
+			const errorText = await tiffResponse.text();
+			throw new Error(`Error al obtener datos en bruto para cálculo del promedio: ${errorText}`);
+		}
 
-        const tiffBuffer = await tiffResponse.arrayBuffer();
-        const float32Array = new Float32Array(tiffBuffer);
+		// ✅ NUEVA VALIDACIÓN: asegurar que la respuesta es un TIFF
+		const contentType = tiffResponse.headers.get('content-type');
+		if (!contentType || !contentType.includes('image/tiff')) {
+			const errorText = await tiffResponse.text();
+			console.error('❌ Respuesta inesperada (no es TIFF):', errorText);
+			throw new Error(`La respuesta no es un TIFF válido. Content-Type: ${contentType}. Detalle: ${errorText}`);
+		}
+
+		const tiffBuffer = await tiffResponse.arrayBuffer();
+		// ✅ Validar que la longitud sea múltiplo de 4
+		if (tiffBuffer.byteLength % 4 !== 0) {
+			throw new Error(`Buffer de TIFF inválido: longitud (${tiffBuffer.byteLength}) no es múltiplo de 4.`);
+		}
+
+		const float32Array = new Float32Array(tiffBuffer);
+		
         let sum = 0;
         let count = 0;
         for (let i = 0; i < float32Array.length; i++) {
