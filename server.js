@@ -1158,9 +1158,10 @@ const fetchSentinel1VHAverage = async ({ geometry, date }) => {
         const width = sizeInPixels.width;
         const height = sizeInPixels.height;
 
-        // Búsqueda en el Catálogo (igual que antes)
+        // Búsqueda en el Catálogo
         const fromDate = new Date(date);
         const toDate = new Date(date);
+        // ✅ CORREGIDO: URL sin espacios
         const catalogUrl = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search';
         const catalogPayload = {
             "bbox": bbox,
@@ -1189,6 +1190,11 @@ const fetchSentinel1VHAverage = async ({ geometry, date }) => {
         const tileId = feature.id;
         const pol = determinePolarization(tileId);
 
+        // ✅ Validación crítica: asegurar que la escena tiene VH
+        if (!pol.primary.includes('D')) {
+            throw new Error(`La escena disponible (${tileId}) no contiene la banda VH (solo polarización simple: ${pol.primary}).`);
+        }
+
         // Evalscript para datos en bruto (TIFF, FLOAT32)
         const evalscript = `//VERSION=3
 function setup() {
@@ -1199,9 +1205,9 @@ function setup() {
 }
 function evaluatePixel(samples) {
     if (samples.dataMask === 0 || samples.VH <= 0) {
-        return [NaN]; // Valores inválidos como NaN
+        return [NaN];
     }
-    return [10 * Math.log10(samples.VH)]; // Devolvemos VH en dB directamente
+    return [10 * Math.log10(samples.VH)];
 }`;
 
         const payload = {
@@ -1218,7 +1224,7 @@ function evaluatePixel(samples) {
                             from: `${foundDate}T00:00:00Z`,
                             to: `${foundDate}T23:59:59Z`
                         },
-                        polarization: "VH",
+                        polarization: pol.primary, // ✅ DV o DH → VH disponible
                         instrumentMode: pol.mode
                     },
                     processing: {
@@ -1230,14 +1236,15 @@ function evaluatePixel(samples) {
             output: {
                 width: width,
                 height: height,
-                format: "image/tiff", // ✅ CORRECTO para FLOAT32
-                sampleType: "FLOAT32", // ✅ CORRECTO
+                format: "image/tiff",
+                sampleType: "FLOAT32",
                 bands: 1,
                 crs: "http://www.opengis.net/def/crs/OGC/1.3/CRS84"
             },
             evalscript: evalscript
         };
 
+        // ✅ CORREGIDO: URL sin espacios
         const tiffResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
             method: 'POST',
             headers: {
