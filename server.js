@@ -1233,14 +1233,14 @@ function evaluatePixel(samples) {
                     type: "sentinel-1-grd"
                 }]
             },
-            output: {
-                width: width,
-                height: height,
-                format: "image/tiff",
-                sampleType: "FLOAT32",
-                bands: 1,
-                crs: "http://www.opengis.net/def/crs/OGC/1.3/CRS84"
-            },
+			output: {
+				width: width,
+				height: height,
+				bands: 1,
+				format: "image/tiff",
+				sampleType: "FLOAT32",
+				crs: "http://www.opengis.net/def/crs/OGC/1.3/CRS84"
+			},
             evalscript: evalscript
         };
 
@@ -1250,6 +1250,8 @@ function evaluatePixel(samples) {
 		console.log('   - output.sampleType:', payload.output.sampleType);
 		console.log('   - dataFilter.polarization:', payload.input.data[0].dataFilter.polarization);
 		console.log('   - evalscript preview:', evalscript.substring(0, 100) + '...');
+
+		console.log('🔍 [DEBUG] Payload.output real:', JSON.stringify(payload.output));
 		
         // ✅ CORREGIDO: URL sin espacios
         const tiffResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
