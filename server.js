@@ -1010,7 +1010,7 @@ const fetchSentinel1VHImage = async ({ geometry, date }) => {
         throw new Error('No se pudo calcular el bounding box del polígono.');
     }
 
-    // 🔍 PASO 1: Consultar el catálogo para asegurar que hay datos
+    // === PASO 1: Consultar catálogo (igual que en classification) ===
     const fromDate = new Date(date);
     const toDate = new Date(date);
     const catalogUrl = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search';
@@ -1023,10 +1023,7 @@ const fetchSentinel1VHImage = async ({ geometry, date }) => {
 
     const catalogResponse = await fetch(catalogUrl, {
         method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${accessToken}`
-        },
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${accessToken}` },
         body: JSON.stringify(catalogPayload)
     });
 
@@ -1040,26 +1037,30 @@ const fetchSentinel1VHImage = async ({ geometry, date }) => {
         throw new Error("No hay datos de Sentinel-1 disponibles en la fecha solicitada.");
     }
 
-    // ✅ Usamos la fecha real del primer feature
-    const foundDate = catalogData.features[0].properties.datetime.split('T')[0];
+    const feature = catalogData.features[0];
+    const foundDate = feature.properties.datetime.split('T')[0];
+    const tileId = feature.id;
+    const pol = determinePolarization(tileId);
 
-    // ✅ Calcular tamaño óptimo
+    // === Validar que la escena tenga VH ===
+    if (!pol.primary.includes('D')) {
+        throw new Error("La escena disponible no contiene la banda VH (solo polarización simple).");
+    }
+
+    // === Calcular tamaño óptimo ===
     const areaResult = calculatePolygonArea(bbox);
     const sizeInPixels = calculateOptimalImageSize(areaResult.area, 10, areaResult.aspectRatio);
     const { width, height } = sizeInPixels;
 
-    // ✅ Payload con foundDate y VH
+    // === Payload: usar polarización DUAL (DV/DH), pero evalscript solo usa VH ===
     const payload = {
         input: {
             bounds: { geometry: { type: "Polygon", coordinates: geometry } },
             data: [{
                 type: "sentinel-1-grd",
                 dataFilter: {
-                    timeRange: {
-                        from: `${foundDate}T00:00:00Z`,
-                        to: `${foundDate}T23:59:59Z`
-                    },
-                    polarization: "VH",
+                    timeRange: { from: `${foundDate}T00:00:00Z`, to: `${foundDate}T23:59:59Z` },
+                    polarization: pol.primary, // Ej: "DV"
                     instrumentMode: "IW"
                 },
                 processing: { mosaicking: "ORBIT" }
@@ -1085,7 +1086,7 @@ function evaluatePixel(samples) {
         return [0];
     }
     const vh_db = 10 * Math.log10(samples.VH);
-    // Rango ajustado según tus umbrales reales
+    // Rango ajustado a tus datos reales
     const minDb = -28.0;
     const maxDb = -10.0;
     let normalized = (vh_db - minDb) / (maxDb - minDb);
@@ -1096,10 +1097,7 @@ function evaluatePixel(samples) {
 
     const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
         method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${accessToken}`
-        },
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${accessToken}` },
         body: JSON.stringify(payload)
     });
 
