@@ -1199,18 +1199,24 @@ const fetchSentinel1VHAverage = async ({ geometry, date }) => {
         }
 
         // Evalscript para datos en bruto (TIFF, FLOAT32)
-// Evalscript: devolver 1 banda de Potencia Lineal (RAW)
+// Evalscript: devolver 1 banda de Potencia Lineal
 const evalscript = `//VERSION=3
 function setup() {
     return {
-        input: [{ bands: ["VH"], units: "LINEAR_POWER" }],
-        output: { bands: 1, sampleType: "FLOAT32" } // ✅ Reducir a 1 banda.
+        // ✅ Solicitar dataMask
+        input: [{ bands: ["VH", "dataMask"], units: "LINEAR_POWER" }], 
+        output: { bands: 1, sampleType: "FLOAT32" } 
     };
 }
 function evaluatePixel(samples) {
-    // Devolvemos el valor lineal directamente (el backend lo convertirá a dB)
-    return [samples.VH]; 
+    // ✅ Retornar NaN (el NoData para FLOAT32) si no hay datos.
+    if (samples.dataMask === 1) { 
+        return [samples.VH]; 
+    }
+    // Si dataMask es 0 o indefinido, retorna NaN.
+    return [NaN]; 
 }`;
+
         const payload = {
             input: {
                 bounds: {
@@ -1291,21 +1297,21 @@ function evaluatePixel(samples) {
     const rasters = await image.readRasters({ interleave: true }); 
     
     // El primer elemento (rasters[0]) contendrá el Float32Array de los píxeles
-	const float32Array = rasters[0]; 
-    
-	let sum = 0;
-	let count = 0;
-	
-	for (let i = 0; i < float32Array.length; i++) { 
-		const linear_power_value = float32Array[i];
+const float32Array = rasters[0]; 
+let sum = 0;
+let count = 0;
 
-		if (linear_power_value > 0) { 
-            // Conversión a dB (asumiendo que mantuviste mi recomendación anterior de devolver RAW)
-            const vh_db = 10 * Math.log10(linear_power_value);
-			sum += vh_db;
-			count++;
-		}
-	}
+for (let i = 0; i < float32Array.length; i++) { 
+    const linear_power_value = float32Array[i];
+
+    // ✅ Condición robusta: debe ser un número finito Y debe ser positivo
+    if (Number.isFinite(linear_power_value) && linear_power_value > 0) { 
+        // Conversión a dB (solo para valores válidos y positivos)
+        const vh_db = 10 * Math.log10(linear_power_value);
+        sum += vh_db;
+        count++;
+    }
+}
 	const avgVhDb = count > 0 ? sum / count : null;
 
 
