@@ -1254,7 +1254,10 @@ function evaluatePixel(samples) {
 		const tiffResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
 			method: 'POST',
 			headers: {
-				'Content-Type': 'application/json',
+				// Cabecera requerida para el cuerpo JSON
+				'Content-Type': 'application/json', 
+				// ✅ CORRECCIÓN CLAVE: Forzar la respuesta a ser un TIFF
+				'Accept': 'image/tiff', 
 				'Authorization': `Bearer ${accessToken}`
 			},
 			body: JSON.stringify(payload)
