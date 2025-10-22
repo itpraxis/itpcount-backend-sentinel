@@ -1276,7 +1276,7 @@ function evaluatePixel(samples) {
 			throw new Error(`La respuesta no es un TIFF válido. Content-Type: ${contentType}. Detalle: ${errorText}`);
 		}
 
-		const tiffBuffer = await tiffResponse.arrayBuffer();
+
 		// ✅ Validar que la longitud sea múltiplo de 4
 		const tiffBuffer = await tiffResponse.arrayBuffer();
 		const float32Array = new Float32Array(tiffBuffer);
