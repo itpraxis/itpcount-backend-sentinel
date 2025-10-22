@@ -1164,11 +1164,18 @@ const fetchSentinel1VHAverage = async ({ geometry, date }) => {
         // Búsqueda en el Catálogo
         const fromDate = new Date(date);
         const toDate = new Date(date);
+		
+		
+// 🚨 CORRECCIÓN CLAVE: Abrir el rango de búsqueda a 1 día antes y 1 día después.
+fromDate.setDate(fromDate.getDate() - 1); 
+toDate.setDate(toDate.getDate() + 1);		
+		
+		
         // ✅ CORREGIDO: URL sin espacios
         const catalogUrl = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search';
         const catalogPayload = {
             "bbox": bbox,
-            "datetime": `${fromDate.toISOString().split('T')[0]}T00:00:00Z/${toDate.toISOString().split('T')[0]}T23:59:59Z`,
+			"datetime": `${fromDate.toISOString().split('T')[0]}T00:00:00Z/${toDate.toISOString().split('T')[0]}T23:59:59Z`,
             "collections": ["sentinel-1-grd"],
             "limit": 10
         };
@@ -1289,6 +1296,12 @@ function evaluatePixel(samples) {
 		// ✅ Validar que la longitud sea múltiplo de 4
 		const tiffBuffer = await tiffResponse.arrayBuffer();
 
+// 1. Verificación de Buffer (Para ver si Sentinel Hub devolvió algo)
+if (tiffBuffer.byteLength === 0) {
+    console.error('❌ [ERROR FATAL] Sentinel Hub devolvió un Buffer de 0 bytes.');
+    return { avgVhDb: null, validPixels: 0, usedDate: foundDate };
+}
+
 
 // ✅ CÓDIGO A AÑADIR: Parsear el TIFF y obtener los datos puros
     const tiff = await fromArrayBuffer(tiffBuffer);
@@ -1297,21 +1310,19 @@ function evaluatePixel(samples) {
     const rasters = await image.readRasters({ interleave: true }); 
 
 // 🔍 NUEVOS LOGS DE DIAGNÓSTICO
-    console.log('🔍 [DEBUG] Tipo de dato de rasters:', Array.isArray(rasters) ? 'Array' : typeof rasters);
-    console.log('🔍 [DEBUG] Número de elementos/bandas en rasters:', Array.isArray(rasters) ? rasters.length : 'N/A');    
+console.log('🔍 [DEBUG] Tipo de dato de rasters:', Array.isArray(rasters) ? 'Array' : typeof rasters);
+console.log('🔍 [DEBUG] Número de elementos/bandas en rasters:', Array.isArray(rasters) ? rasters.length : 'N/A');
 
     // El primer elemento (rasters[0]) contendrá el Float32Array de los píxeles
 const float32Array = rasters[0]; 
 
-// Log robusto que maneja `undefined` para evitar el crash
-    if (float32Array && float32Array.length) {
-        console.log('🔍 [DEBUG] Longitud del Array de Píxeles (Esperado ~1.03M):', float32Array.length);
-        console.log('🔍 [DEBUG] Primeros 10 valores (Potencia Lineal):', float32Array.slice(0, 10)); 
-    } else {
-        console.log('❌ [DEBUG] El array de píxeles es CERO o UNDEFINED. No hay datos válidos de Sentinel-1.');
-    }
+// 2. Manejo de Array Vacío (Evita el crash y maneja el caso de datos no encontrados)
+if (!float32Array || float32Array.length === 0) {
+    console.warn('⚠️ [ADVERTENCIA] El GeoTIFF no contenía píxeles. La escena está vacía para esta geometría.');
+    return { avgVhDb: null, validPixels: 0, usedDate: foundDate };
+}
 
-
+// 3. Inicio del cálculo (con la corrección EPSILON)
 const EPSILON = 1e-6; // Umbral mínimo para el logaritmo (representa el "ruido")
 let sum = 0;
 let count = 0;
