@@ -1298,21 +1298,33 @@ function evaluatePixel(samples) {
     
     // El primer elemento (rasters[0]) contendrá el Float32Array de los píxeles
 const float32Array = rasters[0]; 
+const EPSILON = 1e-6; // Umbral mínimo para el logaritmo (representa el "ruido")
+
 let sum = 0;
 let count = 0;
 
 for (let i = 0; i < float32Array.length; i++) { 
-    const linear_power_value = float32Array[i];
+    let linear_power_value = float32Array[i];
 
-    // ✅ Condición robusta: debe ser un número finito Y debe ser positivo
-    if (Number.isFinite(linear_power_value) && linear_power_value > 0) { 
-        // Conversión a dB (solo para valores válidos y positivos)
-        const vh_db = 10 * Math.log10(linear_power_value);
+    // Paso 1: Verificamos si es un píxel válido (no-NaN del dataMask)
+    if (Number.isFinite(linear_power_value)) { 
+        
+        let power_value_for_log = linear_power_value;
+        
+        // Paso 2: Si el valor es 0 o negativo (debido a la corrección de ruido),
+        // lo forzamos al umbral mínimo para evitar fallos de Math.log10.
+        if (power_value_for_log <= 0) {
+            power_value_for_log = EPSILON;
+        }
+
+        // Paso 3: Aplicamos la conversión a dB (10 * log10(σ⁰))
+        const vh_db = 10 * Math.log10(power_value_for_log);
+        
         sum += vh_db;
-        count++;
+        count++; // Contamos el píxel como válido
     }
 }
-	const avgVhDb = count > 0 ? sum / count : null;
+const avgVhDb = count > 0 ? sum / count : null;
 
 
         return {
