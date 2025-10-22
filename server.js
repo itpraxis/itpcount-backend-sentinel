@@ -1295,19 +1295,24 @@ function evaluatePixel(samples) {
     const image = await tiff.getImage(0);
     // await readRasters es la función clave: extrae los datos de píxeles puros (un array por banda)
     const rasters = await image.readRasters({ interleave: true }); 
-    
+
+// 🔍 NUEVOS LOGS DE DIAGNÓSTICO
+    console.log('🔍 [DEBUG] Tipo de dato de rasters:', Array.isArray(rasters) ? 'Array' : typeof rasters);
+    console.log('🔍 [DEBUG] Número de elementos/bandas en rasters:', Array.isArray(rasters) ? rasters.length : 'N/A');    
+
     // El primer elemento (rasters[0]) contendrá el Float32Array de los píxeles
 const float32Array = rasters[0]; 
 
-// 🔍 AÑADIR DEBUG AQUÍ
-    console.log('🔍 [DEBUG] Longitud del Array de Píxeles (Esperado 1,030,225):', float32Array.length);
-    // Muestra los primeros 10 valores para ver si hay algún dato no-NaN
-    console.log('🔍 [DEBUG] Primeros 10 valores de píxeles (Potencia Lineal):', float32Array.slice(0, 10)); 
-    // FIN DEL DEBUG
+// Log robusto que maneja `undefined` para evitar el crash
+    if (float32Array && float32Array.length) {
+        console.log('🔍 [DEBUG] Longitud del Array de Píxeles (Esperado ~1.03M):', float32Array.length);
+        console.log('🔍 [DEBUG] Primeros 10 valores (Potencia Lineal):', float32Array.slice(0, 10)); 
+    } else {
+        console.log('❌ [DEBUG] El array de píxeles es CERO o UNDEFINED. No hay datos válidos de Sentinel-1.');
+    }
 
 
 const EPSILON = 1e-6; // Umbral mínimo para el logaritmo (representa el "ruido")
-
 let sum = 0;
 let count = 0;
 
@@ -1338,6 +1343,7 @@ const avgVhDb = count > 0 ? sum / count : null;
         return {
             avgVhDb: avgVhDb,
             totalPixels: float32Array.length,
+			totalPixels: float32Array ? float32Array.length : 0, // Devuelve 0 si el array es undefined			
             validPixels: count,
             usedDate: foundDate
         };
