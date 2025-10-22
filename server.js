@@ -1196,20 +1196,17 @@ const fetchSentinel1VHAverage = async ({ geometry, date }) => {
         }
 
         // Evalscript para datos en bruto (TIFF, FLOAT32)
-// Evalscript: devolver 3 bandas idénticas (solo usaremos la primera)
+// Evalscript: devolver 1 banda de Potencia Lineal (RAW)
 const evalscript = `//VERSION=3
 function setup() {
     return {
         input: [{ bands: ["VH"], units: "LINEAR_POWER" }],
-        output: { bands: 3, sampleType: "FLOAT32" } // ← ¡3 bandas!
+        output: { bands: 1, sampleType: "FLOAT32" } // ✅ Reducir a 1 banda.
     };
 }
 function evaluatePixel(samples) {
-    if (samples.VH <= 0) {
-        return [NaN, NaN, NaN];
-    }
-    const vh_db = 10 * Math.log10(samples.VH);
-    return [vh_db, vh_db, vh_db]; // ← Repetimos el valor en las 3 bandas
+    // Devolvemos el valor lineal directamente (el backend lo convertirá a dB)
+    return [samples.VH]; 
 }`;
         const payload = {
             input: {
@@ -1235,16 +1232,16 @@ function evaluatePixel(samples) {
                 }]
             },
 			output: {
-				width: width,
-				height: height,
-				bands: 3, // ← ¡Cambiar a 3!
-				format: "image/tiff",
-				sampleType: "FLOAT32",
-				crs: "http://www.opengis.net/def/crs/OGC/1.3/CRS84"
-			},			
-            evalscript: evalscript
-        };
-
+							width: width,
+							height: height,
+							bands: 1, // ✅ Volver a 1 banda aquí también.
+							format: "image/tiff",
+							sampleType: "FLOAT32",
+							crs: "http://www.opengis.net/def/crs/OGC/1.3/CRS84"
+						},
+						
+						evalscript: evalscript
+					};
 		// 🔍 DEBUG: Verificar payload antes de enviar
 		console.log('🔍 [DEBUG] Payload enviado a Sentinel Hub Process API:');
 		console.log('   - output.format:', payload.output.format);
@@ -1282,13 +1279,17 @@ function evaluatePixel(samples) {
 		const float32Array = new Float32Array(tiffBuffer);
 		let sum = 0;
 		let count = 0;
-		// Solo procesamos la primera banda (índices 0, 3, 6, ...)
-		for (let i = 0; i < float32Array.length; i += 3) {
-			const value = float32Array[i];
-			if (!isNaN(value)) {
-				sum += value;
+		
+		for (let i = 0; i < float32Array.length; i++) { 
+			const linear_power_value = float32Array[i];
+
+            // ✅ Conversión a dB en el backend
+			if (linear_power_value > 0) { 
+                const vh_db = 10 * Math.log10(linear_power_value);
+				sum += vh_db;
 				count++;
 			}
+            // Los valores <= 0 (ruido o NoData) se ignoran
 		}
 		const avgVhDb = count > 0 ? sum / count : null;
 
