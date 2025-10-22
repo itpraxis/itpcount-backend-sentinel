@@ -1298,6 +1298,14 @@ function evaluatePixel(samples) {
     
     // El primer elemento (rasters[0]) contendrá el Float32Array de los píxeles
 const float32Array = rasters[0]; 
+
+// 🔍 AÑADIR DEBUG AQUÍ
+    console.log('🔍 [DEBUG] Longitud del Array de Píxeles (Esperado 1,030,225):', float32Array.length);
+    // Muestra los primeros 10 valores para ver si hay algún dato no-NaN
+    console.log('🔍 [DEBUG] Primeros 10 valores de píxeles (Potencia Lineal):', float32Array.slice(0, 10)); 
+    // FIN DEL DEBUG
+
+
 const EPSILON = 1e-6; // Umbral mínimo para el logaritmo (representa el "ruido")
 
 let sum = 0;
