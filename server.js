@@ -4,6 +4,9 @@ console.log('🔑 xCLIENT_ID cargado:', process.env.CLIENT_ID ? '✅ Sí' : '❌
 console.log('🔐 xCLIENT_SECRET cargado:', process.env.CLIENT_SECRET ? '✅ Sí' : '❌ No');
 const express = require('express');
 const cors = require('cors');
+const { fromArrayBuffer } = require('geotiff');
+
+
 const app = express();
 // ✅ CORRECCIÓN 1: Middleware CORS al inicio ABSOLUTO
 app.use(cors({
@@ -1279,22 +1282,32 @@ function evaluatePixel(samples) {
 
 		// ✅ Validar que la longitud sea múltiplo de 4
 		const tiffBuffer = await tiffResponse.arrayBuffer();
-		const float32Array = new Float32Array(tiffBuffer);
-		let sum = 0;
-		let count = 0;
-		
-		for (let i = 0; i < float32Array.length; i++) { 
-			const linear_power_value = float32Array[i];
 
-            // ✅ Conversión a dB en el backend
-			if (linear_power_value > 0) { 
-                const vh_db = 10 * Math.log10(linear_power_value);
-				sum += vh_db;
-				count++;
-			}
-            // Los valores <= 0 (ruido o NoData) se ignoran
+
+// ✅ CÓDIGO A AÑADIR: Parsear el TIFF y obtener los datos puros
+    const tiff = await fromArrayBuffer(tiffBuffer);
+    const image = await tiff.getImage(0);
+    // await readRasters es la función clave: extrae los datos de píxeles puros (un array por banda)
+    const rasters = await image.readRasters({ interleave: true }); 
+    
+    // El primer elemento (rasters[0]) contendrá el Float32Array de los píxeles
+	const float32Array = rasters[0]; 
+    
+	let sum = 0;
+	let count = 0;
+	
+	for (let i = 0; i < float32Array.length; i++) { 
+		const linear_power_value = float32Array[i];
+
+		if (linear_power_value > 0) { 
+            // Conversión a dB (asumiendo que mantuviste mi recomendación anterior de devolver RAW)
+            const vh_db = 10 * Math.log10(linear_power_value);
+			sum += vh_db;
+			count++;
 		}
-		const avgVhDb = count > 0 ? sum / count : null;
+	}
+	const avgVhDb = count > 0 ? sum / count : null;
+
 
         return {
             avgVhDb: avgVhDb,
