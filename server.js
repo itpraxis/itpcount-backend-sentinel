@@ -1196,20 +1196,20 @@ const fetchSentinel1VHAverage = async ({ geometry, date }) => {
         }
 
         // Evalscript para datos en bruto (TIFF, FLOAT32)
-const evalscript = `//VERSION=3
-function setup() {
-    return {
-        input: [{ bands: ["VH"], units: "LINEAR_POWER" }], // ← ¡Eliminado "dataMask"!
-        output: { bands: 1, sampleType: "FLOAT32" }
-    };
-}
-function evaluatePixel(samples) {
-    // Si VH <= 0, no hay datos válidos → devolver NaN
-    if (samples.VH <= 0) {
-        return [NaN];
-    }
-    return [10 * Math.log10(samples.VH)];
-}`;	
+		const evalscript = `//VERSION=3
+		function setup() {
+			return {
+				input: [{ bands: ["VH"], units: "LINEAR_POWER" }], // ← ¡Eliminado "dataMask"!
+				output: { bands: 1, sampleType: "FLOAT32" }
+			};
+		}
+		function evaluatePixel(samples) {
+			// Si VH <= 0, no hay datos válidos → devolver NaN
+			if (samples.VH <= 0) {
+				return [NaN];
+			}
+			return [10 * Math.log10(samples.VH)];
+		}`;
         const payload = {
             input: {
                 bounds: {
