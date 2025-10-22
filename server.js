@@ -1306,8 +1306,10 @@ if (tiffBuffer.byteLength === 0) {
 // ✅ CÓDIGO A AÑADIR: Parsear el TIFF y obtener los datos puros
     const tiff = await fromArrayBuffer(tiffBuffer);
     const image = await tiff.getImage(0);
-    // await readRasters es la función clave: extrae los datos de píxeles puros (un array por banda)
-    const rasters = await image.readRasters({ interleave: true }); 
+	
+// 🚨 CORRECCIÓN FINAL: Leer SIN interleave para 1 banda.
+    const rasters = await image.readRasters();	
+	
 
 // 🔍 NUEVOS LOGS DE DIAGNÓSTICO
 console.log('🔍 [DEBUG] Tipo de dato de rasters:', Array.isArray(rasters) ? 'Array' : typeof rasters);
