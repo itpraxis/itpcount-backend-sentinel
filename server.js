@@ -1165,7 +1165,7 @@ const fetchSentinel1Classification2 = async ({ geometry, date }) => {
 };
 
 // ==============================================
-// ✅ NUEVO ENDPOINT: /api/sentinel1classification
+// ✅ NUEVO ENDPOINT: /api/sentinel1classification2
 // ==============================================
 app.post('/api/sentinel1classification2', async (req, res) => {
     const { coordinates, date } = req.body;
@@ -1180,6 +1180,175 @@ app.post('/api/sentinel1classification2', async (req, res) => {
         res.status(500).json({ error: error.message });
     }
 });
+
+
+
+// ==============================================
+// ✅ NUEVO ENDPOINT: /api/sentinel1classification3 - Clasificación 6 Clases (Optimizado)
+// ==============================================
+/**
+ * Obtiene la imagen de clasificación de 6 clases para Sentinel-1.
+ * Este endpoint está optimizado: usa la fecha solicitada y busca la escena más cercana en ese día,
+ * evitando una búsqueda extensa en el catálogo.
+ * @param {object} params - Parámetros de la solicitud.
+ * @param {array} params.geometry - Coordenadas del polígono.
+ * @param {string} params.date - Fecha de la imagen.
+ * @returns {object} Un objeto con la URL de la imagen PNG y metadatos.
+ */
+const fetchSentinel1Classification3 = async ({ geometry, date }) => {
+    const accessToken = await getAccessToken();
+    const bbox = polygonToBbox(geometry);
+    if (!bbox) {
+        throw new Error('No se pudo calcular el bounding box del polígono.');
+    }
+    try {
+        const areaResult = calculatePolygonArea(bbox);
+        const areaInSquareMeters = areaResult.area;
+        const aspectRatio = areaResult.aspectRatio;
+        const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10, aspectRatio);
+        const width = sizeInPixels.width;
+        const height = sizeInPixels.height;
+
+        // --- PASO 1: Buscar una escena en la fecha exacta o cercana ---
+        // Usamos la misma lógica que en 'getSentinel1Dates' pero limitada a un rango de 1 día.
+        const fromDate = new Date(date);
+        const toDate = new Date(date);
+        // Extender la búsqueda a 1 día antes y 1 día después para mayor probabilidad de encontrar datos.
+        fromDate.setDate(fromDate.getDate() - 1);
+        toDate.setDate(toDate.getDate() + 1);
+
+        const catalogUrl = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search';
+        const catalogPayload = {
+            "bbox": bbox,
+            "datetime": `${fromDate.toISOString().split('T')[0]}T00:00:00Z/${toDate.toISOString().split('T')[0]}T23:59:59Z`,
+            "collections": ["sentinel-1-grd"],
+            "limit": 1 // Solo necesitamos la primera escena disponible
+        };
+
+        const catalogResponse = await fetch(catalogUrl, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${accessToken}`
+            },
+            body: JSON.stringify(catalogPayload)
+        });
+
+        if (!catalogResponse.ok) {
+            const errorText = await catalogResponse.text();
+            throw new Error(`Error en consulta al catálogo: ${errorText}`);
+        }
+
+        const catalogData = await catalogResponse.json();
+
+        if (catalogData.features.length === 0) {
+            throw new Error("No se encontraron datos de Sentinel-1 disponibles para esta ubicación en el rango de fechas.");
+        }
+
+        // Tomar la primera escena encontrada (la más reciente dentro del rango)
+        const feature = catalogData.features[0];
+        const foundDate = feature.properties.datetime.split('T')[0];
+        const tileId = feature.id;
+        const pol = determinePolarization(tileId);
+
+        // Validar que la escena tenga VH (polarización dual)
+        if (!pol.primary.includes('D')) {
+            throw new Error(`La escena disponible (${tileId}) no contiene la banda VH.`);
+        }
+
+        // Forzamos a usar la polarización Dual (DV/DH) para la clasificación
+        const finalPolarization = pol.primary.includes('D') ? pol.primary : 'DV';
+
+        // --- PASO 2: Generar el evalscript y enviar la solicitud de procesamiento ---
+        const evalscript = getClassification6ClassesEvalscript(); // Reutiliza tu función existente
+
+        const payload = {
+            input: {
+                bounds: {
+                    geometry: {
+                        type: "Polygon",
+                        coordinates: geometry
+                    }
+                },
+                data: [{
+                    dataFilter: {
+                        timeRange: {
+                            from: `${foundDate}T00:00:00Z`,
+                            to: `${foundDate}T23:59:59Z`
+                        },
+                        polarization: finalPolarization, // ✅ Usa finalPolarization aquí
+                        instrumentMode: pol.mode
+                    },
+                    processing: {
+                        mosaicking: "ORBIT"
+                    },
+                    type: "sentinel-1-grd"
+                }]
+            },
+            output: {
+                width: width,
+                height: height,
+                format: "image/png",
+                sampleType: "UINT8",
+                bands: 1, // ✅ Siempre 1 banda para clasificación
+                crs: "http://www.opengis.net/def/crs/OGC/1.3/CRS84"
+            },
+            evalscript: evalscript
+        };
+
+        const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${accessToken}`
+            },
+            body: JSON.stringify(payload)
+        });
+
+        if (!imageResponse.ok) {
+            const errorText = await imageResponse.text();
+            throw new Error(`Solicitud de clasificación falló: ${errorText}`);
+        }
+
+        const buffer = await imageResponse.arrayBuffer();
+        const base64 = Buffer.from(buffer).toString('base64');
+
+        return {
+            url: `data:image/png;base64,${base64}`,
+            usedDate: foundDate,
+            polarization: finalPolarization,
+            sourceTile: tileId,
+            status: "Clasificación 6-Clases (Agua, Suelo, Cultivos, Arbustal, Bosque, Vegetación Densa)",
+            bbox: bbox,
+            width: width,
+            height: height
+        };
+
+    } catch (error) {
+        console.error('❌ Error en fetchSentinel1Classification3 (6 clases Optimizado):', error.message);
+        throw error;
+    }
+};
+
+// Endpoint para el frontend
+app.post('/api/sentinel1classification3', async (req, res) => {
+    const { coordinates, date } = req.body;
+    if (!coordinates || !date) {
+        return res.status(400).json({ error: 'Faltan parámetros: coordinates y date' });
+    }
+    try {
+        const result = await fetchSentinel1Classification3({ geometry: coordinates, date: date });
+        res.json(result);
+    } catch (error) {
+        console.error('❌ Error en el endpoint /api/sentinel1classification3:', error.message);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+
+
+
+
 
 // ==============================================
 // ✅ NUEVO ENDPOINT: /api/sentinel1vhimage - Imagen de VH en escala de grises
