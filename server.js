@@ -1369,7 +1369,176 @@ app.post('/api/sentinel1classification3', async (req, res) => {
 
 
 
+// ==============================================
+// ✅ NUEVO ENDPOINT ROBUSTO: /api/sentinel1classification_robust
+// ==============================================
+/**
+ * Evalscript robusto para clasificación de cobertura usando Sentinel-1 (VV y VH).
+ * Incluye lógica mejorada para distinguir Agua de Suelo y usa la relación VV/VH.
+ */
+const getClassificationRobustEvalscript = () => {
+    return `//VERSION=3
+function setup() {
+    return {
+        input: [{ bands: ["VV", "VH", "dataMask"], units: "LINEAR_POWER" }],
+        output: { bands: 1, sampleType: "UINT8" }
+    };
+}
+function evaluatePixel(samples) {
+    // Manejo de datos inválidos
+    if (samples.dataMask === 0 || samples.VV <= 0 || samples.VH <= 0) {
+        return [0]; // Sin datos
+    }
 
+    // Conversión a dB
+    const vv_db = 10 * Math.log10(samples.VV);
+    const vh_db = 10 * Math.log10(samples.VH);
+    const rvi_db = vv_db - vh_db; // Relación de polarización
+
+    // --- LÓGICA DE CLASIFICACIÓN MEJORADA ---
+    // 1. AGUA: VH muy bajo y RVI bajo (superficie lisa)
+    if (vh_db < -25.0 && rvi_db < 3.0) {
+        return [50];
+    }
+    // 2. SUELO / URBANO: VH bajo pero RVI alto (superficie rugosa)
+    else if (vh_db < -20.0) {
+        return [100];
+    }
+    // 3. CULTIVOS / PASTIZALES
+    else if (vh_db < -17.0) {
+        return [150];
+    }
+    // 4. VEGETACIÓN BAJA
+    else if (vh_db < -14.0) {
+        return [180];
+    }
+    // 5. BOSQUE
+    else if (vh_db < -11.0) {
+        return [220];
+    }
+    // 6. VEGETACIÓN DENSA: VH alto y RVI alto
+    else {
+        return [255];
+    }
+}`;
+};
+
+/**
+ * Función principal para el nuevo endpoint robusto.
+ */
+const fetchSentinel1ClassificationRobust = async ({ geometry, date }) => {
+    const accessToken = await getAccessToken();
+    const bbox = polygonToBbox(geometry);
+    if (!bbox) {
+        throw new Error('No se pudo calcular el bounding box del polígono.');
+    }
+
+    try {
+        // Calcular tamaño óptimo (igual que en classification3)
+        const areaResult = calculatePolygonArea(bbox);
+        const sizeInPixels = calculateOptimalImageSize(areaResult.area, 10, areaResult.aspectRatio);
+        const width = sizeInPixels.width;
+        const height = sizeInPixels.height;
+
+        // Buscar escena en el catálogo (igual que en classification3)
+        const fromDate = new Date(date);
+        const toDate = new Date(date);
+        fromDate.setDate(fromDate.getDate() - 1);
+        toDate.setDate(toDate.getDate() + 1);
+
+        const catalogUrl = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search';
+        const catalogPayload = {
+            "bbox": bbox,
+            "datetime": `${fromDate.toISOString().split('T')[0]}T00:00:00Z/${toDate.toISOString().split('T')[0]}T23:59:59Z`,
+            "collections": ["sentinel-1-grd"],
+            "limit": 1
+        };
+
+        const catalogResponse = await fetch(catalogUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${accessToken}` },
+            body: JSON.stringify(catalogPayload)
+        });
+
+        if (!catalogResponse.ok) throw new Error(`Error en catálogo: ${await catalogResponse.text()}`);
+        const catalogData = await catalogResponse.json();
+        if (catalogData.features.length === 0) throw new Error("No hay datos de Sentinel-1 disponibles.");
+
+        const feature = catalogData.features[0];
+        const foundDate = feature.properties.datetime.split('T')[0];
+        const tileId = feature.id;
+        const pol = determinePolarization(tileId);
+
+        // Asegurarse de usar polarización dual (DV/DH)
+        const finalPolarization = pol.primary.includes('D') ? pol.primary : 'DV';
+
+        // --- PROCESAMIENTO CON EL NUEVO EVALSCRIPT ---
+        const evalscript = getClassificationRobustEvalscript();
+        const payload = {
+            input: {
+                bounds: { geometry: { type: "Polygon", coordinates: geometry } },
+                data: [{
+                    dataFilter: {
+                        timeRange: { from: `${foundDate}T00:00:00Z`, to: `${foundDate}T23:59:59Z` },
+                        polarization: finalPolarization,
+                        instrumentMode: pol.mode
+                    },
+                    processing: { mosaicking: "ORBIT" },
+                    type: "sentinel-1-grd"
+                }]
+            },
+            output: {
+                width: width,
+                height: height,
+                format: "image/png",
+                sampleType: "UINT8",
+                bands: 1,
+                crs: "http://www.opengis.net/def/crs/OGC/1.3/CRS84"
+            },
+            evalscript: evalscript
+        };
+
+        const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${accessToken}` },
+            body: JSON.stringify(payload)
+        });
+
+        if (!imageResponse.ok) throw new Error(`Error en Process API: ${await imageResponse.text()}`);
+
+        const buffer = await imageResponse.arrayBuffer();
+        const base64 = Buffer.from(buffer).toString('base64');
+
+        return {
+            url: `data:image/png;base64,${base64}`,
+            usedDate: foundDate,
+            polarization: finalPolarization,
+            sourceTile: tileId,
+            bbox: bbox,
+            width: width,
+            height: height
+        };
+
+    } catch (error) {
+        console.error('❌ Error en fetchSentinel1ClassificationRobust:', error.message);
+        throw error;
+    }
+};
+
+// Registrar el nuevo endpoint
+app.post('/api/sentinel1classification_robust', async (req, res) => {
+    const { coordinates, date } = req.body;
+    if (!coordinates || !date) {
+        return res.status(400).json({ error: 'Faltan parámetros: coordinates y date' });
+    }
+    try {
+        const result = await fetchSentinel1ClassificationRobust({ geometry: coordinates, date: date });
+        res.json(result);
+    } catch (error) {
+        console.error('❌ Error en el endpoint /api/sentinel1classification_robust:', error.message);
+        res.status(500).json({ error: error.message });
+    }
+});
 
 
 // ==============================================
