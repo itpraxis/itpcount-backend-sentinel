@@ -1004,6 +1004,22 @@ app.post('/api/sentinel1classification', async (req, res) => {
  * Clases: 1=Agua, 2=Suelo, 3=Cultivos, 4=Arbustal, 5=Bosque, 6=Vegetación Densa.
  * @returns {string} El evalscript correspondiente.
  */
+// ==============================================
+// FUNCIÓN AUXILIAR: Evalscript para CLASIFICACIÓN de 6 CLASES (mejorada para Chile centro-sur)
+// ==============================================
+/**
+ * Genera el evalscript para la clasificación de 6 clases de cobertura con Sentinel-1 (VH en dB).
+ * Clases: 1=Agua, 2=Suelo, 3=Cultivos, 4=Arbustal, 5=Bosque, 6=Vegetación Densa.
+ * @returns {string} El evalscript correspondiente.
+ */
+// ==============================================
+// FUNCIÓN AUXILIAR: Evalscript para CLASIFICACIÓN de 6 CLASES (mejorada para Chile centro-sur)
+// ==============================================
+/**
+ * Genera el evalscript para la clasificación de 6 clases de cobertura con Sentinel-1 (VH en dB).
+ * Clases: 1=Agua, 2=Suelo, 3=Cultivos, 4=Arbustal, 5=Bosque, 6=Vegetación Densa.
+ * @returns {string} El evalscript correspondiente.
+ */
 const getClassification6ClassesEvalscript = () => {
     return `//VERSION=3
 function setup() {
@@ -1013,11 +1029,14 @@ function setup() {
   };
 }
 function evaluatePixel(samples) {
+  // Si no hay datos o VH es inválido, devolver 0 (sin datos)
   if (samples.dataMask === 0 || samples.VH <= 0) {
-    return [0]; // Sin datos
+    return [0];
   }
+
+  // Convertir VH a dB
   const vh_db = 10 * Math.log10(samples.VH);
-  
+
   // Clasificación secuencial (de menor a mayor VH)
   if (vh_db < -25.0) {
       return [50];   // Clase 1: Agua → 50
@@ -1029,8 +1048,11 @@ function evaluatePixel(samples) {
       return [180];  // Clase 4: Arbustal → 180
   } else if (vh_db < -11.0) {
       return [220];  // Clase 5: Bosque → 220
-  } else {
+  } else if (vh_db >= -11.0) {
       return [255];  // Clase 6: Vegetación Densa → 255
+  } else {
+      // Esto no debería ocurrir, pero por seguridad
+      return [0]; // Sin datos
   }
 }`;
 };
