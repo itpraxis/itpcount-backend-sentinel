@@ -1236,8 +1236,8 @@ const fetchSentinel1Classification3 = async ({ geometry, date }) => {
         const fromDate = new Date(date);
         const toDate = new Date(date);
         // Extender la búsqueda a 1 día antes y 1 día después para mayor probabilidad de encontrar datos.
-        fromDate.setDate(fromDate.getDate() - 1);
-        toDate.setDate(toDate.getDate() + 1);
+        fromDate.setDate(fromDate.getDate() - 0);
+        toDate.setDate(toDate.getDate() + 0);
 
         const catalogUrl = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search';
         const catalogPayload = {
@@ -1967,8 +1967,8 @@ const fetchSentinel1VHAverage = async ({ geometry, date }) => {
 		
 		
 // 🚨 CORRECCIÓN CLAVE: Abrir el rango de búsqueda a 1 día antes y 1 día después.
-fromDate.setDate(fromDate.getDate() - 1); 
-toDate.setDate(toDate.getDate() + 1);		
+fromDate.setDate(fromDate.getDate() - 0); 
+toDate.setDate(toDate.getDate() + 0);		
 		
 		
         // ✅ CORREGIDO: URL sin espacios
