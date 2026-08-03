@@ -1,2931 +1,773 @@
-// server.js (versión con monitoreo de Processing Units - PU y envío a Google Sheet)
+// server.js — Backend v2 ITP-EarthWatch
+// Análisis satelital comparativo con Sentinel Hub:
+//  - Máscara de nubes SCL por polígono
+//  - NDVI enmascarado (un solo grupo, units DN)
+//  - Composite temporal server-side (mediana)
+//  - Índice radar RVI continuo (VV/VH)
+//  - Detección de cambio dual-sensor (NDVI + RVI)
+//  - Serie temporal NDVI
+//  - Clasificación adaptativa (Otsu) + presets
+//  - Rate limiting + healthz + caché de token
 require('dotenv').config();
-console.log('🔑 xCLIENT_ID cargado:', process.env.CLIENT_ID ? '✅ Sí' : '❌ No');
-console.log('🔐 xCLIENT_SECRET cargado:', process.env.CLIENT_SECRET ? '✅ Sí' : '❌ No');
 const express = require('express');
 const cors = require('cors');
+const rateLimit = require('express-rate-limit');
 const { fromArrayBuffer } = require('geotiff');
-
+const { PNG } = require('pngjs');
 
 const app = express();
-// ✅ CORRECCIÓN 1: Middleware CORS al inicio ABSOLUTO
-app.use(cors({
-  origin: ['https://itpraxis.cl', 'https://www.itpraxis.cl'],
-  credentials: true
-}));
-// ✅ CORRECCIÓN 2: Middleware de logging global (ANTES de express.json)
+app.use(cors({ origin: true }));
 app.use((req, res, next) => {
-  console.warn(`📥 Nueva solicitud entrante: ${req.method} ${req.originalUrl}`);
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.originalUrl}`);
   next();
 });
-// ✅ CORRECCIÓN 3: Aumentar límite de JSON y manejar errores de parsing
 app.use(express.json({ limit: '10mb' }));
-// Manejo de errores de parsing de JSON
-app.use((error, req, res, next) => {
-  if (error instanceof SyntaxError && error.status === 400 && 'body' in error) {
-    console.error('❌ Error al parsear el cuerpo de la solicitud:', error.message);
-    return res.status(400).json({ error: 'Cuerpo de la solicitud inválido o demasiado grande.' });
-  }
-  next();
-});
-const port = process.env.PORT || 10000;
-/*  */
-// ==============================================
-// ✅ NUEVA FUNCIÓN: Calcula y envía el consumo de PU a Google Sheets
-// ==============================================
-/**
- * Calcula y envía el consumo estimado de Processing Units (PU) para una solicitud al Process API.
- * @param {number} width - Ancho de la imagen solicitada (en píxeles).
- * @param {number} height - Alto de la imagen solicitada (en píxeles).
- * @param {number} bands - Número de bandas solicitadas.
- * @param {string} endpointName - Nombre del endpoint para identificar el uso en logs (ej: "NDVI", "TrueColor").
- */
-async function logProcessingUnits(width, height, bands, endpointName = "Process API") {
-    const pu = Math.ceil((width * height * bands) / (512 * 512));
-    const logData = {
-        endpointName,
-        width,
-        height,
-        bands,
-        pu,
-        timestamp: new Date().toISOString()
-    };
-    // 1. Imprimir en consola (siempre visible en Render)
-    console.log('📊 [PU Estimadas]', logData);
-	/*
-    // 2. Enviar a Google Sheet
-    const SHEET_URL = 'https://script.google.com/macros/s/AKfycbxCgdiQmDnpis92rS7iIK0H_F_PwJ0SY9Y3NnueRgbtb0yKMvC9IGHIXpubgJUc4IieqA/exec';
-    try {
-        const response = await fetch(SHEET_URL, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(logData)
-        });
-        // 3. Log del resultado de la solicitud
-        if (response.ok) {
-            console.log('✅ Log enviado correctamente a Google Sheet');
-        } else {
-            console.error('❌ Error al enviar a Google Sheet:', response.status, await response.text());
-        }
-    } catch (err) {
-        console.error('⚠️ Excepción al enviar a Google Sheet:', err.message);
-    }
-	*/
-}
-// Función auxiliar para convertir polígono a bbox
-const polygonToBbox = (coordinates) => {
-    if (!coordinates || coordinates.length === 0 || !Array.isArray(coordinates[0])) {
-        return null;
-    }
-    const polygonCoords = coordinates[0];
-    if (!Array.isArray(polygonCoords)) {
-        return null;
-    }
-    let minLon = Infinity, minLat = Infinity, maxLon = -Infinity, maxLat = -Infinity;
-    polygonCoords.forEach(coord => {
-        if (Array.isArray(coord) && coord.length >= 2) {
-            const [lon, lat] = coord;
-            minLon = Math.min(minLon, lon);
-            minLat = Math.min(minLat, lat);
-            maxLon = Math.max(maxLon, lon);
-            maxLat = Math.max(maxLat, lat);
-        }
-    });
-    if (minLon === Infinity) {
-        return null;
-    }
-    return [minLon, minLat, maxLon, maxLat];
-};
-
-// LÓGICA DE DETERMINACIÓN DE POLARIZACIÓN (FINAL Y ROBUSTA)
-const determinePolarization = (id) => {
-     // 1. DUAL (Clasificación RGB) - Buscar 1SDV o 1SDH
-     if (id.includes('1SDV')) {
-        return { primary: 'DV', mode: 'IW', bands: 3 }; 
-    }
-    if (id.includes('1SDH')) {
-        return { primary: 'DH', mode: 'IW', bands: 3 }; 
-    }
-    // 2. SIMPLE (Visualización Escala de Grises) - Buscar 1SSV o 1SSH
-    if (id.includes('1SSV')) {
-        return { primary: 'VV', mode: 'IW', bands: 1 };
-    }
-    if (id.includes('1SSH')) {
-        return { primary: 'HH', mode: 'IW', bands: 1 };
-    }
-    // 3. Fallback 
-    return { primary: 'VV', mode: 'IW', bands: 1 }; 
-};
-
-// Función auxiliar para obtener fechas cercanas
-const getNearbyDates = (baseDate, days) => {
-    const dates = [];
-    const d = new Date(baseDate);
-    for (let i = 0; i <= days; i++) {
-        const checkDate = new Date(d);
-        checkDate.setDate(d.getDate() - i);
-        const dateString = checkDate.toISOString().split('T')[0];
-        if (dateString !== baseDate) {
-            dates.push(dateString);
-        }
-    }
-    return dates;
-};
-// ==============================================
-// LÓGICA REUTILIZABLE
-// ==============================================
-/**
- * Obtiene el token de acceso de Sentinel-Hub.
- * @returns {string} El token de acceso.
- * @throws {Error} Si no se puede obtener el token.
- */
-const getAccessToken = async () => {
-    const body = new URLSearchParams({
-        grant_type: 'client_credentials',
-        client_id: process.env.CLIENT_ID,
-        client_secret: process.env.CLIENT_SECRET
-    });
-    const tokenResponse = await fetch('https://services.sentinel-hub.com/oauth/token', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: body.toString()
-    });
-    if (!tokenResponse.ok) {
-        const error = await tokenResponse.text();
-        throw new Error(`Error al obtener token: ${error}`);
-    }
-    const tokenData = await tokenResponse.json();
-    return tokenData.access_token;
-};
-const getAvailableDates = async (bbox, maxCloudCoverage) => {
-    try {
-        const accessToken = await getAccessToken();
-        const catalogUrl = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search';
-        const now = new Date();
-        const oneYearAgo = new Date();
-        oneYearAgo.setFullYear(now.getFullYear() - 1);
-        const startDate = oneYearAgo.toISOString().split('T')[0];
-        const endDate = now.toISOString().split('T')[0];
-        const payload = {
-            "bbox": bbox,
-            "datetime": `${startDate}T00:00:00Z/${endDate}T23:59:59Z`,
-            "collections": ["sentinel-2-l2a"],
-            "limit": 100,
-            "filter": `eo:cloud_cover < ${maxCloudCoverage}`
-        };
-        console.log('Sending payload to catalog:', JSON.stringify(payload));
-        const catalogResponse = await fetch(catalogUrl, {
-            method: 'POST', 
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${accessToken}`
-            },
-            body: JSON.stringify(payload)
-        });
-        if (!catalogResponse.ok) {
-            const error = await catalogResponse.text();
-            throw new Error(`Error getting data from Catalog: ${error}`);
-        }
-        const catalogData = await catalogResponse.json();
-        const availableDates = catalogData.features
-            .map(feature => ({
-                date: feature.properties.datetime.split('T')[0],
-                cloudCover: feature.properties['eo:cloud_cover']
-            }))
-            .filter((value, index, self) => 
-                self.findIndex(f => f.date === value.date) === index
-            )
-            .sort((a, b) => new Date(b.date) - new Date(a.date));
-        return availableDates;
-    } catch (error) {
-        console.error('❌ Error in getAvailableDates:', error.message);
-        return [];
-    }
-};
-/**
- * Consulta el catálogo de Sentinel-1 para obtener fechas disponibles
- * en una región durante los últimos 12 meses.
- * @param {object} options.geometry Coordenadas GeoJSON del polígono.
- * @returns {Array<string>} Lista de fechas únicas en formato 'YYYY-MM-DD', ordenadas descendentemente.
- */
-const getSentinel1Dates = async ({ geometry }) => {
-    const accessToken = await getAccessToken();
-    const bbox = polygonToBbox(geometry);
-    if (!bbox) {
-        throw new Error('No se pudo calcular el bounding box del polígono para buscar fechas S1.');
-    }
-    const today = new Date();
-    const eighteenMonthsAgo = new Date();
-    eighteenMonthsAgo.setMonth(today.getMonth() - 12);
-    const datetimeRange = `${eighteenMonthsAgo.toISOString()}/${today.toISOString()}`;
-    const catalogUrl = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search';
-    // 🚩 CLAVE DE LA CORRECCIÓN: Definimos el payload base que se usará en TODAS las solicitudes POST.
-    const basePayload = {
-        "bbox": bbox,
-        "datetime": datetimeRange,
-        "collections": ["sentinel-1-grd"],
-        "limit": 100 
-    };
-    let allFeatures = [];
-    let nextUrl = catalogUrl;
-    // 🚩 Usamos el payload base para la primera llamada.
-    let payload = basePayload; 
-    // Iteramos para manejar la paginación
-    while (nextUrl) {
-        // 🚩 Si nextUrl no es el catalogUrl base, debemos usar el endpoint base
-        //    y añadir el token de paginación al cuerpo del POST.
-        if (nextUrl !== catalogUrl) {
-            // El API del Catálogo requiere que usemos el endpoint base para el POST,
-            // y que el token de la URL 'next' se envíe en el cuerpo como 'next'.
-            // 1. Extraemos el token 'next' de la URL de paginación
-            const urlParams = new URLSearchParams(new URL(nextUrl).search);
-            const nextToken = urlParams.get('next');
-            // 2. Usamos el payload base y le añadimos la clave 'next' para la paginación
-            payload = { 
-                ...basePayload, // Mantiene 'collections', 'datetime', y 'bbox'
-                "next": nextToken 
-            };
-            // 3. Reseteamos nextUrl a catalogUrl para que el fetch use el endpoint base
-            nextUrl = catalogUrl;
-        }
-        const response = await fetch(nextUrl, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${accessToken}`
-            },
-            body: JSON.stringify(payload)
-        });
-        if (!response.ok) {
-            const errorText = await response.text();
-            throw new Error(`Error en consulta al catálogo de S1: ${errorText}`);
-        }
-        const data = await response.json();
-        allFeatures.push(...data.features);
-        // Manejo de paginación (busca el link 'next')
-        const nextLink = data.links.find(link => link.rel === 'next');
-        if (nextLink) {
-            nextUrl = nextLink.href; // La URL completa con el token 'next'
-            // NO se resetea 'payload' aquí, se reconstruye al inicio del ciclo 'while'
-        } else {
-            nextUrl = null;
-        }
-        // Limitamos el total de tiles procesados
-        if (allFeatures.length >= 500) break;
-    }
-    // Extraemos y filtramos las fechas únicas
-    const uniqueDates = new Set();
-    allFeatures.forEach(feature => {
-        const datePart = feature.properties.datetime.split('T')[0];
-        uniqueDates.add(datePart);
-    });
-    const sortedDates = Array.from(uniqueDates).sort().reverse();
-    return sortedDates;
-};
-/**
- * ✅ NUEVA: Calcula el área aproximada de un polígono a partir de su bounding box y su relación de aspecto.
- * @param {array} bbox - [minLon, minLat, maxLon, maxLat]
- * @returns {object} Objeto con el área y la relación de aspecto: { area, aspectRatio }
- */
-function calculatePolygonArea(bbox) {
-    const [minLon, minLat, maxLon, maxLat] = bbox;
-    // Aproximación usando la fórmula del área de un rectángulo en la superficie de la Tierra.
-    // La precisión es suficiente para nuestro propósito de escalar la imagen.
-    const earthRadius = 6371000; // Radio de la Tierra en metros
-    const lat1Rad = minLat * Math.PI / 180;
-    const lat2Rad = maxLat * Math.PI / 180;
-    const deltaLat = (maxLat - minLat) * Math.PI / 180;
-    const deltaLon = (maxLon - minLon) * Math.PI / 180;
-    // Área = (R^2) * Δλ * (sin(φ2) - sin(φ1))
-    const area = Math.pow(earthRadius, 2) * deltaLon * (Math.sin(lat2Rad) - Math.sin(lat1Rad));
-    // Calcular la relación de aspecto (ancho/altura)
-    const aspectRatio = deltaLon / deltaLat;
-    return {
-        area: Math.abs(area),
-        aspectRatio: aspectRatio
-    };
-}
-/**
- * ✅ MODIFICADA: Calcula el tamaño óptimo de la imagen en píxeles, manteniendo la relación de aspecto del polígono.
- * @param {number} areaInSquareMeters - Área del polígono en metros cuadrados.
- * @param {number} resolutionInMeters - Resolución deseada en metros por píxel.
- * @param {number} aspectRatio - Relación de aspecto del polígono (ancho/altura).
- * @returns {object} Objeto con las dimensiones en píxeles: { width, height }
- */
-function calculateOptimalImageSize(areaInSquareMeters, resolutionInMeters, aspectRatio = 1) {
-    // Calcular la longitud del lado de un cuadrado con el mismo área
-    const sideLengthInMeters = Math.sqrt(areaInSquareMeters);
-    // Calcular el número de píxeles necesarios para cubrir ese lado
-    let baseSizeInPixels = Math.round(sideLengthInMeters / resolutionInMeters);
-    // Asegurar que el tamaño mínimo sea 128 píxeles y máximo 2048
-    baseSizeInPixels = Math.max(128, Math.min(2048, baseSizeInPixels));
-    // Calcular width y height basado en la relación de aspecto
-    let width, height;
-    if (aspectRatio > 1) {
-        // El polígono es más ancho que alto
-        width = Math.round(baseSizeInPixels * Math.sqrt(aspectRatio));
-        height = Math.round(width / aspectRatio);
-    } else {
-        // El polígono es más alto que ancho o es cuadrado
-        height = Math.round(baseSizeInPixels * Math.sqrt(1 / aspectRatio));
-        width = Math.round(height * aspectRatio);
-    }
-    return {
-        width: Math.max(128, Math.min(2048, width)),
-        height: Math.max(128, Math.min(2048, height))
-    };
-}
-/**
- * Intenta obtener una imagen de Sentinel-Hub con reintentos.
- * @param {object} params - Parámetros de la solicitud.
- * @param {array} params.geometry - Coordenadas del polígono o bbox.
- * @param {string} params.date - Fecha inicial.
- * @param {string} params.geometryType - 'Polygon' o 'bbox'.
- * @returns {object} Un objeto con la URL de la imagen y la fecha utilizada.
- * @throws {Error} Si no se encuentra una imagen después de todos los reintentos.
- */
-const fetchSentinelImage = async ({ geometry, date, geometryType = 'Polygon' }) => {
-    const accessToken = await getAccessToken();
-    // ✅ NUEVO: Calcular el bbox y el área para determinar el tamaño óptimo
-    const bbox = geometryType === 'Polygon' ? polygonToBbox(geometry) : geometry;
-    if (!bbox) {
-        throw new Error('No se pudo calcular el bounding box.');
-    }
-    const areaResult = calculatePolygonArea(bbox);
-    const areaInSquareMeters = areaResult.area;
-    const aspectRatio = areaResult.aspectRatio;
-    const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10, aspectRatio); // 10m de resolución
-    const width = sizeInPixels.width;
-    const height = sizeInPixels.height;
-    // 🔹 REGISTRO DE PU
-    // logProcessingUnits(width, height, 1, "NDVI");
-    const payload = {
-        input: {
-            bounds: geometryType === 'Polygon' ? { geometry: { type: "Polygon", coordinates: geometry } } : { bbox: geometry },
-            data: [
-                {
-                    dataFilter: {
-                        timeRange: { from: `${date}T00:00:00Z`, to: `${date}T23:59:59Z` },
-                        maxCloudCoverage: 100
-                    },
-                    type: "sentinel-2-l2a"
-                }
-            ]
-        },
-        output: {
-            width: width, // ✅ Tamaño adaptativo
-            height: height, // ✅ Tamaño adaptativo
-            format: "image/png",
-            upsampling: "NEAREST",
-            downsampling: "NEAREST",
-            bands: 1,
-            sampleType: "UINT8", // ⬅️ CORRECCIÓN: Cambiado de AUTO a UINT8 para imágenes
-            // ✅ CORRECCIÓN CLAVE: Forzar proyección WGS84
-            crs: "http://www.opengis.net/def/crs/OGC/1.3/CRS84"			
-        },
-        evalscript: `
-            //VERSION=3
-            function setup() {
-                return {
-                    input: [{ bands: ["B08", "B04"], units: "REFLECTANCE" }],
-                    output: { bands: 1 }
-                };
-            }
-            function evaluatePixel(samples) {
-                const nir = samples.B08;
-                const red = samples.B04;
-                const ndvi = (nir - red) / (nir + red);
-                const normalizedNdvi = (ndvi + 1) / 2;
-                return [normalizedNdvi];
-            }
-        `
-    };
-    const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${accessToken}`
-        },
-        body: JSON.stringify(payload)
-    });
-    if (!imageResponse.ok) {
-        const error = await imageResponse.text();
-        console.error('❌ Error de la API de Sentinel-Hub:', error);
-        throw new Error(`Error en la imagen para ${date}: ${error}`);
-    }
-    const buffer = await imageResponse.arrayBuffer();
-    const base64 = Buffer.from(buffer).toString('base64');
-    return {
-        url: `data:image/png;base64,${base64}`,
-        usedDate: date,
-        bbox: bbox, // ✅ Usamos el bbox calculado
-		width: width,   // <-- Añade esta línea
-		height: height   // <-- Añade esta línea		
-    };
-};
-/**
- * Intenta obtener una imagen de Sentinel-Hub con reintentos.
- * @param {object} params - Parámetros de la solicitud.
- * @param {array} params.geometry - Coordenadas del polígono o bbox.
- * @param {string} params.date - Fecha inicial.
- * @param {string} params.geometryType - 'Polygon' o 'bbox'.
- * @returns {object} Un objeto con la URL de la imagen y la fecha utilizada.
- * @throws {Error} Si no se encuentra una imagen después de todos los reintentos.
- */
-const fetchSentinelImageTC = async ({ geometry, date, geometryType = 'Polygon' }) => {
-    const accessToken = await getAccessToken();
-    // Calcular el bbox y el área para determinar el tamaño óptimo
-    const bbox = geometryType === 'Polygon' ? polygonToBbox(geometry) : geometry;
-    if (!bbox) {
-        throw new Error('No se pudo calcular el bounding box.');
-    }
-    const areaResult = calculatePolygonArea(bbox);
-    const areaInSquareMeters = areaResult.area;
-    const aspectRatio = areaResult.aspectRatio;
-    const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10, aspectRatio); // 10m de resolución
-    const width = sizeInPixels.width;
-    const height = sizeInPixels.height;
-    // 🔹 REGISTRO DE PU
-    // logProcessingUnits(width, height, 3, "TrueColor");
-    const payload = {
-        input: {
-            bounds: geometryType === 'Polygon'
-                ? { geometry: { type: "Polygon", coordinates: geometry } }
-                : { bbox: geometry },
-            data: [
-                {
-                    type: "sentinel-2-l2a",
-                    dataFilter: {
-                        timeRange: { from: `${date}T00:00:00Z`, to: `${date}T23:59:59Z` },
-                        maxCloudCoverage: 20
-                    },
-                    mosaicking: "SCENE"
-                }
-            ]
-        },
-        output: {
-            width: width,
-            height: height,
-            // ✅ CORRECCIÓN CLAVE: Forzar proyección WGS84
-            crs: "http://www.opengis.net/def/crs/OGC/1.3/CRS84"			
-        },
-        evalscript: `//VERSION=3
-function setup() {
-  return {
-    input: ["B02", "B03", "B04"],
-    output: { bands: 3, sampleType: "UINT8" }
-  };
-}
-function evaluatePixel(sample) {
-  return [2.5 * sample.B04 * 255, 2.5 * sample.B03 * 255, 2.5 * sample.B02 * 255];
-}
-`
-    };
-    const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${accessToken}`
-        },
-        body: JSON.stringify(payload)
-    });
-    if (!imageResponse.ok) {
-        const error = await imageResponse.text();
-        console.error('❌ Error en la API de Sentinel-Hub:', error);
-        throw new Error(`Error en la imagen para ${date}: ${error}`);
-    }
-    const buffer = await imageResponse.arrayBuffer();
-    const base64 = Buffer.from(buffer).toString('base64');
-    return {
-        url: `data:image/png;base64,${base64}`,
-        usedDate: date,
-        bbox: bbox,
-		width: width,   // <-- Añade esta línea
-		height: height   // <-- Añade esta línea				
-    };
-};
-// ==============================================
-// FUNCIÓN AUXILIAR: Genera el evalscript para clasificación RGB
-// ==============================================
-// /**
-//  * Genera el evalscript apropiado (RGB para clasificación o Monobanda para visualización).
-//  * @param {string} polarization La polarización a usar ('DV', 'DH', 'VV', 'HH', etc.)
-//  * @returns {string} El evalscript correspondiente.
-//  */
-const getClassificationEvalscript = (polarization) => {
-    // Rango de contraste definitivo para garantizar VISIBILIDAD
-    const min_db_visible = -80; 
-    const max_db = 5; 
-    if (polarization === 'DV' || polarization === 'DH') {
-        // --- Script DUAL (RGB para clasificación) ---
-        return `//VERSION=3
-function setup() {
-  return {
-    input: [{ bands: ["VV", "VH", "dataMask"], units: "LINEAR_POWER" }],
-    output: { bands: 3, sampleType: "UINT8", format: "image/png" }
-  };
-}
-function evaluatePixel(samples) {
-  let vv = samples.VV;
-  let vh = samples.VH;
-  let dm = samples.dataMask;
-  if (vv <= 0 || vh <= 0 || dm === 0) {
-    return [0, 0, 0];
-  }
-  let vv_db = 10 * Math.log10(vv);
-  let vh_db = 10 * Math.log10(vh);
-  const min_db = ${min_db_visible}; 
-  const normalize = (value) => Math.max(0, Math.min(1, (value - min_db) / (${max_db} - min_db)));
-  let vv_norm = normalize(vv_db);
-  let vh_norm = normalize(vh_db);
-  let ratio_db = vv_db - vh_db;
-  let ratio_norm = Math.max(0, Math.min(1, ratio_db / 20)); 
-  let r = vv_norm * 255;
-  let g = vh_norm * 255;
-  let b = ratio_norm * 255;
-  return [r, g, b];
-}`;
-    } else {
-        // --- Script SIMPLE (Monobanda, con -80 dB para visibilidad y SIN dataMask) ---
-        const band = polarization === 'VV' || polarization === 'VH' ? polarization : 'VV';
-        return `//VERSION=3
-function setup() {
-    return {
-        input: [{ bands: ["${band}"], units: "LINEAR_POWER" }],
-        output: { bands: 1, sampleType: "UINT8", format: "image/png" }
-    };
-}
-function evaluatePixel(samples) {
-    const linearValue = samples.${band};
-    if (linearValue <= 0) { 
-        return [0];
-    }
-    const dbValue = 10 * Math.log10(linearValue);
-    const minDb = ${min_db_visible}; 
-    const maxDb = ${max_db};
-    let mappedValue = (dbValue - minDb) / (maxDb - minDb) * 255;
-    mappedValue = Math.max(0, Math.min(255, mappedValue));
-    return [mappedValue];
-}`;
-    }
-};
-// ==============================================
-// FUNCIÓN PRINCIPAL MODIFICADA (fetchSentinel1Radar) Gemini
-// ==============================================
-const fetchSentinel1Radar = async ({ geometry, date }) => {
-    // Declaración de variables clave fuera del try para corrección de alcance (scope)
-    let foundDate;
-    let tileId;
-    let pol;
-    let finalPolarization;
-    const accessToken = await getAccessToken();
-    const bbox = polygonToBbox(geometry);
-    if (!bbox) {
-        throw new Error('No se pudo calcular el bounding box del polígono.');
-    }
-    try {
-        const areaResult = calculatePolygonArea(bbox);
-        const areaInSquareMeters = areaResult.area;
-        const aspectRatio = areaResult.aspectRatio;
-        const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10, aspectRatio);
-        const width = sizeInPixels.width;
-        const height = sizeInPixels.height;
-        // CLAVE: CÓDIGO DEL CATÁLOGO REINSERTADO
-        const fromDate = new Date(date);
-        const toDate = new Date(date);
-        // fromDate.setDate(fromDate.getDate() - 30);
-        // toDate.setDate(toDate.getDate() + 7);
-        fromDate.setDate(fromDate.getDate() - 0);
-        toDate.setDate(toDate.getDate() + 0);
-        const catalogUrl = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search';
-        const catalogPayload = {
-            "bbox": bbox,
-            "datetime": `${fromDate.toISOString().split('T')[0]}T00:00:00Z/${toDate.toISOString().split('T')[0]}T23:59:59Z`,
-            "collections": ["sentinel-1-grd"],
-            "limit": 10
-            // "limit": 1
-        };
-        // FIN CÓDIGO DEL CATÁLOGO
-        const catalogResponse = await fetch(catalogUrl, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${accessToken}`
-            },
-            body: JSON.stringify(catalogPayload)
-        });
-        if (!catalogResponse.ok) {
-            const errorText = await catalogResponse.text();
-            throw new Error(`Error en consulta al catálogo: ${errorText}`);
-        }
-        const catalogData = await catalogResponse.json();
-        if (catalogData.features.length === 0) {
-            throw new Error("No se encontraron datos de Sentinel-1 para esta ubicación.");
-        }
-        const feature = catalogData.features[0];
-        foundDate = feature.properties.datetime.split('T')[0];
-        tileId = feature.id;
-
-        pol = determinePolarization(tileId);
-        finalPolarization = pol.primary;
-        // 🔹 REGISTRO DE PU
-        // logProcessingUnits(width, height, pol.bands, `Sentinel1Radar (${pol.primary})`);
-        const tryRequest = async () => {
-            const evalscript = getClassificationEvalscript(finalPolarization); 
-            const outputBands = pol.bands;
-            const payload = {
-                input: {
-                    bounds: {
-                        geometry: {
-                            type: "Polygon",
-                            coordinates: geometry
-                        }
-                    },
-                    data: [{
-                        dataFilter: {
-                            timeRange: {
-                                from: `${foundDate}T00:00:00Z`,
-                                to: `${foundDate}T23:59:59Z`
-                            },
-                            polarization: finalPolarization, 
-                            instrumentMode: pol.mode
-                        },
-                        processing: {
-                            mosaicking: "ORBIT"
-                        },
-                        type: "sentinel-1-grd"
-                    }]
-                },
-                output: {
-                    width: width,
-                    height: height,
-                    format: "image/png",
-                    sampleType: "UINT8",
-                    bands: outputBands ,
-					// ✅ CORRECCIÓN CLAVE: Forzar proyección WGS84
-					crs: "http://www.opengis.net/def/crs/OGC/1.3/CRS84"
-                },
-                evalscript: evalscript
-            };
-            const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${accessToken}`
-                },
-                body: JSON.stringify(payload)
-            });
-            if (!imageResponse.ok) {
-                const errorText = await imageResponse.text();
-                throw new Error(`Solicitud con polarización ${finalPolarization} falló: ${errorText}`);
-            }
-            return imageResponse;
-        };
-        const response = await tryRequest();
-        const buffer = await response.arrayBuffer();
-        const base64 = Buffer.from(buffer).toString('base64');
-        const classificationStatus = pol.bands === 3 ? "Clasificación RGB (Dual)" : "Escala de Grises (Simple)";
-        return {
-            url: `data:image/png;base64,${base64}`,
-            usedDate: foundDate,
-            polarization: finalPolarization,
-            sourceTile: tileId,
-            status: classificationStatus,
-			bbox: bbox,
-			width: width,     // <-- Añadido
-			height: height    // <-- Añadido
-        };
-    } catch (error) {
-        console.error('❌ Error en la imagen Sentinel-1 (Final):', error.message);
-        throw error;
-    }
-};
-// ==============================================
-// FUNCIÓN AUXILIAR: Genera el evalscript para CLASIFICACIÓN 5-CLASES
-// ==============================================
-/**
- * Genera el evalscript para la clasificación de 5 clases de cobertura Sentinel-1 (VV/VH).
- * Clases: 1=Agua, 2=Suelo/Urbano, 3=Vegetación Baja, 4=Bosque, 5=Vegetación Densa.
- * @returns {string} El evalscript correspondiente.
- */
-// ==============================================
-// FUNCIÓN AUXILIAR: Evalscript para CLASIFICACIÓN 5-CLASES (CORREGIDO)
-// ==============================================
-/**
- * Genera el evalscript para la clasificación de 5 clases de cobertura Sentinel-1 (VV/VH).
- * Clases: 1=Agua, 2=Suelo/Urbano, 3=Vegetación Baja, 4=Bosque, 5=Vegetación Densa.
- * La salida se escala por 50 para asegurar visibilidad en UINT8.
- */
-const getClassification5ClassesEvalscript = () => {
-    // Usamos el modo Dual (VH y VV) ya que es necesario para la clasificación estructural.
-    return `//VERSION=3
-function setup() {
-  return {
-    input: [{ bands: ["VV", "VH", "dataMask"], units: "LINEAR_POWER" }],
-    // Salida de 1 banda, UINT8 para la clase (0-5)
-    output: { bands: 1, sampleType: "UINT8", format: "image/png" }
-  };
-}
-function evaluatePixel(samples) {
-  let vv = samples.VV;
-  let vh = samples.VH;
-  let dm = samples.dataMask;
-  if (dm === 0) {
-    return [0]; // CLASE 0: Sin Datos / Área No Válida
-  }
-  // Verificar si hay valores inválidos antes de log10
-  if (vv <= 0 || vh <= 0) {
-      return [0];
-  }
-  // Convertir a Decibelios
-  let vv_db = 10 * Math.log10(vv);
-  let vh_db = 10 * Math.log10(vh);
-  // --- CLASIFICACIÓN SECUENCIAL (Cascada) ---
-  let classification_class = 2; // Valor por defecto: Suelo Desnudo / Urbano (Clase 2)
-  // 1. CLASE 1: Agua Tranquila
-  if (vv_db < -20.0 && vh_db < -25.0) {
-      classification_class = 1;
-  }
-  // 2. CLASE 5: Vegetación Densa
-  else if (vh_db > -15.0) {
-      classification_class = 5; 
-  }
-  // 3. CLASE 4: Bosque
-  else if (vh_db > -18.0) {
-      classification_class = 4;
-  }
-  // 4. CLASE 3: Vegetación Baja
-  else if (vv_db < -14.0 && vh_db > -22.0) {
-      classification_class = 3; 
-  }
-  // 5. CLASE 2: Suelo Desnudo / Urbano (Else block)
-  else {
-      classification_class = 2;
-  }
-  // 🚨 CORRECCIÓN CLAVE: Multiplicar por 50 para hacer la imagen VISIBLE.
-  // La clase 5 será 250, y la clase 1 será 50.
-  return [classification_class * 50]; 
-}`;
-};
-
-
-/**
- * Genera el evalscript para la clasificación de 5 clases de cobertura Sentinel-1 (VV/VH).
- * Clases: 1=Agua Tranquila, 2=Suelo/Urbano, 3=Vegetación Baja, 4=Bosque, 5=Vegetación Densa.
- * La salida se escala por 50 para hacerla VISIBLE en UINT8.
- */
-const getClassification5ClassesEvalscript2 = () => {
-    // Usamos el modo Dual (VH y VV) ya que es necesario para la clasificación estructural.
-    return `//VERSION=3
-function setup() {
-  return {
-    input: [{ bands: ["VV", "VH", "dataMask"], units: "LINEAR_POWER" }],
-    // Salida de 1 banda, UINT8 para la clase (0-5)
-    output: { bands: 1, sampleType: "UINT8", format: "image/png" }
-  };
-}
-function evaluatePixel(samples) {
-  let vv = samples.VV;
-  let vh = samples.VH;
-  let dm = samples.dataMask;
-  if (dm === 0) {
-    return [0]; // CLASE 0: Sin Datos / Área No Válida
-  }
-  // Verificar si hay valores inválidos antes de log10
-  if (vv <= 0 || vh <= 0) { 
-    return [0];
-  }
-  // Convertir a Decibelios
-  let vv_db = 10 * Math.log10(vv);
-  let vh_db = 10 * Math.log10(vh);
-
-  // --- CLASIFICACIÓN SECUENCIAL (Cascada) - AJUSTADA ---
-  let classification_class = 2; // Valor por defecto: Suelo Desnudo / Urbano (Clase 2)
-
-  // 1. CLASE 1: Agua Tranquila (MUY BAJA retrodispersión)
-  //   - Umbral muy bajo para evitar falsos positivos
-  if (vv_db < -22.0 && vh_db < -27.0) {
-      classification_class = 1;
-  }
-  // 2. CLASE 5: Vegetación Densa (ALTA retrodispersión y alto ratio VV/VH)
-  //   - Este es el cambio clave: ahora requiere VH > -12.0 y un ratio mayor
-  else if (vh_db > -12.0 && (vv_db - vh_db) > 0.5) {
-      classification_class = 5; 
-  }
-  // 3. CLASE 4: Bosque (ALTA retrodispersión pero con ratio menor)
-  //   - Se mantiene similar, pero con un umbral ligeramente más alto para VH
-  else if (vh_db > -16.0 && (vv_db - vh_db) > 0.0) {
-      classification_class = 4;
-  }
-  // 4. CLASE 3: Vegetación Baja (RETRODISPERSIÓN MODERADA)
-  //   - Este es otro cambio clave: ampliamos el rango para capturar más vegetación baja
-  else if (vh_db > -20.0 && vv_db < -14.0) {
-      classification_class = 3; 
-  }
-  // 5. CLASE 2: Suelo Desnudo / Urbano (RESTO)
-  //   - Ya está como default, no necesitamos un else
-  // else {
-  //     classification_class = 2;
-  // }
-
-  // 🚨 CORRECCIÓN CLAVE: Multiplicar por 50 para hacer la imagen VISIBLE.
-  // La clase 5 será 250, y la clase 1 será 50.
-  return [classification_class * 50]; 
-}`;
-};
-
-
-
-
-// ==============================================
-// FUNCIÓN PRINCIPAL para CLASIFICACIÓN 5-CLASES
-// ==============================================
-/**
- * Obtiene la imagen de clasificación de 5 clases para Sentinel-1.
- * (Copia de fetchSentinel1Radar pero usando el nuevo evalscript y forzando salida de 1 banda).
- */
-const fetchSentinel1Classification = async ({ geometry, date }) => {
-    // Declaración de variables clave (Reutiliza tu lógica)
-    let foundDate;
-    let tileId;
-    let pol;
-    const accessToken = await getAccessToken();
-    const bbox = polygonToBbox(geometry);
-    if (!bbox) {
-        throw new Error('No se pudo calcular el bounding box del polígono.');
-    }
-    try {
-        const areaResult = calculatePolygonArea(bbox);
-        const areaInSquareMeters = areaResult.area;
-        const aspectRatio = areaResult.aspectRatio;
-        const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10, aspectRatio);
-        const width = sizeInPixels.width;
-        const height = sizeInPixels.height;
-        // 🔹 REGISTRO DE PU
-        // logProcessingUnits(width, height, 1, "Sentinel1-Classification-5Clases");
-        // Búsqueda en el Catálogo (Mismo proceso que el original)
-        const fromDate = new Date(date);
-        const toDate = new Date(date);
-        fromDate.setDate(fromDate.getDate() - 0); // Buscar solo en la fecha
-        toDate.setDate(toDate.getDate() + 0);
-        const catalogUrl = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search';
-        const catalogPayload = {
-            "bbox": bbox,
-            "datetime": `${fromDate.toISOString().split('T')[0]}T00:00:00Z/${toDate.toISOString().split('T')[0]}T23:59:59Z`,
-            "collections": ["sentinel-1-grd"],
-            "limit": 10
-        };
-        const catalogResponse = await fetch(catalogUrl, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${accessToken}`
-            },
-            body: JSON.stringify(catalogPayload)
-        });
-        if (!catalogResponse.ok) {
-            const errorText = await catalogResponse.text();
-            throw new Error(`Error en consulta al catálogo: ${errorText}`);
-        }
-        const catalogData = await catalogResponse.json();
-        if (catalogData.features.length === 0) {
-            throw new Error("No se encontraron datos de Sentinel-1 para esta ubicación.");
-        }
-        const feature = catalogData.features[0];
-        foundDate = feature.properties.datetime.split('T')[0];
-        tileId = feature.id;
-        // Determinación de Polarización (usamos la lógica original pero solo para obtener la fecha/tile)
-        const determinePolarization = (id) => {
-            if (id.includes('1SDV')) return { primary: 'DV', mode: 'IW', bands: 3 };
-            if (id.includes('1SDH')) return { primary: 'DH', mode: 'IW', bands: 3 };
-            if (id.includes('1SSV')) return { primary: 'VV', mode: 'IW', bands: 1 };
-            if (id.includes('1SSH')) return { primary: 'HH', mode: 'IW', bands: 1 };
-            return { primary: 'VV', mode: 'IW', bands: 1 };
-        };
-        pol = determinePolarization(tileId);
-        // Usamos Dual Pol para la clasificación, independientemente de lo que determine el tile:
-        const finalPolarization = pol.primary.includes('D') ? pol.primary : 'DV'; // Forzamos a DV/DH
-        const tryRequest = async () => {
-            // 🚨 CAMBIO CLAVE: Usamos el nuevo Evalscript.
-            const evalscript = getClassification5ClassesEvalscript2(); 
-            const outputBands = 1; // 🚨 CLAVE: Siempre 1 banda para clasificación.
-            const payload = {
-                input: {
-                    bounds: {
-                        geometry: {
-                            type: "Polygon",
-                            coordinates: geometry
-                        }
-                    },
-                    data: [{
-                        dataFilter: {
-                            timeRange: {
-                                from: `${foundDate}T00:00:00Z`,
-                                to: `${foundDate}T23:59:59Z`
-                            },
-                            // Aseguramos la polarización Dual para el evalscript de 5 clases.
-                            polarization: 'DV', 
-                            instrumentMode: pol.mode
-                        },
-                        processing: {
-                            mosaicking: "ORBIT"
-                        },
-                        type: "sentinel-1-grd"
-                    }]
-                },
-                output: {
-                    width: width,
-                    height: height,
-                    format: "image/png",
-                    sampleType: "UINT8",
-                    bands: outputBands,
-					// ✅ CORRECCIÓN CLAVE: Forzar proyección WGS84
-					crs: "http://www.opengis.net/def/crs/OGC/1.3/CRS84"
-                },
-                evalscript: evalscript
-            };
-            const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${accessToken}`
-                },
-                body: JSON.stringify(payload)
-            });
-            if (!imageResponse.ok) {
-                const errorText = await imageResponse.text();
-                throw new Error(`Solicitud de clasificación 5-Clases falló: ${errorText}`);
-            }
-            return imageResponse;
-        };
-        const response = await tryRequest();
-        const buffer = await response.arrayBuffer();
-        const base64 = Buffer.from(buffer).toString('base64');
-        // El frontend deberá usar esta información para mapear 1->Agua, 2->Suelo, etc.
-        const classificationStatus = "Clasificación 5-Clases (Agua, Suelo, Veg. Baja, Bosque, Veg. Densa)";
-        return {
-            url: `data:image/png;base64,${base64}`,
-            usedDate: foundDate,
-            polarization: finalPolarization,
-            sourceTile: tileId,
-            status: classificationStatus,
-            bbox: bbox,
-			width: width,     // <-- Añadido
-			height: height    // <-- Añadido			
-        };
-    } catch (error) {
-        console.error('❌ Error en la imagen Sentinel-1 (Clasificación 5-Clases):', error.message);
-        throw error;
-    }
-};
-// ==============================================
-// ✅ NUEVO ENDPOINT: /api/sentinel1classification
-// ==============================================
-app.post('/api/sentinel1classification', async (req, res) => {
-    const { coordinates, date } = req.body;
-    if (!coordinates || !date) {
-        return res.status(400).json({ error: 'Faltan parámetros: coordinates y date' });
-    }
-    try {
-        const result = await fetchSentinel1Classification({ geometry: coordinates, date: date });
-        res.json(result);
-    } catch (error) {
-        console.error('❌ Error en el endpoint /api/sentinel1classification:', error.message);
-        res.status(500).json({ error: error.message });
-    }
-});
-
-
-// ==============================================
-// FUNCIÓN AUXILIAR: Evalscript para CLASIFICACIÓN de 6 CLASES (mejorada para Chile centro-sur)
-// ==============================================
-/**
- * Genera el evalscript para la clasificación de 6 clases de cobertura con Sentinel-1 (VH en dB).
- * Clases: 1=Agua, 2=Suelo, 3=Cultivos, 4=Arbustal, 5=Bosque, 6=Vegetación Densa.
- * @returns {string} El evalscript correspondiente.
- */
-// ==============================================
-// FUNCIÓN AUXILIAR: Evalscript para CLASIFICACIÓN de 6 CLASES (mejorada para Chile centro-sur)
-// ==============================================
-/**
- * Genera el evalscript para la clasificación de 6 clases de cobertura con Sentinel-1 (VH en dB).
- * Clases: 1=Agua, 2=Suelo, 3=Cultivos, 4=Arbustal, 5=Bosque, 6=Vegetación Densa.
- * @returns {string} El evalscript correspondiente.
- */
-// ==============================================
-// FUNCIÓN AUXILIAR: Evalscript para CLASIFICACIÓN de 6 CLASES (mejorada para Chile centro-sur)
-// ==============================================
-/**
- * Genera el evalscript para la clasificación de 6 clases de cobertura con Sentinel-1 (VH en dB).
- * Clases: 1=Agua, 2=Suelo, 3=Cultivos, 4=Arbustal, 5=Bosque, 6=Vegetación Densa.
- * @returns {string} El evalscript correspondiente.
- */
-const getClassification6ClassesEvalscript = () => {
-    return `//VERSION=3
-function setup() {
-  return {
-    input: [{ bands: ["VH", "dataMask"], units: "LINEAR_POWER" }],
-    output: { bands: 1, sampleType: "UINT8" }
-  };
-}
-function evaluatePixel(samples) {
-  // Si no hay datos o VH es inválido, devolver 0 (sin datos)
-  if (samples.dataMask === 0 || samples.VH <= 0) {
-    return [0];
-  }
-
-  // Convertir VH a dB
-  const vh_db = 10 * Math.log10(samples.VH);
-
-  // Clasificación secuencial (de menor a mayor VH)
-  if (vh_db < -25.0) {
-      return [50];   // Clase 1: Agua → 50
-  } else if (vh_db < -20.0) {
-      return [100];  // Clase 2: Suelo → 100
-  } else if (vh_db < -17.0) {
-      return [150];  // Clase 3: Cultivos → 150
-  } else if (vh_db < -14.0) {
-      return [180];  // Clase 4: Arbustal → 180
-  } else if (vh_db < -11.0) {
-      return [220];  // Clase 5: Bosque → 220
-  } else if (vh_db >= -11.0) {
-      return [255];  // Clase 6: Vegetación Densa → 255
-  } else {
-      // Esto no debería ocurrir, pero por seguridad
-      return [0]; // Sin datos
-  }
-}`;
-};
-
-// ==============================================
-// FUNCIÓN PRINCIPAL: fetchSentinel1Classification (6 clases)
-// ==============================================
-/**
- * Obtiene la imagen de clasificación de 6 clases para Sentinel-1.
- * @param {object} params - Parámetros de la solicitud.
- * @param {array} params.geometry - Coordenadas del polígono.
- * @param {string} params.date - Fecha de la imagen.
- * @returns {object} Un objeto con la URL de la imagen PNG y metadatos.
- */
-const fetchSentinel1Classification2 = async ({ geometry, date }) => {
-    const accessToken = await getAccessToken();
-    const bbox = polygonToBbox(geometry);
-    if (!bbox) {
-        throw new Error('No se pudo calcular el bounding box del polígono.');
-    }
-    try {
-        const areaResult = calculatePolygonArea(bbox);
-        const areaInSquareMeters = areaResult.area;
-        const aspectRatio = areaResult.aspectRatio;
-        const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10, aspectRatio);
-        const width = sizeInPixels.width;
-        const height = sizeInPixels.height;
-
-        // Búsqueda en el Catálogo (solo en la fecha exacta)
-        const fromDate = new Date(date);
-        const toDate = new Date(date);
-        const catalogUrl = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search';
-        const catalogPayload = {
-            "bbox": bbox,
-            "datetime": `${fromDate.toISOString().split('T')[0]}T00:00:00Z/${toDate.toISOString().split('T')[0]}T23:59:59Z`,
-            "collections": ["sentinel-1-grd"],
-            "limit": 10
-        };
-        const catalogResponse = await fetch(catalogUrl, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${accessToken}`
-            },
-            body: JSON.stringify(catalogPayload)
-        });
-        if (!catalogResponse.ok) {
-            const errorText = await catalogResponse.text();
-            throw new Error(`Error en consulta al catálogo: ${errorText}`);
-        }
-        const catalogData = await catalogResponse.json();
-        if (catalogData.features.length === 0) {
-            throw new Error("No se encontraron datos de Sentinel-1 para esta ubicación.");
-        }
-        const feature = catalogData.features[0];
-        const foundDate = feature.properties.datetime.split('T')[0];
-        const tileId = feature.id;
-        const pol = determinePolarization(tileId);
-
-        // Validar que la escena tenga VH (polarización dual)
-        if (!pol.primary.includes('D')) {
-            throw new Error(`La escena disponible (${tileId}) no contiene la banda VH.`);
-        }
-
-        // Usar el nuevo evalscript de 6 clases
-        const evalscript = getClassification6ClassesEvalscript();
-
-        const payload = {
-            input: {
-                bounds: {
-                    geometry: {
-                        type: "Polygon",
-                        coordinates: geometry
-                    }
-                },
-                data: [{
-                    dataFilter: {
-                        timeRange: {
-                            from: `${foundDate}T00:00:00Z`,
-                            to: `${foundDate}T23:59:59Z`
-                        },
-                        polarization: pol.primary, // DV o DH
-                        instrumentMode: pol.mode
-                    },
-                    processing: {
-                        mosaicking: "ORBIT"
-                    },
-                    type: "sentinel-1-grd"
-                }]
-            },
-            output: {
-                width: width,
-                height: height,
-                format: "image/png",
-                sampleType: "UINT8",
-                bands: 1,
-                crs: "http://www.opengis.net/def/crs/OGC/1.3/CRS84"
-            },
-            evalscript: evalscript
-        };
-
-        const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${accessToken}`
-            },
-            body: JSON.stringify(payload)
-        });
-
-        if (!imageResponse.ok) {
-            const errorText = await imageResponse.text();
-            throw new Error(`Solicitud de clasificación falló: ${errorText}`);
-        }
-
-        const buffer = await imageResponse.arrayBuffer();
-        const base64 = Buffer.from(buffer).toString('base64');
-
-        return {
-            url: `data:image/png;base64,${base64}`,
-            usedDate: foundDate,
-            polarization: pol.primary,
-            sourceTile: tileId,
-            bbox: bbox,
-            width: width,
-            height: height
-        };
-    } catch (error) {
-        console.error('❌ Error en fetchSentinel1Classification2 (6 clases):', error.message);
-        throw error;
-    }
-};
-
-// ==============================================
-// ✅ NUEVO ENDPOINT: /api/sentinel1classification2
-// ==============================================
-app.post('/api/sentinel1classification2', async (req, res) => {
-    const { coordinates, date } = req.body;
-    if (!coordinates || !date) {
-        return res.status(400).json({ error: 'Faltan parámetros: coordinates y date' });
-    }
-    try {
-        const result = await fetchSentinel1Classification2({ geometry: coordinates, date: date });
-        res.json(result);
-    } catch (error) {
-        console.error('❌ Error en el endpoint /api/sentinel1classification2:', error.message);
-        res.status(500).json({ error: error.message });
-    }
-});
-
-
-
-// ==============================================
-// ✅ NUEVO ENDPOINT: /api/sentinel1classification3 - Clasificación 6 Clases (Optimizado)
-// ==============================================
-/**
- * Obtiene la imagen de clasificación de 6 clases para Sentinel-1.
- * Este endpoint está optimizado: usa la fecha solicitada y busca la escena más cercana en ese día,
- * evitando una búsqueda extensa en el catálogo.
- * @param {object} params - Parámetros de la solicitud.
- * @param {array} params.geometry - Coordenadas del polígono.
- * @param {string} params.date - Fecha de la imagen.
- * @returns {object} Un objeto con la URL de la imagen PNG y metadatos.
- */
-const fetchSentinel1Classification3 = async ({ geometry, date }) => {
-    const accessToken = await getAccessToken();
-    const bbox = polygonToBbox(geometry);
-    if (!bbox) {
-        throw new Error('No se pudo calcular el bounding box del polígono.');
-    }
-    try {
-        const areaResult = calculatePolygonArea(bbox);
-        const areaInSquareMeters = areaResult.area;
-        const aspectRatio = areaResult.aspectRatio;
-        const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10, aspectRatio);
-        const width = sizeInPixels.width;
-        const height = sizeInPixels.height;
-
-        // --- PASO 1: Buscar una escena en la fecha exacta o cercana ---
-        // Usamos la misma lógica que en 'getSentinel1Dates' pero limitada a un rango de 1 día.
-        const fromDate = new Date(date);
-        const toDate = new Date(date);
-        // Extender la búsqueda a 1 día antes y 1 día después para mayor probabilidad de encontrar datos.
-        fromDate.setDate(fromDate.getDate() - 0);
-        toDate.setDate(toDate.getDate() + 0);
-
-        const catalogUrl = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search';
-        const catalogPayload = {
-            "bbox": bbox,
-            "datetime": `${fromDate.toISOString().split('T')[0]}T00:00:00Z/${toDate.toISOString().split('T')[0]}T23:59:59Z`,
-            "collections": ["sentinel-1-grd"],
-            "limit": 1 // Solo necesitamos la primera escena disponible
-        };
-
-        const catalogResponse = await fetch(catalogUrl, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${accessToken}`
-            },
-            body: JSON.stringify(catalogPayload)
-        });
-
-        if (!catalogResponse.ok) {
-            const errorText = await catalogResponse.text();
-            throw new Error(`Error en consulta al catálogo: ${errorText}`);
-        }
-
-        const catalogData = await catalogResponse.json();
-
-        if (catalogData.features.length === 0) {
-            throw new Error("No se encontraron datos de Sentinel-1 disponibles para esta ubicación en el rango de fechas.");
-        }
-
-        // Tomar la primera escena encontrada (la más reciente dentro del rango)
-        const feature = catalogData.features[0];
-        const foundDate = feature.properties.datetime.split('T')[0];
-        const tileId = feature.id;
-        const pol = determinePolarization(tileId);
-
-        // Validar que la escena tenga VH (polarización dual)
-        if (!pol.primary.includes('D')) {
-            throw new Error(`La escena disponible (${tileId}) no contiene la banda VH.`);
-        }
-
-        // Forzamos a usar la polarización Dual (DV/DH) para la clasificación
-        const finalPolarization = pol.primary.includes('D') ? pol.primary : 'DV';
-
-        // --- PASO 2: Generar el evalscript y enviar la solicitud de procesamiento ---
-        const evalscript = getClassification6ClassesEvalscript(); // Reutiliza tu función existente
-
-        const payload = {
-            input: {
-                bounds: {
-                    geometry: {
-                        type: "Polygon",
-                        coordinates: geometry
-                    }
-                },
-                data: [{
-                    dataFilter: {
-                        timeRange: {
-                            from: `${foundDate}T00:00:00Z`,
-                            to: `${foundDate}T23:59:59Z`
-                        },
-                        polarization: finalPolarization, // ✅ Usa finalPolarization aquí
-                        instrumentMode: pol.mode
-                    },
-                    processing: {
-                        mosaicking: "ORBIT"
-                    },
-                    type: "sentinel-1-grd"
-                }]
-            },
-            output: {
-                width: width,
-                height: height,
-                format: "image/png",
-                sampleType: "UINT8",
-                bands: 1, // ✅ Siempre 1 banda para clasificación
-                crs: "http://www.opengis.net/def/crs/OGC/1.3/CRS84"
-            },
-            evalscript: evalscript
-        };
-
-        const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${accessToken}`
-            },
-            body: JSON.stringify(payload)
-        });
-
-        if (!imageResponse.ok) {
-            const errorText = await imageResponse.text();
-            throw new Error(`Solicitud de clasificación falló: ${errorText}`);
-        }
-
-        const buffer = await imageResponse.arrayBuffer();
-        const base64 = Buffer.from(buffer).toString('base64');
-
-        return {
-            url: `data:image/png;base64,${base64}`,
-            usedDate: foundDate,
-            polarization: finalPolarization,
-            sourceTile: tileId,
-            status: "Clasificación 6-Clases (Agua, Suelo, Cultivos, Arbustal, Bosque, Vegetación Densa)",
-            bbox: bbox,
-            width: width,
-            height: height
-        };
-
-    } catch (error) {
-        console.error('❌ Error en fetchSentinel1Classification3 (6 clases Optimizado):', error.message);
-        throw error;
-    }
-};
-
-// Endpoint para el frontend
-app.post('/api/sentinel1classification3', async (req, res) => {
-    const { coordinates, date } = req.body;
-    if (!coordinates || !date) {
-        return res.status(400).json({ error: 'Faltan parámetros: coordinates y date' });
-    }
-    try {
-        const result = await fetchSentinel1Classification3({ geometry: coordinates, date: date });
-        res.json(result);
-    } catch (error) {
-        console.error('❌ Error en el endpoint /api/sentinel1classification3:', error.message);
-        res.status(500).json({ error: error.message });
-    }
-});
-
-
-
-// ==============================================
-// ✅ NUEVO ENDPOINT ROBUSTO: /api/sentinel1classification_robust
-// ==============================================
-/**
- * Evalscript robusto para clasificación de cobertura usando Sentinel-1 (VV y VH).
- * Incluye lógica mejorada para distinguir Agua de Suelo y usa la relación VV/VH.
- */
-const getClassificationRobustEvalscript = () => {
-    return `//VERSION=3
-function setup() {
-    return {
-        input: [{ bands: ["VV", "VH", "dataMask"], units: "LINEAR_POWER" }],
-        output: { bands: 1, sampleType: "UINT8" }
-    };
-}
-function evaluatePixel(samples) {
-    // Manejo de datos inválidos
-    if (samples.dataMask === 0 || samples.VV <= 0 || samples.VH <= 0) {
-        return [0]; // Sin datos
-    }
-
-    // Conversión a dB
-    const vv_db = 10 * Math.log10(samples.VV);
-    const vh_db = 10 * Math.log10(samples.VH);
-    const rvi_db = vv_db - vh_db; // Relación de polarización
-
-    // --- LÓGICA DE CLASIFICACIÓN MEJORADA ---
-    // 1. AGUA: VH muy bajo y RVI bajo (superficie lisa)
-    if (vh_db < -25.0 && rvi_db < 3.0) {
-        return [50];
-    }
-    // 2. SUELO / URBANO: VH bajo pero RVI alto (superficie rugosa)
-    else if (vh_db < -20.0) {
-        return [100];
-    }
-    // 3. CULTIVOS / PASTIZALES
-    else if (vh_db < -17.0) {
-        return [150];
-    }
-    // 4. VEGETACIÓN BAJA
-    else if (vh_db < -14.0) {
-        return [180];
-    }
-    // 5. BOSQUE
-    else if (vh_db < -11.0) {
-        return [220];
-    }
-    // 6. VEGETACIÓN DENSA: VH alto y RVI alto
-    else {
-        return [255];
-    }
-}`;
-};
-
-/**
- * Función principal para el nuevo endpoint robusto.
- */
-const fetchSentinel1ClassificationRobust = async ({ geometry, date }) => {
-    const accessToken = await getAccessToken();
-    const bbox = polygonToBbox(geometry);
-    if (!bbox) {
-        throw new Error('No se pudo calcular el bounding box del polígono.');
-    }
-
-    try {
-        // Calcular tamaño óptimo (igual que en classification3)
-        const areaResult = calculatePolygonArea(bbox);
-        const sizeInPixels = calculateOptimalImageSize(areaResult.area, 10, areaResult.aspectRatio);
-        const width = sizeInPixels.width;
-        const height = sizeInPixels.height;
-
-        // Buscar escena en el catálogo (igual que en classification3)
-        const fromDate = new Date(date);
-        const toDate = new Date(date);
-        fromDate.setDate(fromDate.getDate() - 0);
-        toDate.setDate(toDate.getDate() + 0);
-
-        const catalogUrl = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search';
-        const catalogPayload = {
-            "bbox": bbox,
-            "datetime": `${fromDate.toISOString().split('T')[0]}T00:00:00Z/${toDate.toISOString().split('T')[0]}T23:59:59Z`,
-            "collections": ["sentinel-1-grd"],
-            "limit": 1
-        };
-
-        const catalogResponse = await fetch(catalogUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${accessToken}` },
-            body: JSON.stringify(catalogPayload)
-        });
-
-        if (!catalogResponse.ok) throw new Error(`Error en catálogo: ${await catalogResponse.text()}`);
-        const catalogData = await catalogResponse.json();
-        if (catalogData.features.length === 0) throw new Error("No hay datos de Sentinel-1 disponibles.");
-
-        const feature = catalogData.features[0];
-        const foundDate = feature.properties.datetime.split('T')[0];
-        const tileId = feature.id;
-        const pol = determinePolarization(tileId);
-
-        // Asegurarse de usar polarización dual (DV/DH)
-        const finalPolarization = pol.primary.includes('D') ? pol.primary : 'DV';
-
-        // --- PROCESAMIENTO CON EL NUEVO EVALSCRIPT ---
-        const evalscript = getClassificationRobustEvalscript();
-        const payload = {
-            input: {
-                bounds: { geometry: { type: "Polygon", coordinates: geometry } },
-                data: [{
-                    dataFilter: {
-                        timeRange: { from: `${foundDate}T00:00:00Z`, to: `${foundDate}T23:59:59Z` },
-                        polarization: finalPolarization,
-                        instrumentMode: pol.mode
-                    },
-                    processing: { mosaicking: "ORBIT" },
-                    type: "sentinel-1-grd"
-                }]
-            },
-            output: {
-                width: width,
-                height: height,
-                format: "image/png",
-                sampleType: "UINT8",
-                bands: 1,
-                crs: "http://www.opengis.net/def/crs/OGC/1.3/CRS84"
-            },
-            evalscript: evalscript
-        };
-
-        const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${accessToken}` },
-            body: JSON.stringify(payload)
-        });
-
-        if (!imageResponse.ok) throw new Error(`Error en Process API: ${await imageResponse.text()}`);
-
-        const buffer = await imageResponse.arrayBuffer();
-        const base64 = Buffer.from(buffer).toString('base64');
-
-        return {
-            url: `data:image/png;base64,${base64}`,
-            usedDate: foundDate,
-            polarization: finalPolarization,
-            sourceTile: tileId,
-            bbox: bbox,
-            width: width,
-            height: height
-        };
-
-    } catch (error) {
-        console.error('❌ Error en fetchSentinel1ClassificationRobust:', error.message);
-        throw error;
-    }
-};
-
-// Registrar el nuevo endpoint
-app.post('/api/sentinel1classification_robust', async (req, res) => {
-    const { coordinates, date } = req.body;
-    if (!coordinates || !date) {
-        return res.status(400).json({ error: 'Faltan parámetros: coordinates y date' });
-    }
-    try {
-        const result = await fetchSentinel1ClassificationRobust({ geometry: coordinates, date: date });
-        res.json(result);
-    } catch (error) {
-        console.error('❌ Error en el endpoint /api/sentinel1classification_robust:', error.message);
-        res.status(500).json({ error: error.message });
-    }
-});
-
-
-
-// ==============================================
-// FUNCIÓN: Evalscript con clasificación estacional (6 clases)
-// ==============================================
-/**
- * Genera un evalscript que ajusta los umbrales según la estación del año.
- * @param {string} dateStr - Fecha en formato 'YYYY-MM-DD'
- * @returns {string} El evalscript correspondiente.
- */
-const getClassificationSeasonalEvalscript = (dateStr) => {
-    // 1. Parsear la fecha para obtener el mes (1-12)
-    const month = new Date(dateStr).getMonth() + 1; // getMonth() es 0-11
-
-    // 2. Definir umbrales por estación
-    //    (Estos valores son un punto de partida; deberás ajustarlos con datos de verdad de terreno)
-    let thresholds;
-    if (month >= 12 || month <= 2) {
-        // Verano (Suelos secos, vegetación baja puede estar seca)
-        thresholds = {
-            water: -23.0,
-            soil: -18.0,
-            crops: -15.0,
-            shrub: -12.0,
-            forest: -9.0
-        };
-    } else if (month >= 3 && month <= 5) {
-        // Otoño
-        thresholds = {
-            water: -24.0,
-            soil: -19.0,
-            crops: -16.0,
-            shrub: -13.0,
-            forest: -10.0
-        };
-    } else if (month >= 6 && month <= 8) {
-        // Invierno (Suelos húmedos, más agua en el suelo)
-        thresholds = {
-            water: -26.0, // Más estricto para no confundir suelo húmedo con agua
-            soil: -21.0,
-            crops: -18.0,
-            shrub: -15.0,
-            forest: -12.0
-        };
-    } else { // month 9-11, Primavera
-        // Primavera (Vegetación en crecimiento)
-        thresholds = {
-            water: -25.0,
-            soil: -20.0,
-            crops: -17.0,
-            shrub: -14.0,
-            forest: -11.0
-        };
-    }
-
-    // 3. Generar el evalscript con los umbrales dinámicos
-    return `//VERSION=3
-function setup() {
-  return {
-    input: [{ bands: ["VV", "VH", "dataMask"], units: "LINEAR_POWER" }],
-    output: { bands: 1, sampleType: "UINT8" }
-  };
-}
-function evaluatePixel(samples) {
-  if (samples.dataMask === 0 || samples.VV <= 0 || samples.VH <= 0) {
-    return [0];
-  }
-  const vv_db = 10 * Math.log10(samples.VV);
-  const vh_db = 10 * Math.log10(samples.VH);
-  const rvi_db = vv_db - vh_db;
-
-  // --- CLASIFICACIÓN ESTACIONAL ---
-  // 1. Agua: VH muy bajo y RVI bajo
-  if (vh_db < ${thresholds.water} && rvi_db < 3.0) {
-      return [50];
-  }
-  // 2. Suelo / Urbano
-  else if (vh_db < ${thresholds.soil}) {
-      return [100];
-  }
-  // 3. Cultivos / Pastizales
-  else if (vh_db < ${thresholds.crops}) {
-      return [150];
-  }
-  // 4. Vegetación Baja
-  else if (vh_db < ${thresholds.shrub}) {
-      return [180];
-  }
-  // 5. Bosque
-  else if (vh_db < ${thresholds.forest}) {
-      return [220];
-  }
-  // 6. Vegetación Densa
-  else {
-      return [255];
-  }
-}`;
-};
-
-
-// ==============================================
-// ✅ NUEVO ENDPOINT: Clasificación con ajuste estacional
-// ==============================================
-const fetchSentinel1ClassificationSeasonal = async ({ geometry, date }) => {
-    const accessToken = await getAccessToken();
-    const bbox = polygonToBbox(geometry);
-    if (!bbox) {
-        throw new Error('No se pudo calcular el bounding box del polígono.');
-    }
-    try {
-        const areaResult = calculatePolygonArea(bbox);
-        const areaInSquareMeters = areaResult.area;
-        const aspectRatio = areaResult.aspectRatio;
-        const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10, aspectRatio);
-        const width = sizeInPixels.width;
-        const height = sizeInPixels.height;
-
-        // --- PASO 1: Buscar una escena en la fecha exacta o cercana ---
-        // Usamos la misma lógica que en 'getSentinel1Dates' pero limitada a un rango de 1 día.
-        const fromDate = new Date(date);
-        const toDate = new Date(date);
-        // Extender la búsqueda a 1 día antes y 1 día después para mayor probabilidad de encontrar datos.
-        fromDate.setDate(fromDate.getDate() - 0);
-        toDate.setDate(toDate.getDate() + 0);
-
-        const catalogUrl = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search';
-        const catalogPayload = {
-            "bbox": bbox,
-            "datetime": `${fromDate.toISOString().split('T')[0]}T00:00:00Z/${toDate.toISOString().split('T')[0]}T23:59:59Z`,
-            "collections": ["sentinel-1-grd"],
-            "limit": 1 // Solo necesitamos la primera escena disponible
-        };
-
-        const catalogResponse = await fetch(catalogUrl, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${accessToken}`
-            },
-            body: JSON.stringify(catalogPayload)
-        });
-
-        if (!catalogResponse.ok) {
-            const errorText = await catalogResponse.text();
-            throw new Error(`Error en consulta al catálogo: ${errorText}`);
-        }
-
-        const catalogData = await catalogResponse.json();
-
-        if (catalogData.features.length === 0) {
-            throw new Error("No se encontraron datos de Sentinel-1 disponibles para esta ubicación en el rango de fechas.");
-        }
-
-        // Tomar la primera escena encontrada (la más reciente dentro del rango)
-        const feature = catalogData.features[0];
-        const foundDate = feature.properties.datetime.split('T')[0];
-        const tileId = feature.id;
-        const pol = determinePolarization(tileId);
-
-        // Validar que la escena tenga VH (polarización dual)
-        if (!pol.primary.includes('D')) {
-            throw new Error(`La escena disponible (${tileId}) no contiene la banda VH.`);
-        }
-	
-		// Asegúrate de usar 'DV'/'DH' en la polarización para tener VV y VH.	
-        // Forzamos a usar la polarización Dual (DV/DH) para la clasificación
-        const finalPolarization = pol.primary.includes('D') ? pol.primary : 'DV';
-
-        // --- PASO 2: Generar el evalscript y enviar la solicitud de procesamiento ---
-		// La única diferencia está en la generación del evalscript:
-		const evalscript = getClassificationSeasonalEvalscript(date); // <-- Aquí se pasa la fecha
-
-        const payload = {
-            input: {
-                bounds: {
-                    geometry: {
-                        type: "Polygon",
-                        coordinates: geometry
-                    }
-                },
-                data: [{
-                    dataFilter: {
-                        timeRange: {
-                            from: `${foundDate}T00:00:00Z`,
-                            to: `${foundDate}T23:59:59Z`
-                        },
-                        polarization: finalPolarization, // ✅ Usa finalPolarization aquí
-                        instrumentMode: pol.mode
-                    },
-                    processing: {
-                        mosaicking: "ORBIT"
-                    },
-                    type: "sentinel-1-grd"
-                }]
-            },
-            output: {
-                width: width,
-                height: height,
-                format: "image/png",
-                sampleType: "UINT8",
-                bands: 1, // ✅ Siempre 1 banda para clasificación
-                crs: "http://www.opengis.net/def/crs/OGC/1.3/CRS84"
-            },
-            evalscript: evalscript
-        };
-
-        const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${accessToken}`
-            },
-            body: JSON.stringify(payload)
-        });
-
-        if (!imageResponse.ok) {
-            const errorText = await imageResponse.text();
-            throw new Error(`Solicitud de clasificación falló: ${errorText}`);
-        }
-
-        const buffer = await imageResponse.arrayBuffer();
-        const base64 = Buffer.from(buffer).toString('base64');
-
-        return {
-            url: `data:image/png;base64,${base64}`,
-            usedDate: foundDate,
-            polarization: finalPolarization,
-            sourceTile: tileId,
-            status: "Clasificación 6-Clases (Agua, Suelo, Cultivos, Arbustal, Bosque, Vegetación Densa)",
-            bbox: bbox,
-            width: width,
-            height: height
-        };
-
-    } catch (error) {
-        console.error('❌ Error en fetchSentinel1Classification3 (6 clases Optimizado) Seasonal:', error.message);
-        throw error;
-    }	
-};
-
-app.post('/api/sentinel1classification_seasonal', async (req, res) => {
-    const { coordinates, date } = req.body;
-    if (!coordinates || !date) {
-        return res.status(400).json({ error: 'Faltan parámetros: coordinates y date' });
-    }
-    try {
-        const result = await fetchSentinel1ClassificationSeasonal({ geometry: coordinates, date: date });
-        res.json(result);
-    } catch (error) {
-        console.error('❌ Error en el endpoint /api/sentinel1classification_seasonal:', error.message);
-        res.status(500).json({ error: error.message });
-    }
-});
-
-
-
-// ==============================================
-// ✅ NUEVO ENDPOINT: /api/sentinel1vhimage - Imagen de VH en escala de grises
-// ==============================================
-/**
- * Obtiene una imagen en escala de grises de la banda VH de Sentinel-1.
- * @param {object} params - Parámetros de la solicitud.
- * @param {array} params.geometry - Coordenadas del polígono.
- * @param {string} params.date - Fecha de la imagen.
- * @returns {object} Un objeto con la URL de la imagen PNG y metadatos.
- */
-const fetchSentinel1VHImage = async ({ geometry, date }) => {
-    const accessToken = await getAccessToken();
-    const bbox = polygonToBbox(geometry);
-    if (!bbox) {
-        throw new Error('No se pudo calcular el bounding box del polígono.');
-    }
-
-    // === PASO 1: Consultar catálogo (igual que en classification) ===
-    const fromDate = new Date(date);
-    const toDate = new Date(date);
-    const catalogUrl = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search';
-    const catalogPayload = {
-        "bbox": bbox,
-        "datetime": `${fromDate.toISOString().split('T')[0]}T00:00:00Z/${toDate.toISOString().split('T')[0]}T23:59:59Z`,
-        "collections": ["sentinel-1-grd"],
-        "limit": 10
-    };
-
-    const catalogResponse = await fetch(catalogUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${accessToken}` },
-        body: JSON.stringify(catalogPayload)
-    });
-
-    if (!catalogResponse.ok) {
-        const errorText = await catalogResponse.text();
-        throw new Error(`Error en catálogo S1: ${errorText}`);
-    }
-
-    const catalogData = await catalogResponse.json();
-    if (catalogData.features.length === 0) {
-        throw new Error("No hay datos de Sentinel-1 disponibles en la fecha solicitada.");
-    }
-
-    const feature = catalogData.features[0];
-    const foundDate = feature.properties.datetime.split('T')[0];
-    const tileId = feature.id;
-    const pol = determinePolarization(tileId);
-
-    // === Validar que la escena tenga VH ===
-    if (!pol.primary.includes('D')) {
-        throw new Error("La escena disponible no contiene la banda VH (solo polarización simple).");
-    }
-
-    // === Calcular tamaño óptimo ===
-    const areaResult = calculatePolygonArea(bbox);
-    const sizeInPixels = calculateOptimalImageSize(areaResult.area, 10, areaResult.aspectRatio);
-    const { width, height } = sizeInPixels;
-
-    // === Payload: usar polarización DUAL (DV/DH), pero evalscript solo usa VH ===
-    const payload = {
-        input: {
-            bounds: { geometry: { type: "Polygon", coordinates: geometry } },
-            data: [{
-                type: "sentinel-1-grd",
-                dataFilter: {
-                    timeRange: { from: `${foundDate}T00:00:00Z`, to: `${foundDate}T23:59:59Z` },
-                    polarization: pol.primary, // Ej: "DV"
-                    instrumentMode: "IW"
-                },
-                processing: { mosaicking: "ORBIT" }
-            }]
-        },
-        output: {
-            width,
-            height,
-            format: "image/png",
-            sampleType: "UINT8",
-            crs: "http://www.opengis.net/def/crs/OGC/1.3/CRS84"
-        },
-        evalscript: `
-//VERSION=3
-function setup() {
-    return {
-        input: [{ bands: ["VH", "dataMask"], units: "LINEAR_POWER" }],
-        output: { bands: 1, sampleType: "UINT8" }
-    };
-}
-function evaluatePixel(samples) {
-    if (samples.dataMask === 0 || samples.VH <= 0) {
-        return [0];
-    }
-    const vh_db = 10 * Math.log10(samples.VH);
-    // Rango ajustado a tus datos reales
-    const minDb = -28.0;
-    const maxDb = -10.0;
-    let normalized = (vh_db - minDb) / (maxDb - minDb);
-    normalized = Math.max(0, Math.min(1, normalized));
-    return [normalized * 255];
-}`
-    };
-
-    const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${accessToken}` },
-        body: JSON.stringify(payload)
-    });
-
-    if (!imageResponse.ok) {
-        const error = await imageResponse.text();
-        throw new Error(`Error en Process API: ${error}`);
-    }
-
-    const buffer = await imageResponse.arrayBuffer();
-    const base64 = Buffer.from(buffer).toString('base64');
-
-    return {
-        url: `data:image/png;base64,${base64}`,
-        usedDate: foundDate,
-        bbox,
-        width,
-        height
-    };
-};
-
-// Endpoint para el frontend
-app.post('/api/sentinel1vhimage', async (req, res) => {
-    const { coordinates, date } = req.body;
-    if (!coordinates || !date) {
-        return res.status(400).json({ error: 'Faltan parámetros: coordinates y date' });
-    }
-    try {
-        const result = await fetchSentinel1VHImage({ geometry: coordinates, date: date });
-        res.json(result);
-    } catch (error) {
-        console.error('❌ Error en el endpoint /api/sentinel1vhimage:', error.message);
-        res.status(500).json({ error: error.message });
-    }
-});
-
-
-// ==============================================
-// ✅ NUEVO ENDPOINT: /api/sentinel1vhaverage - Valor promedio de VH en dB
-// ==============================================
-/**
- * Obtiene el valor promedio de la retrodispersión de la banda VH de Sentinel-1 en dB.
- * @param {object} params - Parámetros de la solicitud.
- * @param {array} params.geometry - Coordenadas del polígono.
- * @param {string} params.date - Fecha de la imagen.
- * @returns {object} Un objeto con el promedio en dB y estadísticas.
- */
-const fetchSentinel1VHAverage = async ({ geometry, date }) => {
-    const accessToken = await getAccessToken();
-    const bbox = polygonToBbox(geometry);
-    if (!bbox) {
-        throw new Error('No se pudo calcular el bounding box del polígono.');
-    }
-    try {
-        const areaResult = calculatePolygonArea(bbox);
-        const areaInSquareMeters = areaResult.area;
-        const aspectRatio = areaResult.aspectRatio;
-        const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10, aspectRatio);
-        const width = sizeInPixels.width;
-        const height = sizeInPixels.height;
-
-        // Búsqueda en el Catálogo
-        const fromDate = new Date(date);
-        const toDate = new Date(date);
-		
-		
-// 🚨 CORRECCIÓN CLAVE: Abrir el rango de búsqueda a 1 día antes y 1 día después.
-fromDate.setDate(fromDate.getDate() - 0); 
-toDate.setDate(toDate.getDate() + 0);		
-		
-		
-        // ✅ CORREGIDO: URL sin espacios
-        const catalogUrl = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search';
-        const catalogPayload = {
-            "bbox": bbox,
-			"datetime": `${fromDate.toISOString().split('T')[0]}T00:00:00Z/${toDate.toISOString().split('T')[0]}T23:59:59Z`,
-            "collections": ["sentinel-1-grd"],
-            "limit": 10
-        };
-        const catalogResponse = await fetch(catalogUrl, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${accessToken}`
-            },
-            body: JSON.stringify(catalogPayload)
-        });
-        if (!catalogResponse.ok) {
-            const errorText = await catalogResponse.text();
-            throw new Error(`Error en consulta al catálogo: ${errorText}`);
-        }
-        const catalogData = await catalogResponse.json();
-        if (catalogData.features.length === 0) {
-            throw new Error("No se encontraron datos de Sentinel-1 para esta ubicación.");
-        }
-        const feature = catalogData.features[0];
-        const foundDate = feature.properties.datetime.split('T')[0];
-        const tileId = feature.id;
-        const pol = determinePolarization(tileId);
-
-        // ✅ Validación crítica: asegurar que la escena tiene VH
-        if (!pol.primary.includes('D')) {
-            throw new Error(`La escena disponible (${tileId}) no contiene la banda VH (solo polarización simple: ${pol.primary}).`);
-        }
-
-        // Evalscript para datos en bruto (TIFF, FLOAT32)
-// Evalscript: devolver 1 banda de Potencia Lineal
-const evalscript = `//VERSION=3
-function setup() {
-    return {
-        // ✅ Solicitar dataMask
-        input: [{ bands: ["VH", "dataMask"], units: "LINEAR_POWER" }], 
-        output: { bands: 1, sampleType: "FLOAT32" } 
-    };
-}
-function evaluatePixel(samples) {
-    // ✅ Retornar NaN (el NoData para FLOAT32) si no hay datos.
-    if (samples.dataMask === 1) { 
-        return [samples.VH]; 
-    }
-    // Si dataMask es 0 o indefinido, retorna NaN.
-    return [NaN]; 
-}`;
-
-        const payload = {
-            input: {
-                bounds: {
-                    geometry: {
-                        type: "Polygon",
-                        coordinates: geometry
-                    }
-                },
-                data: [{
-                    dataFilter: {
-                        timeRange: {
-                            from: `${foundDate}T00:00:00Z`,
-                            to: `${foundDate}T23:59:59Z`
-                        },
-                        polarization: pol.primary, // ✅ DV o DH → VH disponible
-                        instrumentMode: pol.mode
-                    },
-                    processing: {
-                        mosaicking: "ORBIT"
-                    },
-                    type: "sentinel-1-grd"
-                }]
-            },
-			output: {
-							width: width,
-							height: height,
-							bands: 1, // ✅ Volver a 1 banda aquí también.
-							format: "image/tiff",
-							sampleType: "FLOAT32",
-							crs: "http://www.opengis.net/def/crs/OGC/1.3/CRS84"
-						},
-						
-						evalscript: evalscript
-					};
-		// 🔍 DEBUG: Verificar payload antes de enviar
-		console.log('🔍 [DEBUG] Payload enviado a Sentinel Hub Process API:');
-		console.log('   - output.format:', payload.output.format);
-		console.log('   - output.sampleType:', payload.output.sampleType);
-		console.log('   - dataFilter.polarization:', payload.input.data[0].dataFilter.polarization);
-		console.log('   - evalscript preview:', evalscript.substring(0, 100) + '...');
-
-		console.log('🔍 [DEBUG] Payload.output real:', JSON.stringify(payload.output));
-		
-		const tiffResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
-			method: 'POST',
-			headers: {
-				// Cabecera requerida para el cuerpo JSON
-				'Content-Type': 'application/json', 
-				// ✅ CORRECCIÓN CLAVE: Forzar la respuesta a ser un TIFF
-				'Accept': 'image/tiff', 
-				'Authorization': `Bearer ${accessToken}`
-			},
-			body: JSON.stringify(payload)
-		});
-
-		if (!tiffResponse.ok) {
-			const errorText = await tiffResponse.text();
-			throw new Error(`Error al obtener datos en bruto para cálculo del promedio: ${errorText}`);
-		}
-
-		// ✅ NUEVA VALIDACIÓN: asegurar que la respuesta es un TIFF
-		const contentType = tiffResponse.headers.get('content-type');
-		if (!contentType || !contentType.includes('image/tiff')) {
-			const errorText = await tiffResponse.text();
-			console.error('❌ Respuesta inesperada (no es TIFF):', errorText);
-			throw new Error(`La respuesta no es un TIFF válido. Content-Type: ${contentType}. Detalle: ${errorText}`);
-		}
-
-
-		// ✅ Validar que la longitud sea múltiplo de 4
-		const tiffBuffer = await tiffResponse.arrayBuffer();
-
-// 1. Verificación de Buffer (Para ver si Sentinel Hub devolvió algo)
-if (tiffBuffer.byteLength === 0) {
-    console.error('❌ [ERROR FATAL] Sentinel Hub devolvió un Buffer de 0 bytes.');
-    return { avgVhDb: null, validPixels: 0, usedDate: foundDate };
-}
-
-
-// ✅ CÓDIGO A AÑADIR: Parsear el TIFF y obtener los datos puros
-    const tiff = await fromArrayBuffer(tiffBuffer);
-    const image = await tiff.getImage(0);
-	
-// 🚨 CORRECCIÓN FINAL: Leer SIN interleave para 1 banda.
-    const rasters = await image.readRasters();	
-	
-
-// 🔍 NUEVOS LOGS DE DIAGNÓSTICO
-console.log('🔍 [DEBUG] Tipo de dato de rasters:', Array.isArray(rasters) ? 'Array' : typeof rasters);
-console.log('🔍 [DEBUG] Número de elementos/bandas en rasters:', Array.isArray(rasters) ? rasters.length : 'N/A');
-
-    // El primer elemento (rasters[0]) contendrá el Float32Array de los píxeles
-const float32Array = rasters[0]; 
-
-// 2. Manejo de Array Vacío (Evita el crash y maneja el caso de datos no encontrados)
-if (!float32Array || float32Array.length === 0) {
-    console.warn('⚠️ [ADVERTENCIA] El GeoTIFF no contenía píxeles. La escena está vacía para esta geometría.');
-    return { avgVhDb: null, validPixels: 0, usedDate: foundDate };
-}
-
-// 3. Inicio del cálculo (con la corrección EPSILON)
-const EPSILON = 1e-6; // Umbral mínimo para el logaritmo (representa el "ruido")
-let sum = 0;
-let count = 0;
-
-for (let i = 0; i < float32Array.length; i++) { 
-    let linear_power_value = float32Array[i];
-
-    // Paso 1: Verificamos si es un píxel válido (no-NaN del dataMask)
-    if (Number.isFinite(linear_power_value)) { 
-        
-        let power_value_for_log = linear_power_value;
-        
-        // Paso 2: Si el valor es 0 o negativo (debido a la corrección de ruido),
-        // lo forzamos al umbral mínimo para evitar fallos de Math.log10.
-        if (power_value_for_log <= 0) {
-            power_value_for_log = EPSILON;
-        }
-
-        // Paso 3: Aplicamos la conversión a dB (10 * log10(σ⁰))
-        const vh_db = 10 * Math.log10(power_value_for_log);
-        
-        sum += vh_db;
-        count++; // Contamos el píxel como válido
-    }
-}
-const avgVhDb = count > 0 ? sum / count : null;
-
-
-        return {
-            avgVhDb: avgVhDb,
-            totalPixels: float32Array.length,
-			totalPixels: float32Array ? float32Array.length : 0, // Devuelve 0 si el array es undefined			
-            validPixels: count,
-            usedDate: foundDate
-        };
-    } catch (error) {
-        console.error('❌ Error en fetchSentinel1VHAverage:', error.message);
-        throw error;
-    }
-};
-
-// Endpoint para el frontend
-app.post('/api/sentinel1vhaverage', async (req, res) => {
-    const { coordinates, date } = req.body;
-    if (!coordinates || !date) {
-        return res.status(400).json({ error: 'Faltan parámetros: coordinates y date' });
-    }
-    try {
-        const result = await fetchSentinel1VHAverage({ geometry: coordinates, date: date });
-        res.json(result);
-    } catch (error) {
-        console.error('❌ Error en el endpoint /api/sentinel1vhaverage:', error.message);
-        res.status(500).json({ error: error.message });
-    }
-});
-
-
-/**
- * ✅ FUNCIÓN CORREGIDA: Obtiene el valor promedio de NDVI y porcentaje de cobertura vegetal
- * @param {object} params - Parámetros de la solicitud.
- * @param {array} params.geometry - Coordenadas del polígono.
- * @param {string} params.date - Fecha de la imagen.
- * @returns {object} Objeto con NDVI promedio y porcentaje de cobertura
- * @throws {Error} Si no se puede obtener el valor.
- */
-const getNdviAverage2 = async ({ geometry, date }) => {
-    const accessToken = await getAccessToken();
-    try {
-        // ✅ NUEVO: Calcular el bbox y el área para determinar el tamaño óptimo
-        const bbox = polygonToBbox(geometry);
-        if (!bbox) {
-            throw new Error('No se pudo calcular el bounding box.');
-        }
-        const areaResult = calculatePolygonArea(bbox);
-        const areaInSquareMeters = areaResult.area;
-        const aspectRatio = areaResult.aspectRatio;
-        const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10, aspectRatio); // 10m de resolución
-        const width = sizeInPixels.width;
-        const height = sizeInPixels.height;
-        // 🔹 REGISTRO DE PU
-        // logProcessingUnits(width, height, 1, "NDVI-Average");
-        const payload = {
-            input: {
-                bounds: {
-                    geometry: {
-                        type: "Polygon",
-                        coordinates: geometry
-                    }
-                },
-                data: [
-                    {
-                        dataFilter: {
-                            timeRange: {
-                                from: `${date}T00:00:00Z`,
-                                to: `${date}T23:59:59Z`
-                            },
-                            maxCloudCoverage: 100
-                        },
-                        type: "sentinel-2-l2a"
-                    }
-                ]
-            },
-            output: {
-                width: width, // ✅ Tamaño adaptativo
-                height: height, // ✅ Tamaño adaptativo
-                format: "image/png",
-				// ✅ CORRECCIÓN CLAVE: Forzar proyección WGS84
-				crs: "http://www.opengis.net/def/crs/OGC/1.3/CRS84"
-            },
-            evalscript: `//VERSION=3
-function setup() {
-  return {
-    input: [{ bands: ["B08", "B04", "dataMask"], units: "REFLECTANCE" }],
-    output: { bands: 1, sampleType: "UINT8" }
-  };
-}
-function evaluatePixel(samples) {
-  if (samples.dataMask === 0) {
-    return [0]; // Fondo/No datos
-  }
-  const nir = samples.B08;
-  const red = samples.B04;
-  const ndvi = (nir - red) / (nir + red);
-  // Umbral ajustado para bosque templado (> 0.4)
-  if (ndvi > 0.4) {
-    return [255]; // Vegetación significativa
-  } else {
-    return [0]; // No vegetación o vegetación mínima
-  }
-}`
-        };
-        const response = await fetch('https://services.sentinel-hub.com/api/v1/process', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${accessToken}`
-            },
-            body: JSON.stringify(payload)
-        });
-        if (!response.ok) {
-            const error = await response.text();
-            throw new Error(`Error en la API de Sentinel-Hub: ${error}`);
-        }
-        const buffer = await response.arrayBuffer();
-        const imageData = new Uint8Array(buffer);
-        let sum = 0;
-        let count = 0;
-        let vegetationPixels = 0;
-        let totalPixels = 0;
-        for (let i = 0; i < imageData.length; i += 4) {
-            const value = imageData[i];
-            if (value !== 0) { // Pixel válido (no fondo)
-                totalPixels++;
-                // Calcular NDVI real para el promedio
-                const normalizedValue = value / 255.0;
-                const ndvi = (normalizedValue * 2) - 1;
-                sum += ndvi;
-                count++;
-                // Contar píxeles con vegetación significativa
-                if (value === 255) {
-                    vegetationPixels++;
-                }
-            }
-        }
-        const avgNdvi = count > 0 ? sum / count : null;
-        const vegetationPercentage = totalPixels > 0 ? (vegetationPixels / totalPixels) * 100 : 0;
-        return {
-            avgNdvi: avgNdvi,
-            vegetationPercentage: vegetationPercentage,
-            vegetationPixels: vegetationPixels,
-            totalPixels: totalPixels
-        };
-    } catch (error) {
-        console.error('❌ Error en getNdviAverage2:', error.message);
-        throw error;
-    }
-};
-// ==============================================
-// ENDPOINTS DE IMÁGENES CON LÓGICA DE REINTENTO
-// ==============================================
-app.post('/api/sentinel2', async (req, res) => {
-    const { coordinates, date } = req.body;
-    if (!coordinates || !date) {
-        return res.status(400).json({ error: 'Faltan parámetros: coordinates y date' });
-    }
-    try {
-        const result = await fetchSentinelImage({ geometry: coordinates, date, geometryType: 'Polygon' });
-        res.json(result);
-    } catch (error) {
-        console.error('❌ Error general:', error.message);
-        res.status(500).json({
-            error: error.message,
-            suggestion: "Verifica que las coordenadas del polígono sean válidas y que el área esté en tierra firme"
-        });
-    }
-});
-app.post('/api/get-valid-dates1', async (req, res) => {
-    // Coordenadas de prueba para Londres
-    const testBbox = [-0.161, 51.488, 0.057, 51.52];
-    try {
-        let availableDates = await getAvailableDates(testBbox, 90);
-        if (availableDates.length === 0) {
-            availableDates = await getAvailableDates(testBbox, 100);
-        }
-        if (availableDates.length === 0) {
-            return res.json({ hasCoverage: false, message: "No se encontraron imágenes para esta ubicación en el rango de fechas." });
-        }
-        res.json({
-            hasCoverage: true,
-            totalDates: availableDates.length,
-            availableDates: availableDates.slice(0, 30),
-            message: `Se encontraron ${availableDates.length} fechas con datos disponibles`
-        });
-    } catch (error) {
-        console.error('❌ Error al verificar cobertura:', error.message);
-        res.status(500).json({ error: error.message, suggestion: "Verifica que las coordenadas sean válidas y el área esté en tierra firme." });
-    }
-});
-app.post('/api/get-valid-dates', async (req, res) => {
-	console.log('🔑 /api/get-valid-dates');
-	console.error('🕒 Inicio de solicitud /get-valid-dates');
-    const { coordinates } = req.body;
-    if (!coordinates) {
-        return res.status(400).json({ error: 'Faltan parámetros requeridos: coordinates' });
-    }
-    const bbox = polygonToBbox(coordinates);
-    if (!bbox) {
-        return res.status(400).json({ error: 'Formato de coordenadas de polígono inválido.' });
-    }
-    try {
-		const start = Date.now();
-        let availableDates = await getAvailableDates(bbox, 50);
-        if (availableDates.length === 0) {
-            availableDates = await getAvailableDates(bbox, 100);
-        }
-        if (availableDates.length === 0) {
-            return res.json({ hasCoverage: false, message: "No se encontraron imágenes para esta ubicación en el rango de fechas." });
-        }
-        const duration = Date.now() - start;
-		console.error(`✅ /get-valid-dates completado en ${duration}ms. Fechas encontradas: ${availableDates.length}`);
-        res.json({
-            hasCoverage: true,
-            totalDates: availableDates.length,
-            availableDates: availableDates.slice(0, 90),
-            message: `Se encontraron ${availableDates.length} fechas con datos disponibles`
-        });
-    } catch (error) {
-        console.error('❌ Error al verificar cobertura:', error.message);
-        res.status(500).json({ error: error.message, suggestion: "Verifica que las coordenadas sean válidas y el área esté en tierra firme." });
-    }
-});
-// =============================================
-// ✅ NUEVO ENDPOINT: /api/get-valid-dates-s1 (Sentinel-1)
-// =============================================
-app.post('/api/get-valid-dates-s1', async (req, res) => {
-    // El frontend enviará las coordenadas del polígono
-	console.log('🔑 /api/get-valid-dates-s1');
-	console.warn('🕒 Inicio de solicitud /get-valid-dates-s1');
-    const { coordinates } = req.body; 
-    if (!coordinates) {
-        return res.status(400).json({ error: 'Faltan parámetros: coordinates.' });
-    }
-    try {
-		const start = Date.now();
-        const dates = await getSentinel1Dates({ geometry: coordinates });
-        const duration = Date.now() - start;
-		console.warn(`✅ /get-valid-dates-s1 completado en ${duration}ms. Fechas encontradas: ${dates.length}`);
-        res.json({ dates });
-    } catch (error) {
-        console.error('❌ Error en el endpoint /api/get-valid-dates-s1:', error.message);
-        res.status(500).json({ error: error.message });
-    }
-});
-app.post('/api/sentinel2simple', async (req, res) => {
-    const { coordinates, date } = req.body;
-    if (!coordinates || !date) {
-        return res.status(400).json({ error: 'Faltan parámetros: coordinates y date' });
-    }
-    try {
-        const result = await fetchSentinelImage({ geometry: coordinates, date, geometryType: 'Polygon' });
-        res.json(result);
-    } catch (error) {
-        console.error('❌ Error general:', error.message);
-        res.status(500).json({
-            error: error.message,
-            suggestion: "Verifica que las coordenadas del polígono sean válidas y que el área esté en tierra firme"
-        });
-    }
-});
-app.post('/api/sentinel2simple2', async (req, res) => {
-    const { coordinates, date } = req.body;
-    const bbox = polygonToBbox(coordinates);
-    if (!bbox) {
-        return res.status(400).json({ error: 'Formato de coordenadas de polígono inválido.' });
-    }
-    console.log(`✅ Polígono convertido a bbox: [${bbox.join(', ')}]`);
-    try {
-        const result = await fetchSentinelImage({ geometry: bbox, date, geometryType: 'bbox' });
-        res.json(result);
-    } catch (error) {
-        console.error('❌ Error general:', error.message);
-        res.status(500).json({
-            error: error.message,
-            suggestion: "Verifica que las coordenadas del polígono sean válidas y que el área esté en tierra firme."
-        });
-    }
-});
-// ==============================================
-// ✅ NUEVO ENDPOINT PARA OBTENER LOS PROMEDIOS DE NDVI
-// ==============================================
-app.post('/api/get-ndvi-averages', async (req, res) => {
-    const { coordinates, dates } = req.body;
-    if (!coordinates || !dates || dates.length < 2) {
-        return res.status(400).json({ error: 'Faltan parámetros: coordinates y al menos dos fechas en dates.' });
-    }
-    try {
-        const [avg1, avg2] = await Promise.all([
-            getNdviAverage2({ geometry: coordinates, date: dates[0] }),
-            getNdviAverage2({ geometry: coordinates, date: dates[1] })
-        ]);
-        res.json({
-            date1: dates[0],
-            avgNdvi1: avg1,
-            date2: dates[1],
-            avgNdvi2: avg2
-        });
-    } catch (error) {
-        console.error('❌ Error en el endpoint /get-ndvi-averages:', error.message);
-        res.status(500).json({ error: error.message });
-    }
-});
-// ==============================================
-// ENDPOINTS DE METADATOS CON BBOX
-// ==============================================
-app.post('/api/check-coverage', async (req, res) => {
-    const { coordinates } = req.body;
-    if (!coordinates) {
-        return res.status(400).json({ error: 'Faltan parámetros requeridos: coordinates' });
-    }
-    const bbox = polygonToBbox(coordinates);
-    if (!bbox) {
-        return res.status(400).json({ error: 'Formato de coordenadas de polígono inválido.' });
-    }
-    try {
-        const accessToken = await getAccessToken();
-        const metadataPayload = {
-            input: {
-                bounds: {
-                    bbox: bbox,
-                    properties: { crs: "http://www.opengis.net/def/crs/OGC/1.3/CRS84" }
-                },
-                data: [{
-                    dataFilter: {
-                        timeRange: { from: "2020-01-01T00:00:00Z", to: "2025-01-01T23:59:59Z" },
-                        maxCloudCoverage: 100
-                    },
-                    type: "sentinel-2-l2a"
-                }]
-            },
-            output: {
-                width: 50,
-                height: 50,
-                format: "application/json"
-            },
-            evalscript: `// VERSION=3
-function setup() { return { input: ["B04"], output: { bands: 1 } }; }
-function evaluatePixel(sample) { return [1]; }`,
-            meta: { "availableDates": true }
-        };
-        const metadataResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${accessToken}`
-            },
-            body: JSON.stringify(metadataPayload)
-        });
-        if (!metadataResponse.ok) {
-            const error = await metadataResponse.text();
-            throw new Error(`Error al obtener metadatos: ${error}`);
-        }
-        const metadata = await metadataResponse.json();
-        const availableDates = metadata.metadata && metadata.metadata.availableDates ?
-            metadata.metadata.availableDates.map(date => date.split('T')[0]).sort((a, b) => new Date(b) - new Date(a)) :
-            [];
-        if (availableDates.length === 0) {
-            return res.json({ hasCoverage: false, message: "No hay datos disponibles para este área en el periodo de tiempo especificado." });
-        }
-        res.json({
-            hasCoverage: true,
-            totalDates: availableDates.length,
-            availableDates: availableDates.slice(0, 30),
-            message: `Se encontraron ${availableDates.length} fechas con datos disponibles`
-        });
-    } catch (error) {
-        console.error('❌ Error al verificar cobertura:', error.message);
-        res.status(500).json({ error: error.message, suggestion: "Verifica que las coordenadas sean válidas y el área esté en tierra firme." });
-    }
-});
-app.post('/api/catalogo-coverage', async (req, res) => {
-    const { coordinates } = req.body;
-    if (!coordinates) {
-        return res.status(400).json({ error: 'Faltan parámetros requeridos: coordinates' });
-    }
-    const bbox = polygonToBbox(coordinates);
-    if (!bbox) {
-        return res.status(400).json({ error: 'Formato de coordenadas de polígono inválido.' });
-    }
-    try {
-        const accessToken = await getAccessToken();
-        const catalogUrl = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search';
-        const payload = {
-            "bbox": bbox,
-            "datetime": "2020-01-01T00:00:00Z/2025-01-01T23:59:59Z",
-            "collections": ["sentinel-2-l2a"],
-            "limit": 100,
-            "filter": {
-                "op": "<=",
-                "field": "eo:cloud_cover",
-                "value": 100
-            }
-        };
-        const catalogResponse = await fetch(catalogUrl, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${accessToken}`
-            },
-            body: JSON.stringify(payload)
-        });
-        if (!catalogResponse.ok) {
-            const error = await catalogResponse.text();
-            throw new Error(`Error al obtener datos del Catálogo: ${error}`);
-        }
-        const catalogData = await catalogResponse.json();
-        const availableDates = catalogData.features
-            .map(feature => feature.properties.datetime.split('T')[0])
-            .filter((value, index, self) => self.indexOf(value) === index)
-            .sort((a, b) => new Date(b) - new Date(a));
-        if (availableDates.length === 0) {
-            return res.json({ hasCoverage: false, message: "No hay datos de imagen disponibles para este área en el periodo de tiempo especificado." });
-        }
-        res.json({
-            hasCoverage: true,
-            totalDates: availableDates.length,
-            availableDates: availableDates,
-            message: `Se encontraron ${availableDates.length} fechas con datos disponibles`
-        });
-    } catch (error) {
-        console.error('❌ Error al verificar cobertura:', error.message);
-        res.status(500).json({
-            error: error.message,
-            suggestion: "Verifica que las coordenadas estén en formato [longitud, latitud] y que el área esté en tierra firme"
-        });
-    }
-});
-// ==============================================
-// ✅ NUEVO ENDPOINT PARA PRUEBAS (POSTMAN)
-// ==============================================
-app.post('/api/test-ndvi', async (req, res) => {
-    const { coordinates, date } = req.body;
-    if (!coordinates || !date) {
-        return res.status(400).json({ error: 'Faltan parámetros: coordinates y date.' });
-    }
-    try {
-        const ndviAverage = await getNdviAverage2({ geometry: coordinates, date });
-        res.json({
-            date: date,
-            avgNdvi: ndviAverage,
-            message: "NDVI average retrieved successfully."
-        });
-    } catch (error) {
-        console.error('❌ Error en el endpoint /test-ndvi:', error.message);
-        res.status(500).json({
-            error: error.message,
-            suggestion: "Verifica que las coordenadas y la fecha sean correctas."
-        });
-    }
-});
-app.post('/api/sentinel2truecolor', async (req, res) => {
-    const { coordinates, date } = req.body;
-    if (!coordinates || !date) {
-        return res.status(400).json({ error: 'Faltan parámetros: coordinates y date' });
-    }
-    try {
-        const result = await fetchSentinelImageTC({ geometry: coordinates, date, geometryType: 'Polygon' });
-        res.json(result);
-    } catch (error) {
-        console.error('❌ Error en /sentinel2truecolor:', error.message);
-        res.status(500).json({
-            error: error.message,
-            suggestion: "Verifica que las coordenadas del polígono sean válidas y que el área esté en tierra firme"
-        });
-    }
-});
-// ==============================================
-// ✅ NUEVO ENDPOINT: /api/sentinel2highlight - Highlight Optimized Natural Color (MEJORADO)
-// ==============================================
-/**
- * Obtiene una imagen Sentinel-2 con visualización "Highlight Optimized Natural Color".
- * @param {object} params - Parámetros de la solicitud.
- * @param {array} params.geometry - Coordenadas del polígono.
- * @param {string} params.date - Fecha de la imagen.
- * @param {array} params.bbox - Bounding box del polígono [minLon, minLat, maxLon, maxLat].
- * @returns {object} Un objeto con la URL de la imagen, la fecha utilizada y el bbox.
- */
-const fetchSentinelImageHighlight = async ({ geometry, date, bbox }) => {
-    const accessToken = await getAccessToken();
-    // ✅ NUEVO: Calcular el área aproximada del polígono en metros cuadrados
-    const areaResult = calculatePolygonArea(bbox);
-    const areaInSquareMeters = areaResult.area;
-    const aspectRatio = areaResult.aspectRatio;
-    const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10, aspectRatio);
-    const width = sizeInPixels.width;
-    const height = sizeInPixels.height;
-    // 🔹 REGISTRO DE PU
-    // logProcessingUnits(width, height, 4, "Highlight");
-    const payload = {
-        input: {
-            bounds: {
-                geometry: {
-                    type: "Polygon",
-                    coordinates: geometry
-                }
-            },
-            data: [
-                {
-                    type: "sentinel-2-l2a",
-                    dataFilter: {
-                        timeRange: {
-                            from: `${date}T00:00:00Z`,
-                            to: `${date}T23:59:59Z`
-                        },
-                        maxCloudCoverage: 20
-                    },
-                    mosaicking: "SCENE"
-                }
-            ]
-        },
-        output: {
-            width: width,
-            height: height,
-            format: "image/png",
-            upsampling: "BICUBIC", // Mejor para ampliar
-            downsampling: "BICUBIC", // Mejor para reducir
-            bands: 4, // 3 bandas de color + 1 de máscara (alpha)
-            sampleType: "UINT8",
-            // ✅ CORRECCIÓN CLAVE: Forzar proyección WGS84
-            crs: "http://www.opengis.net/def/crs/OGC/1.3/CRS84"
-        },
-        evalscript: `
-//VERSION=3
-function setup() {
-    return {
-        input: [{
-            bands: [
-                "B04", // Red
-                "B03", // Green
-                "B02", // Blue
-                "dataMask" // Para máscara de datos
-            ],
-            units: "REFLECTANCE"
-        }],
-        output: {
-            bands: 4, // 3 bandas de color + 1 de máscara (alpha)
-            sampleType: "UINT8"
-        }
-    };
-}
-// Función para aplicar el ajuste de rango dinámico (DRA) a un canal
-function evaluatePixel(sample) {
-    // Valores para el ajuste de rango dinámico (DRA) - Estos son valores típicos para EO Browser
-    let minVal = 0.0;
-    let maxVal = 0.4; // Este es el valor clave que controla el brillo. 0.4 es un buen punto de partida.
-    // Aplicar DRA a cada canal
-    let red = (sample.B04 - minVal) / (maxVal - minVal);
-    let green = (sample.B03 - minVal) / (maxVal - minVal);
-    let blue = (sample.B02 - minVal) / (maxVal - minVal);
-    // Recortar valores fuera del rango [0, 1]
-    red = Math.max(0, Math.min(1, red));
-    green = Math.max(0, Math.min(1, green));
-    blue = Math.max(0, Math.min(1, blue));
-    // Devolver el color RGB y la máscara de datos (para transparencia)
-    return [red * 255, green * 255, blue * 255, sample.dataMask * 255];
-}
-        `
-    };
-    const imageResponse = await fetch('https://services.sentinel-hub.com/api/v1/process', {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${accessToken}`
-        },
-        body: JSON.stringify(payload)
-    });
-    if (!imageResponse.ok) {
-        const error = await imageResponse.text();
-        console.error('❌ Error en la API de Sentinel-Hub (Highlight):', error);
-        throw new Error(`Error en la imagen Highlight para ${date}: ${error}`);
-    }
-    const buffer = await imageResponse.arrayBuffer();
-    const base64 = Buffer.from(buffer).toString('base64');
-    return {
-        url: `data:image/png;base64,${base64}`,
-        usedDate: date,
-        bbox: bbox,
-		width: width,   // <-- Añade esta línea
-		height: height   // <-- Añade esta línea		
-    };
-};
-// Endpoint para el frontend
-app.post('/api/sentinel2highlight', async (req, res) => {
-    const { coordinates, date } = req.body;
-    if (!coordinates || !date) {
-        return res.status(400).json({ error: 'Faltan parámetros: coordinates y date' });
-    }
-    try {
-        // Calcular el bbox del polígono
-        const bbox = polygonToBbox(coordinates);
-        if (!bbox) {
-            throw new Error('No se pudo calcular el bounding box del polígono.');
-        }
-        const result = await fetchSentinelImageHighlight({
-            geometry: coordinates,
-            date: date,
-            bbox: bbox // ✅ Pasamos el bbox para el cálculo del área
-        });
-        res.json(result);
-    } catch (error) {
-        console.error('❌ Error en /sentinel2highlight:', error.message);
-        res.status(500).json({
-            error: error.message,
-            suggestion: "Verifica que las coordenadas del polígono sean válidas y que el área esté en tierra firme"
-        });
-    }
-});
-// ==============================================
-// ✅ FUNCIÓN CORREGIDA FINAL: Obtiene el valor de retrodispersión promedio de Sentinel-1
-// ==============================================
-/**
- * Obtiene el valor de retrodispersión promedio de Sentinel-1 (banda VH)
- * para una fecha y geometría específicas.
- * @param {object} params - Parámetros de la solicitud.
- * @param {array} params.geometry - Coordenadas del polígono.
- * @param {string} params.date - Fecha de la imagen.
- * @returns {object} Objeto con el promedio de retrodispersión.
- * @throws {Error} Si no se puede obtener el valor.
- */
-const getSentinel1Biomass = async ({ geometry, date }) => {
-    const accessToken = await getAccessToken();
-    try {
-        const bbox = polygonToBbox(geometry);
-        if (!bbox) {
-            throw new Error('No se pudo calcular el bounding box.');
-        }
-        const areaResult = calculatePolygonArea(bbox);
-        const areaInSquareMeters = areaResult.area;
-        const aspectRatio = areaResult.aspectRatio;
-        const sizeInPixels = calculateOptimalImageSize(areaInSquareMeters, 10, aspectRatio); // 10m de resolución
-        const width = sizeInPixels.width;
-        const height = sizeInPixels.height;
-        // 🔹 REGISTRO DE PU
-        // logProcessingUnits(width, height, 1, "S1-Biomass-Average");
-        const payload = {
-            input: {
-                bounds: {
-                    geometry: {
-                        type: "Polygon",
-                        coordinates: geometry
-                    }
-                },
-                data: [
-                    {
-                        dataFilter: {
-                            timeRange: {
-                                from: `${date}T00:00:00Z`,
-                                to: `${date}T23:59:59Z`
-                            },
-                            polarization: "VH",
-                            orbitDirection: "DESCENDING"    // ASCENDING
-                        },
-                        type: "sentinel-1-grd"
-                    }
-                ]
-            },
-            output: {
-                width: width,
-                height: height,
-                format: "image/tiff",
-                sampleType: "UINT16", // ✅ CAMBIO A UINT16
-				// ✅ CORRECCIÓN CLAVE: Forzar proyección WGS84
-				crs: "http://www.opengis.net/def/crs/OGC/1.3/CRS84"
-            },
-            evalscript: `//VERSION=3
-function setup() {
-  return {
-    input: [{ bands: ["VH", "dataMask"], units: "LINEAR_POWER" }],
-    output: { bands: 1, sampleType: "UINT16" }
-  };
-}
-function evaluatePixel(samples) {
-  if (samples.dataMask === 0) {
-    return [0];
-  }
-  const vh_linear = samples.VH;
-  const vh_db = 10 * Math.log10(vh_linear);
-  const minDb = -20;
-  const maxDb = 5;
-  const mappedValue = Math.round((vh_db - minDb) / (maxDb - minDb) * 65535);
-  return [mappedValue];
-}`
-        };
-        const response = await fetch('https://services.sentinel-hub.com/api/v1/process', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${accessToken}`
-            },
-            body: JSON.stringify(payload)
-        });
-        if (!response.ok) {
-            const error = await response.text();
-            throw new Error(`Error en la API de Sentinel-Hub: ${error}`);
-        }
-        const buffer = await response.arrayBuffer();
-        const uint16Array = new Uint16Array(buffer); // ✅ CAMBIO A Uint16Array
-        let sum = 0;
-        let count = 0;
-        const minDb = -20;
-        const maxDb = 5;
-        for (let i = 0; i < uint16Array.length; i++) {
-            const value = uint16Array[i];
-            if (value > 0) { // ✅ Verificamos que no sea el valor de fondo
-                // Desescalamos el valor de regreso a decibelios
-                const deScaledValue = (value / 65535) * (maxDb - minDb) + minDb;
-                sum += deScaledValue;
-                count++;
-            }
-        }
-        const avgBiomassProxy = count > 0 ? sum / count : null;
-        return {
-            avgBiomassProxy: avgBiomassProxy,
-            totalPixels: uint16Array.length,
-            validPixels: count
-        };
-    } catch (error) {
-        console.error('❌ Error en getSentinel1Biomass:', error.message);
-        throw error;
-    }
-};
-// ==============================================
-// ✅ ENDPOINT FINAL: /api/get-s1-averages
-// ==============================================
-app.post('/api/get-s1-averages', async (req, res) => {
-    const { coordinates, dates } = req.body;
-    if (!coordinates || !dates || dates.length < 2) {
-        return res.status(400).json({ error: 'Faltan parámetros: coordinates y al menos dos fechas en dates.' });
-    }
-    try {
-        const [avg1, avg2] = await Promise.all([
-            getSentinel1Biomass({ geometry: coordinates, date: dates[0] }),
-            getSentinel1Biomass({ geometry: coordinates, date: dates[1] })
-        ]);
-        res.json({
-            date1: dates[0],
-            avgBiomass1: avg1,
-            date2: dates[1],
-            avgBiomass2: avg2
-        });
-    } catch (error) {
-        console.error('❌ Error en el endpoint /get-s1-averages:', error.message);
-        res.status(500).json({ error: error.message });
-    }
-});
-// ==============================================
-// ✅ NUEVO ENDPOINT: /api/sentinel1radar
-// ==============================================
-app.post('/api/sentinel1radar', async (req, res) => {
-    const { coordinates, date } = req.body;
-    if (!coordinates || !date) {
-        return res.status(400).json({ error: 'Faltan parámetros: coordinates y date' });
-    }
-    try {
-        const result = await fetchSentinel1Radar({ geometry: coordinates, date: date });
-        res.json(result);
-    } catch (error) {
-        console.error('❌ Error en /sentinel1radar:', error.message);
-        res.status(500).json({ error: error.message });
-    }
-});
-/*  */
-// Al final del archivo, justo antes de app.listen, agregamos un manejador global de errores
-// para asegurar que incluso en fallos internos se respeten los headers CORS (aunque ya están
-// cubiertos por el middleware inicial, esto evita que Express responda con HTML sin CORS).
 app.use((err, req, res, next) => {
-  console.error('❌ Error no capturado:', err);
-  res.status(500).json({ error: 'Error interno del servidor' });
+  if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
+    return res.status(400).json({ error: 'JSON inválido o demasiado grande.' });
+  }
+  next(err);
 });
-app.listen(port, '0.0.0.0', () => {
-    console.log(`✅ Backend listo en http://localhost:${port}`);
-    console.log(`📦 Versión del código: sentinel1vhaverage-v2 (con image/tiff y pol.primary)`);
+app.use(rateLimit({
+  windowMs: 60 * 1000,
+  max: 120,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Demasiadas solicitudes. Espera un momento.' }
+}));
+
+const PORT = process.env.PORT || 10002;
+const PROCESS_URL = 'https://services.sentinel-hub.com/api/v1/process';
+const CATALOG_URL = 'https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search';
+const CRS = 'http://www.opengis.net/def/crs/OGC/1.3/CRS84';
+
+// ============================================================
+// TOKEN (caché)
+// ============================================================
+let tokenCache = { value: null, expiresAt: 0 };
+async function getToken() {
+  if (tokenCache.value && Date.now() < tokenCache.expiresAt) return tokenCache.value;
+  const body = new URLSearchParams({
+    grant_type: 'client_credentials',
+    client_id: process.env.CLIENT_ID,
+    client_secret: process.env.CLIENT_SECRET
+  });
+  const r = await fetch('https://services.sentinel-hub.com/oauth/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: body.toString()
+  });
+  if (!r.ok) throw new Error('No se pudo obtener token: ' + (await r.text()).slice(0, 200));
+  const data = await r.json();
+  tokenCache = { value: data.access_token, expiresAt: Date.now() + ((data.expires_in || 1800) - 120) * 1000 };
+  return tokenCache.value;
+}
+
+// ============================================================
+// HELPERS GEOMETRÍA
+// ============================================================
+function toRing(coords) {
+  if (!Array.isArray(coords) || coords.length === 0) return null;
+  if (Array.isArray(coords[0]) && Array.isArray(coords[0][0])) return coords[0];
+  return coords;
+}
+function bboxOf(ring) {
+  let minLon = Infinity, minLat = Infinity, maxLon = -Infinity, maxLat = -Infinity;
+  for (const c of ring) {
+    if (!Array.isArray(c) || c.length < 2) return null;
+    minLon = Math.min(minLon, c[0]); maxLon = Math.max(maxLon, c[0]);
+    minLat = Math.min(minLat, c[1]); maxLat = Math.max(maxLat, c[1]);
+  }
+  if (minLon === Infinity) return null;
+  return [minLon, minLat, maxLon, maxLat];
+}
+function areaOfBbox(bbox) {
+  const [minLon, minLat, maxLon, maxLat] = bbox;
+  const R = 6371000;
+  const dLat = (maxLat - minLat) * Math.PI / 180;
+  const dLon = (maxLon - minLon) * Math.PI / 180;
+  const area = R * R * dLon * (Math.sin(maxLat * Math.PI / 180) - Math.sin(minLat * Math.PI / 180));
+  const aspect = (dLon * Math.cos((minLat + maxLat) / 2 * Math.PI / 180)) / Math.max(1e-9, dLat);
+  return { area: Math.abs(area), aspectRatio: aspect };
+}
+function imageSize(bbox, maxPx = 512) {
+  const { area, aspectRatio } = areaOfBbox(bbox);
+  const side = Math.sqrt(area);
+  let base = Math.max(128, Math.min(maxPx, Math.round(side / 10)));
+  let width, height;
+  if (aspectRatio >= 1) {
+    width = Math.round(base * Math.sqrt(aspectRatio));
+    height = Math.round(width / aspectRatio);
+  } else {
+    height = Math.round(base * Math.sqrt(1 / aspectRatio));
+    width = Math.round(height * aspectRatio);
+  }
+  return { width: Math.max(64, Math.min(maxPx, width)), height: Math.max(64, Math.min(maxPx, height)) };
+}
+function areaPerPixel(bbox, width, height) {
+  const [minLon, minLat, maxLon, maxLat] = bbox;
+  const latMid = ((minLat + maxLat) / 2) * Math.PI / 180;
+  const wMeters = (maxLon - minLon) * 111320 * Math.cos(latMid);
+  const hMeters = (maxLat - minLat) * 110540;
+  return (wMeters * hMeters) / (width * height);
+}
+function polygonAreaHa(ring) {
+  let sum = 0;
+  const R = 6371000;
+  for (let i = 0; i < ring.length; i++) {
+    const a = ring[i], b = ring[(i + 1) % ring.length];
+    const latA = a[1] * Math.PI / 180, latB = b[1] * Math.PI / 180;
+    const dLon = (b[0] - a[0]) * Math.PI / 180;
+    sum += dLon * (2 + Math.sin(latA) + Math.sin(latB));
+  }
+  const area = (R * R * Math.abs(sum)) / 2;
+  return area / 10000;
+}
+function pointInRing(lon, lat, ring) {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const xi = ring[i][0], yi = ring[i][1], xj = ring[j][0], yj = ring[j][1];
+    const intersect = ((yi > lat) !== (yj > lat)) && (lon < ((xj - xi) * (lat - yi)) / (yj - yi) + xi);
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+function maskIndices(width, height, bbox, ring) {
+  const [minLon, minLat, maxLon, maxLat] = bbox;
+  const idx = new Uint32Array(width * height);
+  let n = 0;
+  for (let py = 0; py < height; py++) {
+    const lat = maxLat - (py / (height - 1)) * (maxLat - minLat);
+    for (let px = 0; px < width; px++) {
+      const lon = minLon + (px / (width - 1)) * (maxLon - minLon);
+      if (pointInRing(lon, lat, ring)) idx[n++] = py * width + px;
+    }
+  }
+  return idx.slice(0, n);
+}
+
+// ============================================================
+// HELPERS SENTINEL HUB
+// ============================================================
+async function shFetch(payload) {
+  const r = await fetch(PROCESS_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${await getToken()}` },
+    body: JSON.stringify(payload)
+  });
+  const buf = Buffer.from(await r.arrayBuffer());
+  if (!r.ok) {
+    let msg = buf.toString('utf8', 0, 400);
+    try { msg = JSON.parse(msg).error?.message || msg; } catch (e) { /* ignore */ }
+    throw new Error('Sentinel Hub: ' + msg);
+  }
+  return buf;
+}
+async function parseTiff(buf) {
+  const tiff = await fromArrayBuffer(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
+  const image = await tiff.getImage();
+  const width = image.getWidth(), height = image.getHeight();
+  const data = await image.readRasters({ interleave: false });
+  return { width, height, bands: data.map((d, i) => ({ values: d, band: i })) };
+}
+async function catalogSearch({ bbox, collections, datetime, limit = 100, filter }) {
+  const payload = { bbox, collections, datetime, limit };
+  if (filter) payload.filter = filter;
+  const r = await fetch(CATALOG_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${await getToken()}` },
+    body: JSON.stringify(payload)
+  });
+  const text = await r.text();
+  if (!r.ok) throw new Error('Catálogo: ' + text.slice(0, 300));
+  return JSON.parse(text);
+}
+
+// ============================================================
+// EVALUACIÓN ÓPTICA (NDVI + nubes SCL, un grupo DN)
+// ============================================================
+const OPTICAL_EVAL = `//VERSION=3
+function setup() {
+  return {
+    input: [{ bands: ["B04","B08","SCL"], units: "DN" }],
+    output: [{ id: "res", bands: 2, sampleType: "FLOAT32" }]
+  };
+}
+function isCloud(scl) { return scl === 3 || scl === 8 || scl === 9 || scl === 10; }
+function valid(scl) { return scl !== 0 && scl !== 1 && scl !== 11; }
+function evaluatePixel(sample) {
+  var scl = sample.SCL;
+  if (!valid(scl)) return { res: [NaN, NaN] };
+  var ndvi = (sample.B08 - sample.B04) / (sample.B08 + sample.B04 + 1e-8);
+  return { res: [(ndvi + 1) / 2, isCloud(scl) ? 1 : 0] };
+}`;
+
+async function fetchOptical({ ring, bbox, date, width, height, maxCloud = 100 }) {
+  const payload = {
+    input: {
+      bounds: { geometry: { type: 'Polygon', coordinates: [ring] } },
+      data: [{ type: 'sentinel-2-l2a', dataFilter: { timeRange: { from: `${date}T00:00:00Z`, to: `${date}T23:59:59Z` }, maxCloudCoverage: maxCloud } }]
+    },
+    output: {
+      width, height,
+      responses: [{ identifier: 'res', format: { type: 'image/tiff' } }]
+    },
+    evalscript: OPTICAL_EVAL
+  };
+  const buf = await shFetch(payload);
+  const { bands } = await parseTiff(buf);
+  if (bands.length < 2) throw new Error('Respuesta óptica incompleta (bands=' + bands.length + ')');
+  return { ndvi: bands[0].values, cloud: bands[1].values, width, height };
+}
+
+async function fetchTrueColor({ ring, bbox, date, width, height }) {
+  const payload = {
+    input: {
+      bounds: { geometry: { type: 'Polygon', coordinates: [ring] } },
+      data: [{ type: 'sentinel-2-l2a', dataFilter: { timeRange: { from: `${date}T00:00:00Z`, to: `${date}T23:59:59Z` }, maxCloudCoverage: 100 }, mosaicking: 'SCENE' }]
+    },
+    output: { width, height, bands: 3, format: 'image/png', crs: CRS },
+    evalscript: `//VERSION=3
+function setup() { return { input: ["B02","B03","B04"], output: { bands: 3, sampleType: "UINT8" } }; }
+function evaluatePixel(sample) { return [2.5 * sample.B04 * 255, 2.5 * sample.B03 * 255, 2.5 * sample.B02 * 255]; }`
+  };
+  const buf = await shFetch(payload);
+  return 'data:image/png;base64,' + buf.toString('base64');
+}
+
+// ============================================================
+// EVALUACIÓN RADAR (RVI continuo)
+// ============================================================
+const RVI_EVAL = `//VERSION=3
+function setup() {
+  return {
+    input: [{ bands: ["VV","VH"], units: "LINEAR_POWER" }],
+    output: [{ id: "rvi", bands: 1, sampleType: "FLOAT32" }]
+  };
+}
+function evaluatePixel(sample) {
+  var vv = sample.VV; var vh = sample.VH;
+  if (vv === undefined || vh === undefined || !isFinite(vv) || !isFinite(vh) || vv <= 0) return { rvi: [NaN] };
+  var rvi = (4 * vh) / (vv + vh);
+  return { rvi: [Math.max(0, Math.min(1, rvi))] };
+}`;
+
+async function findRadarDate(bbox) {
+  const now = new Date();
+  const start = new Date(); start.setFullYear(now.getFullYear() - 1);
+  const data = await catalogSearch({
+    bbox,
+    collections: ['sentinel-1-grd'],
+    datetime: `${start.toISOString().split('T')[0]}T00:00:00Z/${now.toISOString().split('T')[0]}T23:59:59Z`,
+    limit: 30
+  });
+  for (const f of data.features) {
+    if (f.id.includes('1SDV') || f.id.includes('1SDH')) {
+      return { date: f.properties.datetime.split('T')[0], id: f.id, pol: f.id.includes('1SDV') ? 'DV' : 'DH' };
+    }
+  }
+  return null;
+}
+async function fetchRvi({ ring, bbox, date, width, height, polarization = 'DV' }) {
+  const payload = {
+    input: {
+      bounds: { geometry: { type: 'Polygon', coordinates: [ring] } },
+      data: [{
+        type: 'sentinel-1-grd',
+        dataFilter: { timeRange: { from: `${date}T00:00:00Z`, to: `${date}T23:59:59Z` }, polarization, instrumentMode: 'IW' },
+        processing: { mosaicking: 'ORBIT' }
+      }]
+    },
+    output: { width, height, responses: [{ identifier: 'rvi', format: { type: 'image/tiff' } }] },
+    evalscript: RVI_EVAL
+  };
+  const buf = await shFetch(payload);
+  const { bands } = await parseTiff(buf);
+  return { rvi: bands[0].values, width, height };
+}
+// Backscatter VV/VH en dB (para el reporte) — misma escena
+const DB_EVAL = `//VERSION=3
+function setup() {
+  return {
+    input: [{ bands: ["VV","VH"], units: "LINEAR_POWER" }],
+    output: [{ id: "db", bands: 2, sampleType: "FLOAT32" }]
+  };
+}
+function evaluatePixel(sample) {
+  var vv = sample.VV; var vh = sample.VH;
+  if (vv === undefined || vh === undefined || !isFinite(vv) || !isFinite(vh) || vv <= 0 || vh <= 0) return { db: [NaN, NaN] };
+  return { db: [10 * Math.log10(vv), 10 * Math.log10(vh)] };
+}`;
+async function fetchBackscatterDb({ ring, bbox, date, width, height, polarization = 'DV' }) {
+  const payload = {
+    input: {
+      bounds: { geometry: { type: 'Polygon', coordinates: [ring] } },
+      data: [{
+        type: 'sentinel-1-grd',
+        dataFilter: { timeRange: { from: `${date}T00:00:00Z`, to: `${date}T23:59:59Z` }, polarization, instrumentMode: 'IW' },
+        processing: { mosaicking: 'ORBIT' }
+      }]
+    },
+    output: { width, height, responses: [{ identifier: 'db', format: { type: 'image/tiff' } }] },
+    evalscript: DB_EVAL
+  };
+  const buf = await shFetch(payload);
+  const { bands } = await parseTiff(buf);
+  if (bands.length < 2) throw new Error('Respuesta radar incompleta (bands=' + bands.length + ')');
+  return { vv: bands[0].values, vh: bands[1].values, width, height };
+}
+
+// ============================================================
+// ESTADÍSTICAS
+// ============================================================
+function statsOf(values, idx) {
+  let sum = 0, n = 0;
+  for (let k = 0; k < idx.length; k++) {
+    const v = values[idx[k]];
+    if (v === undefined || v === null || Number.isNaN(v)) continue;
+    sum += v; n++;
+  }
+  return { mean: n ? sum / n : null, n };
+}
+function cloudPctOf(values, idx) {
+  let nCloud = 0, nClear = 0;
+  for (let k = 0; k < idx.length; k++) {
+    const v = values[idx[k]];
+    if (v === undefined || v === null || Number.isNaN(v)) continue;
+    if (v === 1) nCloud++; else nClear++;
+  }
+  const total = nCloud + nClear;
+  return total ? { cloudPct: (nCloud / total) * 100, validPixels: total } : { cloudPct: null, validPixels: 0 };
+}
+function histogramOf(values, idx, buckets = 60) {
+  const counts = new Array(buckets).fill(0);
+  let total = 0;
+  for (let k = 0; k < idx.length; k++) {
+    const v = values[idx[k]];
+    if (v === undefined || v === null || Number.isNaN(v)) continue;
+    let b = Math.floor(v * buckets);
+    if (b >= buckets) b = buckets - 1;
+    if (b < 0) b = 0;
+    counts[b]++; total++;
+  }
+  return { counts, buckets, total };
+}
+function otsuFromHist(counts, total) {
+  let sum = 0;
+  for (let i = 0; i < counts.length; i++) sum += i * counts[i];
+  let sumB = 0, wB = 0, maxVar = -1, threshold = -1;
+  for (let i = 0; i < counts.length; i++) {
+    wB += counts[i];
+    if (wB === 0) continue;
+    const wF = total - wB;
+    if (wF === 0) break;
+    sumB += i * counts[i];
+    const mB = sumB / wB;
+    const mF = (sum - sumB) / wF;
+    const between = wB * wF * (mB - mF) * (mB - mF);
+    if (between > maxVar) { maxVar = between; threshold = i; }
+  }
+  return threshold === -1 ? null : (threshold + 0.5) / counts.length;
+}
+function classAreas(values, idx, classes, areaPerPx) {
+  const areas = classes.map(c => ({ ...c, pixels: 0, areaHa: 0, pct: 0 }));
+  for (let k = 0; k < idx.length; k++) {
+    const v = values[idx[k]];
+    if (v === undefined || v === null || Number.isNaN(v)) continue;
+    for (const c of areas) {
+      if (v >= c.from && v < c.to) { c.pixels++; break; }
+    }
+  }
+  let total = 0;
+  for (const c of areas) total += c.pixels;
+  for (const c of areas) {
+    c.areaHa = (c.pixels * areaPerPx) / 10000;
+    c.pct = total ? (c.pixels / total) * 100 : 0;
+    delete c.from; delete c.to;
+  }
+  return { classes: areas, totalPixels: total, areaHa: (total * areaPerPx) / 10000 };
+}
+
+// ============================================================
+// COLORES / PNG
+// ============================================================
+function toPng(values, width, height, colorFn, idx) {
+  const png = new PNG({ width, height });
+  for (let p = 0; p < width * height; p++) {
+    const v = values[p];
+    let r, g, b;
+    if (v === undefined || v === null || Number.isNaN(v)) { r = 0; g = 0; b = 0; }
+    else { [r, g, b] = colorFn(v); }
+    const o = p * 4;
+    png.data[o] = r; png.data[o + 1] = g; png.data[o + 2] = b; png.data[o + 3] = 255;
+  }
+  return 'data:image/png;base64,' + PNG.sync.write(png).toString('base64');
+}
+const colorNdvi = (v) => {
+  if (v < 0.45) return [37, 99, 235];        // agua
+  if (v < 0.55) return [194, 178, 128];      // suelo
+  if (v < 0.65) return [163, 217, 119];      // escasa
+  if (v < 0.75) return [76, 175, 80];        // moderada
+  return [20, 83, 45];                       // densa
+};
+const colorRvi = (v) => {
+  if (v < 0.15) return [29, 78, 216];
+  if (v < 0.3) return [176, 166, 138];
+  if (v < 0.5) return [156, 204, 101];
+  if (v < 0.7) return [67, 160, 71];
+  return [20, 83, 45];
+};
+const colorDiff = (v) => {
+  const t = Math.max(-1, Math.min(1, v));
+  if (t < 0) return [220, 38, 38];           // disminución
+  if (t > 0) return [22, 163, 74];           // aumento
+  return [245, 245, 245];
+};
+
+// ============================================================
+// CLASES POR DEFECTO
+// ============================================================
+const OPTICAL_CLASSES = [
+  { id: 'water', label: 'Agua / sin vegetación', from: -Infinity, to: 0.45, color: '#2563eb' },
+  { id: 'barren', label: 'Suelo desnudo', from: 0.45, to: 0.55, color: '#c2b280' },
+  { id: 'sparse', label: 'Vegetación escasa', from: 0.55, to: 0.65, color: '#a3d977' },
+  { id: 'moderate', label: 'Vegetación moderada', from: 0.65, to: 0.75, color: '#4caf50' },
+  { id: 'dense', label: 'Vegetación densa', from: 0.75, to: Infinity, color: '#14532d' }
+];
+const RVI_CLASSES = [
+  { id: 'water', label: 'Agua / superficie lisa', from: -Infinity, to: 0.15, color: '#1d4ed8' },
+  { id: 'bare', label: 'Suelo desnudo / urbano', from: 0.15, to: 0.3, color: '#b0a68a' },
+  { id: 'grass', label: 'Pastizal / cultivo bajo', from: 0.3, to: 0.5, color: '#9ccc65' },
+  { id: 'shrub', label: 'Matorral / cultivo denso', from: 0.5, to: 0.7, color: '#43a047' },
+  { id: 'forest', label: 'Bosque / vegetación densa', from: 0.7, to: Infinity, color: '#14532d' }
+];
+
+// ============================================================
+// RUTAS
+// ============================================================
+app.get('/', (req, res) => res.json({ name: 'ITP-EarthWatch API v2', status: 'ok' }));
+app.get('/healthz', (req, res) => res.json({ ok: true, time: new Date().toISOString() }));
+app.post('/api/prueba', (req, res) => res.json({ ok: true, received: Object.keys(req.body || {}) }));
+
+function badParams(res, msg) { return res.status(400).json({ error: msg }); }
+
+// 1) Fechas disponibles (escena completa)
+app.post('/api/v2/get-valid-dates', async (req, res) => {
+  try {
+    const ring = toRing(req.body.coordinates);
+    const maxCloud = Number(req.body.maxCloudCoverage || 50);
+    const daysBack = Number(req.body.daysBack || 365);
+    const bbox = bboxOf(ring);
+    if (!ring || !bbox) return badParams(res, 'Parámetro coordinates inválido.');
+    const now = new Date();
+    const start = new Date(); start.setDate(now.getDate() - daysBack);
+    const data = await catalogSearch({
+      bbox,
+      collections: ['sentinel-2-l2a'],
+      datetime: `${start.toISOString().split('T')[0]}T00:00:00Z/${now.toISOString().split('T')[0]}T23:59:59Z`,
+      limit: 100,
+      filter: `eo:cloud_cover < ${maxCloud}`
+    });
+    const seen = new Set();
+    const dates = [];
+    for (const f of data.features) {
+      const d = f.properties.datetime.split('T')[0];
+      if (seen.has(d)) continue;
+      seen.add(d);
+      dates.push({ date: d, cloudCover: Math.round(f.properties['eo:cloud_cover'] * 10) / 10 });
+    }
+    dates.sort((a, b) => new Date(b.date) - new Date(a.date));
+    res.json({ hasCoverage: dates.length > 0, totalDates: dates.length, dates, areaHa: polygonAreaHa(ring) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-/*  */
+// 2) Cobertura de nubes SOBRE el polígono (SCL) para fechas dadas
+app.post('/api/v2/cloud-polygon', async (req, res) => {
+  try {
+    const ring = toRing(req.body.coordinates);
+    const dates = (req.body.dates || []).slice(0, 20);
+    const size = Math.min(Number(req.body.size || 256), 512);
+    const bbox = bboxOf(ring);
+    if (!ring || !bbox) return badParams(res, 'Parámetro coordinates inválido.');
+    const out = [];
+    for (const d of dates) {
+      try {
+        const { ndvi, cloud } = await fetchOptical({ ring, bbox, date: d.date || d, width: size, height: size });
+        const mask = maskIndices(size, size, bbox, ring);
+        const cp = cloudPctOf(cloud, mask);
+        out.push({ date: d.date || d, sceneCloud: d.cloudCover ?? null, polygonCloud: cp.cloudPct });
+      } catch (e) {
+        out.push({ date: d.date || d, sceneCloud: d.cloudCover ?? null, polygonCloud: null, error: e.message });
+      }
+    }
+    res.json({ dates: out });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// 3) Imagen óptica (truecolor o NDVI) con opción de composite
+app.post('/api/v2/image', async (req, res) => {
+  try {
+    const ring = toRing(req.body.coordinates);
+    const date = req.body.date;
+    const mode = req.body.mode || 'ndvi';
+    const composite = Number(req.body.composite || 0);
+    const bbox = bboxOf(ring);
+    if (!ring || !bbox || !date) return badParams(res, 'Faltan coordinates o date.');
+    const { width, height } = imageSize(bbox, 512);
+
+    if (mode === 'truecolor') {
+      const image = await fetchTrueColor({ ring, bbox, date, width, height });
+      return res.json({ image, usedDate: date, bbox, width, height, mode });
+    }
+
+    // ---- NDVI (con o sin composite server-side) ----
+    if (!composite || composite <= 0) {
+      const { ndvi, cloud } = await fetchOptical({ ring, bbox, date, width, height });
+      const mask = maskIndices(width, height, bbox, ring);
+      const cp = cloudPctOf(cloud, mask);
+      const st = statsOf(ndvi, mask);
+      const hist = histogramOf(ndvi, mask, 60);
+      const otsu = otsuFromHist(hist.counts, hist.total);
+      const areaPx = areaPerPixel(bbox, width, height);
+      const cls = classAreas(ndvi, mask, JSON.parse(JSON.stringify(OPTICAL_CLASSES)), areaPx);
+      const image = toPng(ndvi, width, height, colorNdvi, mask);
+      return res.json({
+        image, usedDate: date, bbox, width, height, mode: 'ndvi',
+        stats: { mean: st.mean, otsu },
+        histogram: hist, areaPerPixel: areaPx, cloudPct: cp.cloudPct, classes: cls.classes, areaHa: cls.areaHa
+      });
+    }
+
+    // ---- Composite: mediana de hasta 8 fechas despejadas alrededor de `date` ----
+    const start = new Date(date); start.setDate(start.getDate() - composite);
+    const end = new Date(date); end.setDate(end.getDate() + composite);
+    const catalog = await catalogSearch({
+      bbox,
+      collections: ['sentinel-2-l2a'],
+      datetime: `${start.toISOString().split('T')[0]}T00:00:00Z/${end.toISOString().split('T')[0]}T23:59:59Z`,
+      limit: 50,
+      filter: 'eo:cloud_cover < 40'
+    });
+    const seen = new Set(); const cands = [];
+    for (const f of catalog.features) {
+      const d = f.properties.datetime.split('T')[0];
+      if (seen.has(d)) continue; seen.add(d);
+      cands.push({ date: d, cloud: f.properties['eo:cloud_cover'], dist: Math.abs(new Date(d) - new Date(date)) });
+    }
+    cands.sort((a, b) => a.dist - b.dist);
+    const picks = cands.slice(0, 8);
+    if (picks.length === 0) return badParams(res, 'No hay adquisiciones despejadas en el rango del composite.');
+
+    const stacks = [];
+    const used = [];
+    for (const p of picks) {
+      try {
+        const { ndvi, cloud } = await fetchOptical({ ring, bbox, date: p.date, width, height });
+        const mask = maskIndices(width, height, bbox, ring);
+        const cp = cloudPctOf(cloud, mask);
+        stacks.push({ ndvi, mask, cloudPct: cp.cloudPct, date: p.date });
+        used.push({ date: p.date, polygonCloud: cp.cloudPct, sceneCloud: p.cloud });
+      } catch (e) { /* omitir fecha fallida */ }
+    }
+    if (stacks.length === 0) return res.status(500).json({ error: 'No se pudieron procesar fechas para el composite.' });
+    const mask = stacks[0].mask;
+    const median = new Float32Array(width * height).fill(NaN);
+    const tmp = [];
+    for (let k = 0; k < mask.length; k++) {
+      const p = mask[k];
+      tmp.length = 0;
+      for (const s of stacks) {
+        const v = s.ndvi[p];
+        if (v !== undefined && v !== null && !Number.isNaN(v)) tmp.push(v);
+      }
+      if (tmp.length) {
+        tmp.sort((a, b) => a - b);
+        const m = Math.floor(tmp.length / 2);
+        median[p] = tmp.length % 2 ? tmp[m] : (tmp[m - 1] + tmp[m]) / 2;
+      }
+    }
+    const st = statsOf(median, mask);
+    const hist = histogramOf(median, mask, 60);
+    const otsu = otsuFromHist(hist.counts, hist.total);
+    const areaPx = areaPerPixel(bbox, width, height);
+    const cls = classAreas(median, mask, JSON.parse(JSON.stringify(OPTICAL_CLASSES)), areaPx);
+    const image = toPng(median, width, height, colorNdvi, mask);
+    const bestCloud = used.reduce((m, u) => (u.polygonCloud === null ? m : Math.min(m, u.polygonCloud)), 100);
+    res.json({
+      image, usedDate: date, usedDates: used, bbox, width, height, mode: 'ndvi', composite: true,
+      stats: { mean: st.mean, otsu },
+      histogram: hist, areaPerPixel: areaPx, cloudPct: bestCloud, classes: cls.classes, areaHa: cls.areaHa
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// 4) Estadísticas radar (RVI + backscatter dB)
+app.post('/api/v2/radar-stats', async (req, res) => {
+  try {
+    const ring = toRing(req.body.coordinates);
+    const date = req.body.date;
+    const bbox = bboxOf(ring);
+    if (!ring || !bbox) return badParams(res, 'Parámetro coordinates inválido.');
+    const { width, height } = imageSize(bbox, 512);
+    let d = date;
+    let pol = 'DV';
+    if (!d) {
+      const found = await findRadarDate(bbox);
+      if (!found) return res.status(404).json({ error: 'No se encontraron escenas radar dual-pol en el área.' });
+      d = found.date; pol = found.pol;
+    }
+    const { rvi } = await fetchRvi({ ring, bbox, date: d, width, height, polarization: pol });
+    const mask = maskIndices(width, height, bbox, ring);
+    const st = statsOf(rvi, mask);
+    const hist = histogramOf(rvi, mask, 60);
+    const otsu = otsuFromHist(hist.counts, hist.total);
+    const areaPx = areaPerPixel(bbox, width, height);
+    const cls = classAreas(rvi, mask, JSON.parse(JSON.stringify(RVI_CLASSES)), areaPx);
+    const image = toPng(rvi, width, height, colorRvi, mask);
+    let vvDb = null, vhDb = null;
+    try {
+      const db = await fetchBackscatterDb({ ring, bbox, date: d, width, height, polarization: pol });
+      const svv = statsOf(db.vv, mask), svh = statsOf(db.vh, mask);
+      vvDb = svv.mean; vhDb = svh.mean;
+    } catch (e) { /* dB opcional */ }
+    res.json({
+      image, usedDate: d, polarization: pol, bbox, width, height,
+      stats: { rviMean: st.mean, vvDb, vhDb, otsu },
+      histogram: hist, areaPerPixel: areaPx, classes: cls.classes, areaHa: cls.areaHa
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// 5) Cambio dual-sensor (ΔNDVI + ΔRVI + concordancia)
+app.post('/api/v2/change', async (req, res) => {
+  try {
+    const ring = toRing(req.body.coordinates);
+    const date1 = req.body.date1, date2 = req.body.date2;
+    const bbox = bboxOf(ring);
+    if (!ring || !bbox || !date1 || !date2) return badParams(res, 'Faltan coordinates, date1 o date2.');
+    const { width, height } = imageSize(bbox, 512);
+    const mask = maskIndices(width, height, bbox, ring);
+
+    const [o1, o2] = await Promise.all([
+      fetchOptical({ ring, bbox, date: date1, width, height }),
+      fetchOptical({ ring, bbox, date: date2, width, height })
+    ]);
+    const r1 = await findRadarDate(bbox);
+    let radar = null;
+    if (r1) {
+      const r2 = await findRadarDateNear(bbox, date2);
+      const pol = r1.pol;
+      const [rad1, rad2] = await Promise.all([
+        fetchRvi({ ring, bbox, date: r1.date, width, height, polarization: pol }),
+        fetchRvi({ ring, bbox, date: (r2 || r1).date, width, height, polarization: pol })
+      ]);
+      radar = { rvi1: rad1.rvi, rvi2: rad2.rvi, date1: r1.date, date2: (r2 || r1).date, pol };
+    }
+
+    const dNdvi = new Float32Array(width * height).fill(NaN);
+    const dRvi = new Float32Array(width * height).fill(NaN);
+    let agree = { bothDecrease: 0, bothIncrease: 0, mixed: 0, valid: 0 };
+    const EPS = 0.02;
+    for (let k = 0; k < mask.length; k++) {
+      const p = mask[k];
+      const n1 = o1.ndvi[p], n2 = o2.ndvi[p];
+      if (n1 !== undefined && n2 !== undefined && !Number.isNaN(n1) && !Number.isNaN(n2)) dNdvi[p] = n2 - n1;
+      if (radar) {
+        const a = radar.rvi1[p], b = radar.rvi2[p];
+        if (a !== undefined && b !== undefined && !Number.isNaN(a) && !Number.isNaN(b)) dRvi[p] = b - a;
+      }
+      const dn = dNdvi[p], dr = dRvi[p];
+      if (!Number.isNaN(dn) && !Number.isNaN(dr)) {
+        agree.valid++;
+        if (dn < -EPS && dr < -EPS) agree.bothDecrease++;
+        else if (dn > EPS && dr > EPS) agree.bothIncrease++;
+        else agree.mixed++;
+      }
+    }
+    const mean = (arr) => { let s = 0, n = 0; for (const v of arr) { if (!Number.isNaN(v)) { s += v; n++; } } return n ? s / n : null; };
+    const imgN = toPng(dNdvi, width, height, colorDiff, mask);
+    const imgR = radar ? toPng(dRvi, width, height, colorDiff, mask) : null;
+    const agreementPct = agree.valid ? (((agree.bothDecrease + agree.bothIncrease) / agree.valid) * 100) : null;
+    res.json({
+      optical: { date1, date2, dNdviMean: mean(dNdvi), image: imgN },
+      radar: radar ? { date1: radar.date1, date2: radar.date2, polarization: radar.pol, dRviMean: mean(dRvi), image: imgR } : null,
+      agreement: {
+        bothDecrease: agree.bothDecrease, bothIncrease: agree.bothIncrease, mixed: agree.mixed,
+        validPixels: agree.valid, agreementPct
+      },
+      bbox, width, height
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+async function findRadarDateNear(bbox, date) {
+  const d = new Date(date);
+  const from = new Date(d); from.setDate(from.getDate() - 3);
+  const to = new Date(d); to.setDate(to.getDate() + 3);
+  const data = await catalogSearch({
+    bbox,
+    collections: ['sentinel-1-grd'],
+    datetime: `${from.toISOString().split('T')[0]}T00:00:00Z/${to.toISOString().split('T')[0]}T23:59:59Z`,
+    limit: 10
+  });
+  for (const f of data.features) if (f.id.includes('1SDV') || f.id.includes('1SDH')) return { date: f.properties.datetime.split('T')[0], id: f.id };
+  return null;
+}
+
+// 6) Serie temporal NDVI
+app.post('/api/v2/ndvi-timeseries', async (req, res) => {
+  try {
+    const ring = toRing(req.body.coordinates);
+    const maxDates = Math.min(Number(req.body.maxDates || 20), 30);
+    const maxSceneCloud = Number(req.body.maxSceneCloud || 40);
+    const bbox = bboxOf(ring);
+    if (!ring || !bbox) return badParams(res, 'Parámetro coordinates inválido.');
+    const now = new Date();
+    const start = new Date(); start.setFullYear(now.getFullYear() - 1);
+    const data = await catalogSearch({
+      bbox,
+      collections: ['sentinel-2-l2a'],
+      datetime: `${start.toISOString().split('T')[0]}T00:00:00Z/${now.toISOString().split('T')[0]}T23:59:59Z`,
+      limit: 100,
+      filter: `eo:cloud_cover < ${maxSceneCloud}`
+    });
+    const seen = new Set(); const dates = [];
+    for (const f of data.features) {
+      const d = f.properties.datetime.split('T')[0];
+      if (seen.has(d)) continue; seen.add(d);
+      dates.push({ date: d, cloud: f.properties['eo:cloud_cover'] });
+    }
+    dates.sort((a, b) => new Date(a.date) - new Date(b.date));
+    const picks = dates.slice(-maxDates);
+    const W = 256, H = 256;
+    const mask = maskIndices(W, H, bbox, ring);
+    const series = [];
+    for (const p of picks) {
+      try {
+        const { ndvi, cloud } = await fetchOptical({ ring, bbox, date: p.date, width: W, height: H });
+        const cp = cloudPctOf(cloud, mask);
+        const st = statsOf(ndvi, mask);
+        series.push({ date: p.date, sceneCloud: Math.round(p.cloud * 10) / 10, polygonCloud: cp.cloudPct, ndviMean: st.mean });
+      } catch (e) {
+        series.push({ date: p.date, sceneCloud: p.cloud, polygonCloud: null, ndviMean: null, error: e.message });
+      }
+    }
+    res.json({ series });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// 7) Info del polígono
+app.post('/api/v2/polygon-info', (req, res) => {
+  try {
+    const ring = toRing(req.body.coordinates);
+    const bbox = bboxOf(ring);
+    if (!ring || !bbox) return badParams(res, 'Parámetro coordinates inválido.');
+    res.json({ areaHa: Math.round(polygonAreaHa(ring) * 100) / 100, bbox });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`✅ Backend v2 listo en http://localhost:${PORT}`);
+  console.log('🔑 CLIENT_ID:', process.env.CLIENT_ID ? 'cargado' : 'FALTA');
+  console.log('🔐 CLIENT_SECRET:', process.env.CLIENT_SECRET ? 'cargado' : 'FALTA');
+});
