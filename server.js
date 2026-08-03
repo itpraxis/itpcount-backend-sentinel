@@ -611,14 +611,24 @@ app.post('/api/v2/radar-stats', async (req, res) => {
     const { width, height } = imageSize(bbox, 512);
     let d = date;
     let pol = 'DV';
+    let auto = false;
     if (!d) {
       const found = await findRadarDate(bbox);
       if (!found) return res.status(404).json({ error: 'No se encontraron escenas radar dual-pol en el área.' });
-      d = found.date; pol = found.pol;
+      d = found.date; pol = found.pol; auto = true;
     }
-    const { rvi } = await fetchRvi({ ring, bbox, date: d, width, height, polarization: pol });
+    let { rvi } = await fetchRvi({ ring, bbox, date: d, width, height, polarization: pol });
     const mask = maskIndices(width, height, bbox, ring);
-    const st = statsOf(rvi, mask);
+    let st = statsOf(rvi, mask);
+    if (st.n === 0 && !auto) {
+      const near = await findRadarDateNear(bbox, d);
+      if (near) {
+        d = near.date;
+        ({ rvi } = await fetchRvi({ ring, bbox, date: d, width, height, polarization: pol }));
+        st = statsOf(rvi, mask);
+      }
+    }
+    if (st.n === 0) return res.status(404).json({ error: 'No hay escenas radar válidas cerca de la fecha indicada.' });
     const hist = histogramOf(rvi, mask, 60);
     const otsu = otsuFromHist(hist.counts, hist.total);
     const areaPx = areaPerPixel(bbox, width, height);
