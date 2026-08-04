@@ -413,10 +413,10 @@ const colorNdvi = (v) => {
   return [20, 83, 45];                       // bosque denso
 };
 const colorRvi = (v) => {
-  if (v < 0.15) return [29, 78, 216];
-  if (v < 0.3) return [176, 166, 138];
-  if (v < 0.5) return [156, 204, 101];
-  if (v < 0.6) return [67, 160, 71];
+  if (v < 0.15) return [37, 99, 235];
+  if (v < 0.3) return [194, 178, 128];
+  if (v < 0.5) return [163, 217, 119];
+  if (v < 0.6) return [76, 175, 80];
   return [20, 83, 45];
 };
 const colorDiff = (v) => {
@@ -437,10 +437,10 @@ const OPTICAL_CLASSES = [
   { id: 'dense', label: 'Bosque / vegetación densa', from: 0.8, to: Infinity, color: '#14532d' }
 ];
 const RVI_CLASSES = [
-  { id: 'water', label: 'Agua / superficie lisa', from: -Infinity, to: 0.15, color: '#1d4ed8' },
-  { id: 'bare', label: 'Suelo desnudo / urbano', from: 0.15, to: 0.3, color: '#b0a68a' },
-  { id: 'grass', label: 'Pastizal / cultivo bajo', from: 0.3, to: 0.5, color: '#9ccc65' },
-  { id: 'shrub', label: 'Matorral / cultivo denso', from: 0.5, to: 0.6, color: '#43a047' },
+  { id: 'water', label: 'Agua / sin vegetación', from: -Infinity, to: 0.15, color: '#2563eb' },
+  { id: 'bare', label: 'Suelo desnudo', from: 0.15, to: 0.3, color: '#c2b280' },
+  { id: 'grass', label: 'Vegetación escasa', from: 0.3, to: 0.5, color: '#a3d977' },
+  { id: 'shrub', label: 'Vegetación moderada', from: 0.5, to: 0.6, color: '#4caf50' },
   { id: 'forest', label: 'Bosque / vegetación densa', from: 0.6, to: Infinity, color: '#14532d' }
 ];
 
@@ -860,7 +860,7 @@ const colorChangeMap = (c) => {
   if (c === 1) return [220, 38, 38];
   if (c === 2) return [22, 163, 74];
   if (c === 3) return [250, 204, 21];
-  if (c === 4) return [30, 41, 59];
+  if (c === 4) return [100, 116, 139];
   return [0, 0, 0];
 };
 
