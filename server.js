@@ -69,6 +69,18 @@ try {
 function monthKey(d = new Date()) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
 }
+// Clave del día local (YYYY-MM-DD): mismo polígono el mismo día NO descuenta; otro día sí.
+function dayKey(d = new Date()) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+// Suma de polígonos-día del mes (todas las llaves de días que empiezan con YYYY-MM).
+function usageOfMonth(pusage, month) {
+  let total = 0;
+  for (const k of Object.keys(pusage || {})) {
+    if (k.startsWith(month) && Array.isArray(pusage[k])) total += pusage[k].length;
+  }
+  return total;
+}
 // Hash canónico del polígono: coords redondeadas a ~1 m + orden normalizado.
 function polygonHash(ring) {
   const pts = ring.map(c => [Math.round(c[0] * 1e5) / 1e5, Math.round(c[1] * 1e5) / 1e5]);
@@ -83,26 +95,29 @@ async function checkUser(req, res) {
   try { req.uid = (await admin.auth().verifyIdToken(m[1])).uid; return true; }
   catch (e) { res.status(401).json({ error: 'Sesión inválida o expirada. Vuelve a iniciar sesión.' }); return false; }
 }
-// Pre-chequeo: bloquea (429) solo si el polígono es NUEVO y el mes está al tope.
+// Pre-chequeo: bloquea (429) solo si el polígono-día es NUEVO y el mes está al tope.
 async function meterPolygon(req, res, ring) {
   if (!meteringEnabled) return { ok: true, counted: false };
   const hash = polygonHash(ring);
-  const key = monthKey();
+  const day = dayKey();
+  const month = monthKey();
   const snap = await db.collection('users').doc(req.uid).get();
   const data = snap.exists ? snap.data() : {};
   const limit = Number(data.polygonLimit) || 100;
-  const usage = (data.polygonUsage && data.polygonUsage[key]) || [];
-  if (usage.includes(hash)) return { ok: true, counted: false, hash, key };
-  if (usage.length >= limit) {
+  const pusage = (data.polygonUsage && typeof data.polygonUsage === 'object') ? data.polygonUsage : {};
+  const todayUsage = pusage[day] || [];
+  const used = usageOfMonth(pusage, month);
+  if (todayUsage.includes(hash)) return { ok: true, counted: false, hash, day, month };
+  if (used >= limit) {
     res.status(429).json({
       error: `Has alcanzado tu límite mensual de ${limit} polígonos. Contacta al administrador para ampliarlo.`,
       quota: { used: limit, limit, remaining: 0 }
     });
     return { ok: false };
   }
-  return { ok: true, counted: true, hash, key };
+  return { ok: true, counted: true, hash, day, month };
 }
-// Commit al finalizar con éxito: suma el hash (transacción) y devuelve la cuota actual.
+// Commit al finalizar con éxito: suma el hash del día (transacción) y devuelve la cuota mensual.
 async function commitPolygon(req, res, m) {
   if (!meteringEnabled) return null;
   if (m.counted) {
@@ -111,17 +126,20 @@ async function commitPolygon(req, res, m) {
       const snap = await t.get(ref);
       const data = snap.exists ? snap.data() : {};
       const limit = Number(data.polygonLimit) || 100;
-      const usage = (data.polygonUsage && data.polygonUsage[m.key]) || [];
-      if (usage.includes(m.hash) || usage.length >= limit) return;
+      const pusage = (data.polygonUsage && typeof data.polygonUsage === 'object') ? data.polygonUsage : {};
+      const usage = pusage[m.day] || [];
+      const used = usageOfMonth(pusage, m.month);
+      if (usage.includes(m.hash) || used >= limit) return;
       usage.push(m.hash);
-      t.set(ref, { polygonUsage: { ...(data.polygonUsage || {}), [m.key]: usage } }, { merge: true });
+      t.set(ref, { polygonUsage: { ...pusage, [m.day]: usage } }, { merge: true });
     });
   }
   const snap = await db.collection('users').doc(req.uid).get();
   const data = snap.exists ? snap.data() : {};
   const limit = Number(data.polygonLimit) || 100;
-  const usage = (data.polygonUsage && data.polygonUsage[m.key]) || [];
-  return { used: usage.length, limit, remaining: Math.max(0, limit - usage.length) };
+  const pusage = (data.polygonUsage && typeof data.polygonUsage === 'object') ? data.polygonUsage : {};
+  const used = usageOfMonth(pusage, monthKey());
+  return { used, limit, remaining: Math.max(0, limit - used) };
 }
 async function meterEndpoints(req, res, ring) {
   if (!(await checkUser(req, res))) return null;
@@ -1076,8 +1094,12 @@ app.post('/api/v2/compare', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`✅ Backend v2 listo en http://localhost:${PORT}`);
-  console.log('🔑 CLIENT_ID:', process.env.CLIENT_ID ? 'cargado' : 'FALTA');
-  console.log('🔐 CLIENT_SECRET:', process.env.CLIENT_SECRET ? 'cargado' : 'FALTA');
-});
+if (require.main === module) {
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`✅ Backend v2 listo en http://localhost:${PORT}`);
+    console.log('🔑 CLIENT_ID:', process.env.CLIENT_ID ? 'cargado' : 'FALTA');
+    console.log('🔐 CLIENT_SECRET:', process.env.CLIENT_SECRET ? 'cargado' : 'FALTA');
+  });
+}
+
+module.exports = { monthKey, dayKey, usageOfMonth, polygonHash, meterPolygon, commitPolygon, db, admin, meteringEnabled };
