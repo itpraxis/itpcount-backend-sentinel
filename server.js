@@ -12,6 +12,8 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
+const crypto = require('crypto');
+const fs = require('fs');
 const { fromArrayBuffer } = require('geotiff');
 const { PNG } = require('pngjs');
 
@@ -35,6 +37,98 @@ app.use(rateLimit({
   legacyHeaders: false,
   message: { error: 'Demasiadas solicitudes. Espera un momento.' }
 }));
+
+// ============================================================
+// FIREBASE ADMIN — metering mensual por usuario y polígono
+// ============================================================
+let admin = null, db = null;
+let meteringEnabled = false;
+try {
+  const saJson = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
+  const saPath = process.env.FIREBASE_SERVICE_ACCOUNT;
+  if (saJson) {
+    admin = require('firebase-admin');
+    admin.initializeApp({ credential: admin.credential.cert(JSON.parse(saJson)) });
+    db = admin.firestore();
+    meteringEnabled = true;
+    console.log('🔥 Firebase Admin inicializado desde FIREBASE_SERVICE_ACCOUNT_JSON (metering ACTIVO).');
+  } else if (saPath && fs.existsSync(saPath)) {
+    admin = require('firebase-admin');
+    admin.initializeApp({ credential: admin.credential.cert(require(saPath)) });
+    db = admin.firestore();
+    meteringEnabled = true;
+    console.log('🔥 Firebase Admin inicializado desde FIREBASE_SERVICE_ACCOUNT (metering por polígono ACTIVO).');
+  } else {
+    console.warn(`⚠️ Credencial de servicio de Firebase no configurada (FIREBASE_SERVICE_ACCOUNT_JSON o FIREBASE_SERVICE_ACCOUNT=${saPath}) → metering DESACTIVADO.`);
+  }
+} catch (e) {
+  console.error('❌ No se pudo inicializar Firebase Admin:', e.message);
+}
+
+// Clave del mes local (YYYY-MM); los créditos se restablecen el día 1 a las 00:00.
+function monthKey(d = new Date()) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+}
+// Hash canónico del polígono: coords redondeadas a ~1 m + orden normalizado.
+function polygonHash(ring) {
+  const pts = ring.map(c => [Math.round(c[0] * 1e5) / 1e5, Math.round(c[1] * 1e5) / 1e5]);
+  if (pts.length > 1 && pts[0][0] === pts[pts.length - 1][0] && pts[0][1] === pts[pts.length - 1][1]) pts.pop();
+  pts.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  return crypto.createHash('sha256').update(JSON.stringify(pts)).digest('hex');
+}
+async function checkUser(req, res) {
+  if (!meteringEnabled) return true;
+  const m = (req.headers.authorization || '').match(/^Bearer (.+)$/i);
+  if (!m) { res.status(401).json({ error: 'No autenticado. Vuelve a iniciar sesión.' }); return false; }
+  try { req.uid = (await admin.auth().verifyIdToken(m[1])).uid; return true; }
+  catch (e) { res.status(401).json({ error: 'Sesión inválida o expirada. Vuelve a iniciar sesión.' }); return false; }
+}
+// Pre-chequeo: bloquea (429) solo si el polígono es NUEVO y el mes está al tope.
+async function meterPolygon(req, res, ring) {
+  if (!meteringEnabled) return { ok: true, counted: false };
+  const hash = polygonHash(ring);
+  const key = monthKey();
+  const snap = await db.collection('users').doc(req.uid).get();
+  const data = snap.exists ? snap.data() : {};
+  const limit = Number(data.polygonLimit) || 100;
+  const usage = (data.polygonUsage && data.polygonUsage[key]) || [];
+  if (usage.includes(hash)) return { ok: true, counted: false, hash, key };
+  if (usage.length >= limit) {
+    res.status(429).json({
+      error: `Has alcanzado tu límite mensual de ${limit} polígonos. Contacta al administrador para ampliarlo.`,
+      quota: { used: limit, limit, remaining: 0 }
+    });
+    return { ok: false };
+  }
+  return { ok: true, counted: true, hash, key };
+}
+// Commit al finalizar con éxito: suma el hash (transacción) y devuelve la cuota actual.
+async function commitPolygon(req, res, m) {
+  if (!meteringEnabled) return null;
+  if (m.counted) {
+    const ref = db.collection('users').doc(req.uid);
+    await db.runTransaction(async (t) => {
+      const snap = await t.get(ref);
+      const data = snap.exists ? snap.data() : {};
+      const limit = Number(data.polygonLimit) || 100;
+      const usage = (data.polygonUsage && data.polygonUsage[m.key]) || [];
+      if (usage.includes(m.hash) || usage.length >= limit) return;
+      usage.push(m.hash);
+      t.set(ref, { polygonUsage: { ...(data.polygonUsage || {}), [m.key]: usage } }, { merge: true });
+    });
+  }
+  const snap = await db.collection('users').doc(req.uid).get();
+  const data = snap.exists ? snap.data() : {};
+  const limit = Number(data.polygonLimit) || 100;
+  const usage = (data.polygonUsage && data.polygonUsage[m.key]) || [];
+  return { used: usage.length, limit, remaining: Math.max(0, limit - usage.length) };
+}
+async function meterEndpoints(req, res, ring) {
+  if (!(await checkUser(req, res))) return null;
+  const m = await meterPolygon(req, res, ring);
+  if (!m.ok) return null;
+  return m;
+}
 
 const PORT = process.env.PORT || 10002;
 const PROCESS_URL = 'https://services.sentinel-hub.com/api/v1/process';
@@ -511,6 +605,8 @@ app.post('/api/v2/cloud-polygon', async (req, res) => {
     const size = Math.min(Number(req.body.size || 256), 512);
     const bbox = bboxOf(ring);
     if (!ring || !bbox) return badParams(res, 'Parámetro coordinates inválido.');
+    const m = await meterEndpoints(req, res, ring);
+    if (!m) return;
     const out = [];
     for (const d of dates) {
       try {
@@ -522,7 +618,8 @@ app.post('/api/v2/cloud-polygon', async (req, res) => {
         out.push({ date: d.date || d, sceneCloud: d.cloudCover ?? null, polygonCloud: null, error: e.message });
       }
     }
-    res.json({ dates: out });
+    const quota = await commitPolygon(req, res, m);
+    res.json({ dates: out, quota });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -535,6 +632,8 @@ app.post('/api/v2/image', async (req, res) => {
     const composite = Number(req.body.composite || 0);
     const bbox = bboxOf(ring);
     if (!ring || !bbox || !date) return badParams(res, 'Faltan coordinates o date.');
+    const m = await meterEndpoints(req, res, ring);
+    if (!m) return;
     const { width, height } = imageSize(bbox, 512);
 
     if (mode === 'truecolor') {
@@ -544,7 +643,8 @@ app.post('/api/v2/image', async (req, res) => {
         if (!d) return badParams(res, 'No hay escena S2 cercana para el color real.');
       }
       const image = await fetchTrueColor({ ring, bbox, date: d, width, height });
-      return res.json({ image, usedDate: d, bbox, width, height, mode });
+      const quota = await commitPolygon(req, res, m);
+      return res.json({ image, usedDate: d, bbox, width, height, mode, quota });
     }
 
     // ---- NDVI (con o sin composite server-side) ----
@@ -558,10 +658,12 @@ app.post('/api/v2/image', async (req, res) => {
       const areaPx = areaPerPixel(bbox, width, height);
       const cls = classAreas(ndvi, mask, OPTICAL_CLASSES.map(c => ({ ...c })), areaPx);
       const image = toPng(ndvi, width, height, colorNdvi, mask);
+      const quota = await commitPolygon(req, res, m);
       return res.json({
         image, usedDate: date, bbox, width, height, mode: 'ndvi',
         stats: { mean: st.mean, otsu },
-        histogram: hist, areaPerPixel: areaPx, cloudPct: cp.cloudPct, classes: cls.classes, areaHa: cls.areaHa
+        histogram: hist, areaPerPixel: areaPx, cloudPct: cp.cloudPct, classes: cls.classes, areaHa: cls.areaHa,
+        quota
       });
     }
 
@@ -620,10 +722,12 @@ app.post('/api/v2/image', async (req, res) => {
     const cls = classAreas(median, mask, OPTICAL_CLASSES.map(c => ({ ...c })), areaPx);
     const image = toPng(median, width, height, colorNdvi, mask);
     const bestCloud = used.reduce((m, u) => (u.polygonCloud === null ? m : Math.min(m, u.polygonCloud)), 100);
+    const quota = await commitPolygon(req, res, m);
     res.json({
       image, usedDate: date, usedDates: used, bbox, width, height, mode: 'ndvi', composite: true,
       stats: { mean: st.mean, otsu },
-      histogram: hist, areaPerPixel: areaPx, cloudPct: bestCloud, classes: cls.classes, areaHa: cls.areaHa
+      histogram: hist, areaPerPixel: areaPx, cloudPct: bestCloud, classes: cls.classes, areaHa: cls.areaHa,
+      quota
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -635,6 +739,8 @@ app.post('/api/v2/radar-stats', async (req, res) => {
     const date = req.body.date;
     const bbox = bboxOf(ring);
     if (!ring || !bbox) return badParams(res, 'Parámetro coordinates inválido.');
+    const m = await meterEndpoints(req, res, ring);
+    if (!m) return;
     const { width, height } = imageSize(bbox, 512);
     let d = date;
     let pol = 'DV';
@@ -667,10 +773,12 @@ app.post('/api/v2/radar-stats', async (req, res) => {
       const svv = statsOf(db.vv, mask), svh = statsOf(db.vh, mask);
       vvDb = svv.mean; vhDb = svh.mean;
     } catch (e) { /* dB opcional */ }
+    const quota = await commitPolygon(req, res, m);
     res.json({
       image, usedDate: d, polarization: pol, bbox, width, height,
       stats: { rviMean: st.mean, vvDb, vhDb, otsu },
-      histogram: hist, areaPerPixel: areaPx, classes: cls.classes, areaHa: cls.areaHa
+      histogram: hist, areaPerPixel: areaPx, classes: cls.classes, areaHa: cls.areaHa,
+      quota
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -682,6 +790,8 @@ app.post('/api/v2/change', async (req, res) => {
     const date1 = req.body.date1, date2 = req.body.date2;
     const bbox = bboxOf(ring);
     if (!ring || !bbox || !date1 || !date2) return badParams(res, 'Faltan coordinates, date1 o date2.');
+    const m = await meterEndpoints(req, res, ring);
+    if (!m) return;
     const { width, height } = imageSize(bbox, 512);
     const mask = maskIndices(width, height, bbox, ring);
 
@@ -725,6 +835,7 @@ app.post('/api/v2/change', async (req, res) => {
     const imgN = toPng(dNdvi, width, height, colorDiff, mask);
     const imgR = radar ? toPng(dRvi, width, height, colorDiff, mask) : null;
     const agreementPct = agree.valid ? (((agree.bothDecrease + agree.bothIncrease) / agree.valid) * 100) : null;
+    const quota = await commitPolygon(req, res, m);
     res.json({
       optical: { date1, date2, dNdviMean: mean(dNdvi), image: imgN },
       radar: radar ? { date1: radar.date1, date2: radar.date2, polarization: radar.pol, dRviMean: mean(dRvi), image: imgR } : null,
@@ -732,7 +843,8 @@ app.post('/api/v2/change', async (req, res) => {
         bothDecrease: agree.bothDecrease, bothIncrease: agree.bothIncrease, mixed: agree.mixed,
         validPixels: agree.valid, agreementPct
       },
-      bbox, width, height
+      bbox, width, height,
+      quota
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -759,6 +871,8 @@ app.post('/api/v2/ndvi-timeseries', async (req, res) => {
     const maxSceneCloud = Number(req.body.maxSceneCloud || 40);
     const bbox = bboxOf(ring);
     if (!ring || !bbox) return badParams(res, 'Parámetro coordinates inválido.');
+    const m = await meterEndpoints(req, res, ring);
+    if (!m) return;
     const now = new Date();
     const start = new Date(); start.setFullYear(now.getFullYear() - 1);
     const data = await catalogSearch({
@@ -789,7 +903,8 @@ app.post('/api/v2/ndvi-timeseries', async (req, res) => {
         series.push({ date: p.date, sceneCloud: p.cloud, polygonCloud: null, ndviMean: null, error: e.message });
       }
     }
-    res.json({ series });
+    const quota = await commitPolygon(req, res, m);
+    res.json({ series, quota });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -899,6 +1014,8 @@ app.post('/api/v2/compare', async (req, res) => {
     const date1 = req.body.date1, date2 = req.body.date2;
     const bbox = bboxOf(ring);
     if (!ring || !bbox || !date1 || !date2) return badParams(res, 'Faltan coordinates, date1 o date2.');
+    const m = await meterEndpoints(req, res, ring);
+    if (!m) return;
     const { width, height } = imageSize(bbox, 512);
     const mask = maskIndices(width, height, bbox, ring);
     const areaPx = areaPerPixel(bbox, width, height);
@@ -938,6 +1055,7 @@ app.post('/api/v2/compare', async (req, res) => {
       }
     } catch (e) { /* radar opcional */ }
 
+    const quota = await commitPolygon(req, res, m);
     res.json({
       optical: {
         date1, date2,
@@ -952,7 +1070,8 @@ app.post('/api/v2/compare', async (req, res) => {
         changeImage: toPng(comp.codes, width, height, colorChangeMap, mask)
       },
       radar,
-      bbox, width, height
+      bbox, width, height,
+      quota
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
