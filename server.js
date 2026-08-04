@@ -750,6 +750,20 @@ app.post('/api/v2/image', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// 3b) Foto de contexto: truecolor de una fecha dada SIN descontar cuota de polígonos (solo requiere sesión).
+app.post('/api/v2/recent-scene', async (req, res) => {
+  try {
+    if (!(await checkUser(req, res))) return;
+    const ring = toRing(req.body.coordinates);
+    const date = req.body.date;
+    const bbox = bboxOf(ring);
+    if (!ring || !bbox || !date) return badParams(res, 'Faltan coordinates o date.');
+    const { width, height } = imageSize(bbox, 512);
+    const image = await fetchTrueColor({ ring, bbox, date, width, height });
+    res.json({ image, usedDate: date, bbox, width, height });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // 4) Estadísticas radar (RVI + backscatter dB)
 app.post('/api/v2/radar-stats', async (req, res) => {
   try {
@@ -1102,4 +1116,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { monthKey, dayKey, usageOfMonth, polygonHash, meterPolygon, commitPolygon, db, admin, meteringEnabled };
+module.exports = { monthKey, dayKey, usageOfMonth, polygonHash, meterPolygon, commitPolygon, db, admin, meteringEnabled, catalogSearch, fetchTrueColor, bboxOf, toRing, imageSize };
