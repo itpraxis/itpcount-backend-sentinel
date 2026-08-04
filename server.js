@@ -237,6 +237,26 @@ function evaluatePixel(sample) { return [2.5 * sample.B04 * 255, 2.5 * sample.B0
   return 'data:image/png;base64,' + buf.toString('base64');
 }
 
+async function findNearestOpticalDate(bbox, date, maxDays = 60) {
+  const ref = new Date(date);
+  const start = new Date(ref); start.setDate(start.getDate() - maxDays);
+  const end = new Date(ref); end.setDate(end.getDate() + maxDays);
+  const data = await catalogSearch({
+    bbox,
+    collections: ['sentinel-2-l2a'],
+    datetime: `${start.toISOString().split('T')[0]}T00:00:00Z/${end.toISOString().split('T')[0]}T23:59:59Z`,
+    limit: 100,
+    filter: 'eo:cloud_cover < 60'
+  });
+  let best = null, bestDist = Infinity;
+  for (const f of data.features) {
+    const d = f.properties.datetime.split('T')[0];
+    const dist = Math.abs(new Date(d) - ref);
+    if (dist < bestDist) { bestDist = dist; best = d; }
+  }
+  return best;
+}
+
 // ============================================================
 // EVALUACIÓN RADAR (RVI continuo)
 // ============================================================
@@ -518,8 +538,13 @@ app.post('/api/v2/image', async (req, res) => {
     const { width, height } = imageSize(bbox, 512);
 
     if (mode === 'truecolor') {
-      const image = await fetchTrueColor({ ring, bbox, date, width, height });
-      return res.json({ image, usedDate: date, bbox, width, height, mode });
+      let d = date;
+      if (req.body.nearest) {
+        d = await findNearestOpticalDate(bbox, date);
+        if (!d) return badParams(res, 'No hay escena S2 cercana para el color real.');
+      }
+      const image = await fetchTrueColor({ ring, bbox, date: d, width, height });
+      return res.json({ image, usedDate: d, bbox, width, height, mode });
     }
 
     // ---- NDVI (con o sin composite server-side) ----
@@ -830,15 +855,17 @@ function compareCategories(c1, c2, mask, classes, areaPerPx) {
   }
   const forest1 = toHa(cnt1[forestId]), forest2 = toHa(cnt2[forestId]);
   const codes = new Uint8Array(c1.length).fill(255);
+  let cLost = 0, cGained = 0, cOther = 0, cUnchanged = 0;
   for (let k = 0; k < mask.length; k++) {
     const p = mask[k];
     const a = c1[p], b = c2[p];
     if (a === 255 || b === 255) continue;
-    if (a === forestId && b !== forestId) codes[p] = 1;
-    else if (a !== forestId && b === forestId) codes[p] = 2;
-    else if (a !== b) codes[p] = 3;
-    else codes[p] = 4;
+    if (a === forestId && b !== forestId) { codes[p] = 1; cLost++; }
+    else if (a !== forestId && b === forestId) { codes[p] = 2; cGained++; }
+    else if (a !== b) { codes[p] = 3; cOther++; }
+    else { codes[p] = 4; cUnchanged++; }
   }
+  const roundH = (c) => Math.round(toHa(c) * 100) / 100;
   return {
     rows,
     forest: {
@@ -846,10 +873,11 @@ function compareCategories(c1, c2, mask, classes, areaPerPx) {
       ha2: Math.round(forest2 * 100) / 100,
       delta: Math.round((forest2 - forest1) * 100) / 100,
       deltaPct: forest1 ? Math.round(((forest2 - forest1) / forest1) * 1000) / 10 : null,
-      lost: Math.round(toHa(lost) * 100) / 100,
-      gained: Math.round(toHa(gained) * 100) / 100,
+      lost: roundH(lost),
+      gained: roundH(gained),
       net: Math.round(toHa(gained - lost) * 100) / 100
     },
+    change: { lostHa: roundH(cLost), gainedHa: roundH(cGained), otherHa: roundH(cOther), unchangedHa: roundH(cUnchanged) },
     agreementPct: valid ? Math.round((same / valid) * 1000) / 10 : null,
     changedPct: valid ? Math.round(((valid - same) / valid) * 1000) / 10 : null,
     validPixels: valid,
@@ -901,7 +929,7 @@ app.post('/api/v2/compare', async (req, res) => {
         const rcomp = compareCategories(rc1, rc2, mask, rcls, areaPx);
         radar = {
           date1: r1.date, date2: r2.date, polarization: 'DV',
-          forest: rcomp.forest, classes: rcomp.rows,
+          forest: rcomp.forest, classes: rcomp.rows, change: rcomp.change,
           agreementPct: rcomp.agreementPct, changedPct: rcomp.changedPct,
           image1: toPng(rc1, width, height, colorClass(rcls), mask),
           image2: toPng(rc2, width, height, colorClass(rcls), mask),
@@ -916,6 +944,7 @@ app.post('/api/v2/compare', async (req, res) => {
         cloudPct1: cp1.cloudPct, cloudPct2: cp2.cloudPct,
         forest: comp.forest,
         classes: comp.rows,
+        change: comp.change,
         agreementPct: comp.agreementPct, changedPct: comp.changedPct,
         areaPerPixel: areaPx,
         image1: toPng(c1, width, height, colorClass(cls), mask),
