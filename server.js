@@ -349,6 +349,34 @@ function evaluatePixel(sample) { return [2.5 * sample.B04 * 255, 2.5 * sample.B0
   return 'data:image/png;base64,' + buf.toString('base64');
 }
 
+// Truecolor recortado al polígono: fuera del anillo queda transparente (para superponer en el mapa).
+async function fetchTrueColorMasked({ ring, bbox, date, width, height }) {
+  const payload = {
+    input: {
+      bounds: { geometry: { type: 'Polygon', coordinates: [ring] } },
+      data: [{ type: 'sentinel-2-l2a', dataFilter: { timeRange: { from: `${date}T00:00:00Z`, to: `${date}T23:59:59Z` }, maxCloudCoverage: 100 }, mosaicking: 'SCENE' }]
+    },
+    output: { width, height, bands: 3, format: 'image/png', crs: CRS },
+    evalscript: `//VERSION=3
+function setup() { return { input: ["B02","B03","B04"], output: { bands: 3, sampleType: "UINT8" } }; }
+function evaluatePixel(sample) { return [2.5 * sample.B04 * 255, 2.5 * sample.B03 * 255, 2.5 * sample.B02 * 255]; }`
+  };
+  const buf = await shFetch(payload);
+  const src = PNG.sync.read(buf);
+  const mask = maskIndices(width, height, bbox, ring);
+  const inside = new Uint8Array(width * height);
+  for (const p of mask) inside[p] = 1;
+  const out = new PNG({ width, height });
+  for (let p = 0; p < width * height; p++) {
+    const i = p * 4;
+    out.data[i] = src.data[i];
+    out.data[i + 1] = src.data[i + 1];
+    out.data[i + 2] = src.data[i + 2];
+    out.data[i + 3] = inside[p] ? 255 : 0;
+  }
+  return 'data:image/png;base64,' + PNG.sync.write(out).toString('base64');
+}
+
 async function findNearestOpticalDate(bbox, date, maxDays = 60) {
   const ref = new Date(date);
   const start = new Date(ref); start.setDate(start.getDate() - maxDays);
@@ -759,7 +787,7 @@ app.post('/api/v2/recent-scene', async (req, res) => {
     const bbox = bboxOf(ring);
     if (!ring || !bbox || !date) return badParams(res, 'Faltan coordinates o date.');
     const { width, height } = imageSize(bbox, 512);
-    const image = await fetchTrueColor({ ring, bbox, date, width, height });
+    const image = await fetchTrueColorMasked({ ring, bbox, date, width, height });
     res.json({ image, usedDate: date, bbox, width, height });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -1116,4 +1144,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { monthKey, dayKey, usageOfMonth, polygonHash, meterPolygon, commitPolygon, db, admin, meteringEnabled, catalogSearch, fetchTrueColor, bboxOf, toRing, imageSize };
+module.exports = { monthKey, dayKey, usageOfMonth, polygonHash, meterPolygon, commitPolygon, db, admin, meteringEnabled, catalogSearch, fetchTrueColor, fetchTrueColorMasked, bboxOf, toRing, imageSize, maskIndices };
