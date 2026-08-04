@@ -68,8 +68,10 @@ async function getToken() {
 // ============================================================
 function toRing(coords) {
   if (!Array.isArray(coords) || coords.length === 0) return null;
-  if (Array.isArray(coords[0]) && Array.isArray(coords[0][0])) return coords[0];
-  return coords;
+  let ring = (Array.isArray(coords[0]) && Array.isArray(coords[0][0])) ? coords[0] : coords;
+  const a = ring[0], b = ring[ring.length - 1];
+  if (a && b && (a[0] !== b[0] || a[1] !== b[1])) ring = ring.concat([[a[0], a[1]]]);
+  return ring;
 }
 function bboxOf(ring) {
   let minLon = Infinity, minLat = Infinity, maxLon = -Infinity, maxLat = -Infinity;
@@ -773,6 +775,156 @@ app.post('/api/v2/polygon-info', (req, res) => {
     const bbox = bboxOf(ring);
     if (!ring || !bbox) return badParams(res, 'Parámetro coordinates inválido.');
     res.json({ areaHa: Math.round(polygonAreaHa(ring) * 100) / 100, bbox });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ============================================================
+// COMPARACIÓN DE CATEGORÍAS ENTRE DOS FECHAS (con enfoque bosque)
+// ============================================================
+function classifyMasked(values, mask, classes) {
+  const n = classes.length;
+  const out = new Uint8Array(values.length).fill(255);
+  for (let k = 0; k < mask.length; k++) {
+    const p = mask[k];
+    const v = values[p];
+    if (v === undefined || v === null || Number.isNaN(v)) continue;
+    for (let i = 0; i < n; i++) {
+      if (v >= classes[i].from && v < classes[i].to) { out[p] = i; break; }
+    }
+  }
+  return out;
+}
+function hexRgb(hex) {
+  const r = parseInt(hex.slice(1, 3), 16), g = parseInt(hex.slice(3, 5), 16), b = parseInt(hex.slice(5, 7), 16);
+  return [r, g, b];
+}
+function colorClass(classes) {
+  const cols = classes.map(c => hexRgb(c.color));
+  return (idx) => (idx >= 0 && idx < cols.length) ? cols[idx] : [0, 0, 0];
+}
+function compareCategories(c1, c2, mask, classes, areaPerPx) {
+  const n = classes.length;
+  const forestId = n - 1;
+  const cnt1 = new Array(n).fill(0), cnt2 = new Array(n).fill(0);
+  const matrix = Array.from({ length: n }, () => new Array(n).fill(0));
+  let valid = 0, same = 0;
+  for (let k = 0; k < mask.length; k++) {
+    const p = mask[k];
+    const a = c1[p], b = c2[p];
+    if (a === 255 || b === 255) continue;
+    cnt1[a]++; cnt2[b]++; matrix[a][b]++;
+    valid++;
+    if (a === b) same++;
+  }
+  const toHa = (c) => (c * areaPerPx) / 10000;
+  const rows = classes.map((c, i) => ({
+    id: c.id, label: c.label, color: c.color,
+    ha1: Math.round(toHa(cnt1[i]) * 100) / 100,
+    ha2: Math.round(toHa(cnt2[i]) * 100) / 100,
+    delta: Math.round(toHa(cnt2[i] - cnt1[i]) * 100) / 100,
+    deltaPct: cnt1[i] ? Math.round(((cnt2[i] - cnt1[i]) / cnt1[i]) * 1000) / 10 : null
+  }));
+  let lost = 0, gained = 0;
+  for (let i = 0; i < n; i++) {
+    if (i !== forestId) { lost += matrix[forestId][i]; gained += matrix[i][forestId]; }
+  }
+  const forest1 = toHa(cnt1[forestId]), forest2 = toHa(cnt2[forestId]);
+  const codes = new Uint8Array(c1.length).fill(255);
+  for (let k = 0; k < mask.length; k++) {
+    const p = mask[k];
+    const a = c1[p], b = c2[p];
+    if (a === 255 || b === 255) continue;
+    if (a === forestId && b !== forestId) codes[p] = 1;
+    else if (a !== forestId && b === forestId) codes[p] = 2;
+    else if (a !== b) codes[p] = 3;
+    else codes[p] = 4;
+  }
+  return {
+    rows,
+    forest: {
+      ha1: Math.round(forest1 * 100) / 100,
+      ha2: Math.round(forest2 * 100) / 100,
+      delta: Math.round((forest2 - forest1) * 100) / 100,
+      deltaPct: forest1 ? Math.round(((forest2 - forest1) / forest1) * 1000) / 10 : null,
+      lost: Math.round(toHa(lost) * 100) / 100,
+      gained: Math.round(toHa(gained) * 100) / 100,
+      net: Math.round(toHa(gained - lost) * 100) / 100
+    },
+    agreementPct: valid ? Math.round((same / valid) * 1000) / 10 : null,
+    changedPct: valid ? Math.round(((valid - same) / valid) * 1000) / 10 : null,
+    validPixels: valid,
+    codes
+  };
+}
+const colorChangeMap = (c) => {
+  if (c === 1) return [220, 38, 38];
+  if (c === 2) return [22, 163, 74];
+  if (c === 3) return [250, 204, 21];
+  if (c === 4) return [30, 41, 59];
+  return [0, 0, 0];
+};
+
+// 8) Comparar superficies por categoría entre dos fechas
+app.post('/api/v2/compare', async (req, res) => {
+  try {
+    const ring = toRing(req.body.coordinates);
+    const date1 = req.body.date1, date2 = req.body.date2;
+    const bbox = bboxOf(ring);
+    if (!ring || !bbox || !date1 || !date2) return badParams(res, 'Faltan coordinates, date1 o date2.');
+    const { width, height } = imageSize(bbox, 512);
+    const mask = maskIndices(width, height, bbox, ring);
+    const areaPx = areaPerPixel(bbox, width, height);
+
+    const [o1, o2] = await Promise.all([
+      fetchOptical({ ring, bbox, date: date1, width, height }),
+      fetchOptical({ ring, bbox, date: date2, width, height })
+    ]);
+    const cls = JSON.parse(JSON.stringify(OPTICAL_CLASSES));
+    const c1 = classifyMasked(o1.ndvi, mask, cls);
+    const c2 = classifyMasked(o2.ndvi, mask, cls);
+    const cp1 = cloudPctOf(o1.cloud, mask), cp2 = cloudPctOf(o2.cloud, mask);
+    const comp = compareCategories(c1, c2, mask, cls, areaPx);
+
+    // Radar comparativo (si hay escenas cerca de ambas fechas)
+    let radar = null;
+    try {
+      const r1 = await findRadarDateNear(bbox, date1);
+      const r2 = await findRadarDateNear(bbox, date2);
+      if (r1 && r2 && r1.date !== r2.date) {
+        const [ra1, ra2] = await Promise.all([
+          fetchRvi({ ring, bbox, date: r1.date, width, height, polarization: 'DV' }),
+          fetchRvi({ ring, bbox, date: r2.date, width, height, polarization: 'DV' })
+        ]);
+        const rcls = JSON.parse(JSON.stringify(RVI_CLASSES));
+        const rc1 = classifyMasked(ra1.rvi, mask, rcls);
+        const rc2 = classifyMasked(ra2.rvi, mask, rcls);
+        const rcomp = compareCategories(rc1, rc2, mask, rcls, areaPx);
+        radar = {
+          date1: r1.date, date2: r2.date, polarization: 'DV',
+          forest: rcomp.forest, classes: rcomp.rows,
+          agreementPct: rcomp.agreementPct, changedPct: rcomp.changedPct,
+          image1: toPng(rc1, width, height, colorClass(rcls), mask),
+          image2: toPng(rc2, width, height, colorClass(rcls), mask),
+          changeImage: toPng(rcomp.codes, width, height, colorChangeMap, mask)
+        };
+      }
+    } catch (e) { /* radar opcional */ }
+
+    res.json({
+      optical: {
+        date1, date2,
+        cloudPct1: cp1.cloudPct, cloudPct2: cp2.cloudPct,
+        forest: comp.forest,
+        classes: comp.rows,
+        agreementPct: comp.agreementPct, changedPct: comp.changedPct,
+        areaPerPixel: areaPx,
+        image1: toPng(c1, width, height, colorClass(cls), mask),
+        image2: toPng(c2, width, height, colorClass(cls), mask),
+        changeImage: toPng(comp.codes, width, height, colorChangeMap, mask)
+      },
+      radar,
+      bbox, width, height
+    });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
