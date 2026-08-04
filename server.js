@@ -406,17 +406,17 @@ function toPng(values, width, height, colorFn, idx) {
   return 'data:image/png;base64,' + PNG.sync.write(png).toString('base64');
 }
 const colorNdvi = (v) => {
-  if (v < 0.45) return [37, 99, 235];        // agua
-  if (v < 0.55) return [194, 178, 128];      // suelo
-  if (v < 0.65) return [163, 217, 119];      // escasa
-  if (v < 0.75) return [76, 175, 80];        // moderada
-  return [20, 83, 45];                       // densa
+  if (v < 0.55) return [37, 99, 235];        // agua / sin vegetación
+  if (v < 0.68) return [194, 178, 128];      // suelo desnudo
+  if (v < 0.75) return [163, 217, 119];      // escasa
+  if (v < 0.8) return [76, 175, 80];         // moderada
+  return [20, 83, 45];                       // bosque denso
 };
 const colorRvi = (v) => {
   if (v < 0.15) return [29, 78, 216];
   if (v < 0.3) return [176, 166, 138];
   if (v < 0.5) return [156, 204, 101];
-  if (v < 0.7) return [67, 160, 71];
+  if (v < 0.6) return [67, 160, 71];
   return [20, 83, 45];
 };
 const colorDiff = (v) => {
@@ -430,18 +430,18 @@ const colorDiff = (v) => {
 // CLASES POR DEFECTO
 // ============================================================
 const OPTICAL_CLASSES = [
-  { id: 'water', label: 'Agua / sin vegetación', from: -Infinity, to: 0.45, color: '#2563eb' },
-  { id: 'barren', label: 'Suelo desnudo', from: 0.45, to: 0.55, color: '#c2b280' },
-  { id: 'sparse', label: 'Vegetación escasa', from: 0.55, to: 0.65, color: '#a3d977' },
-  { id: 'moderate', label: 'Vegetación moderada', from: 0.65, to: 0.75, color: '#4caf50' },
-  { id: 'dense', label: 'Vegetación densa', from: 0.75, to: Infinity, color: '#14532d' }
+  { id: 'water', label: 'Agua / sin vegetación', from: -Infinity, to: 0.55, color: '#2563eb' },
+  { id: 'barren', label: 'Suelo desnudo', from: 0.55, to: 0.68, color: '#c2b280' },
+  { id: 'sparse', label: 'Vegetación escasa', from: 0.68, to: 0.75, color: '#a3d977' },
+  { id: 'moderate', label: 'Vegetación moderada', from: 0.75, to: 0.8, color: '#4caf50' },
+  { id: 'dense', label: 'Bosque / vegetación densa', from: 0.8, to: Infinity, color: '#14532d' }
 ];
 const RVI_CLASSES = [
   { id: 'water', label: 'Agua / superficie lisa', from: -Infinity, to: 0.15, color: '#1d4ed8' },
   { id: 'bare', label: 'Suelo desnudo / urbano', from: 0.15, to: 0.3, color: '#b0a68a' },
   { id: 'grass', label: 'Pastizal / cultivo bajo', from: 0.3, to: 0.5, color: '#9ccc65' },
-  { id: 'shrub', label: 'Matorral / cultivo denso', from: 0.5, to: 0.7, color: '#43a047' },
-  { id: 'forest', label: 'Bosque / vegetación densa', from: 0.7, to: Infinity, color: '#14532d' }
+  { id: 'shrub', label: 'Matorral / cultivo denso', from: 0.5, to: 0.6, color: '#43a047' },
+  { id: 'forest', label: 'Bosque / vegetación densa', from: 0.6, to: Infinity, color: '#14532d' }
 ];
 
 // ============================================================
@@ -531,7 +531,7 @@ app.post('/api/v2/image', async (req, res) => {
       const hist = histogramOf(ndvi, mask, 60);
       const otsu = otsuFromHist(hist.counts, hist.total);
       const areaPx = areaPerPixel(bbox, width, height);
-      const cls = classAreas(ndvi, mask, JSON.parse(JSON.stringify(OPTICAL_CLASSES)), areaPx);
+      const cls = classAreas(ndvi, mask, OPTICAL_CLASSES.map(c => ({ ...c })), areaPx);
       const image = toPng(ndvi, width, height, colorNdvi, mask);
       return res.json({
         image, usedDate: date, bbox, width, height, mode: 'ndvi',
@@ -592,7 +592,7 @@ app.post('/api/v2/image', async (req, res) => {
     const hist = histogramOf(median, mask, 60);
     const otsu = otsuFromHist(hist.counts, hist.total);
     const areaPx = areaPerPixel(bbox, width, height);
-    const cls = classAreas(median, mask, JSON.parse(JSON.stringify(OPTICAL_CLASSES)), areaPx);
+    const cls = classAreas(median, mask, OPTICAL_CLASSES.map(c => ({ ...c })), areaPx);
     const image = toPng(median, width, height, colorNdvi, mask);
     const bestCloud = used.reduce((m, u) => (u.polygonCloud === null ? m : Math.min(m, u.polygonCloud)), 100);
     res.json({
@@ -634,7 +634,7 @@ app.post('/api/v2/radar-stats', async (req, res) => {
     const hist = histogramOf(rvi, mask, 60);
     const otsu = otsuFromHist(hist.counts, hist.total);
     const areaPx = areaPerPixel(bbox, width, height);
-    const cls = classAreas(rvi, mask, JSON.parse(JSON.stringify(RVI_CLASSES)), areaPx);
+    const cls = classAreas(rvi, mask, RVI_CLASSES.map(c => ({ ...c })), areaPx);
     const image = toPng(rvi, width, height, colorRvi, mask);
     let vvDb = null, vhDb = null;
     try {
@@ -879,7 +879,7 @@ app.post('/api/v2/compare', async (req, res) => {
       fetchOptical({ ring, bbox, date: date1, width, height }),
       fetchOptical({ ring, bbox, date: date2, width, height })
     ]);
-    const cls = JSON.parse(JSON.stringify(OPTICAL_CLASSES));
+    const cls = OPTICAL_CLASSES.map(c => ({ ...c }));
     const c1 = classifyMasked(o1.ndvi, mask, cls);
     const c2 = classifyMasked(o2.ndvi, mask, cls);
     const cp1 = cloudPctOf(o1.cloud, mask), cp2 = cloudPctOf(o2.cloud, mask);
@@ -895,7 +895,7 @@ app.post('/api/v2/compare', async (req, res) => {
           fetchRvi({ ring, bbox, date: r1.date, width, height, polarization: 'DV' }),
           fetchRvi({ ring, bbox, date: r2.date, width, height, polarization: 'DV' })
         ]);
-        const rcls = JSON.parse(JSON.stringify(RVI_CLASSES));
+        const rcls = RVI_CLASSES.map(c => ({ ...c }));
         const rc1 = classifyMasked(ra1.rvi, mask, rcls);
         const rc2 = classifyMasked(ra2.rvi, mask, rcls);
         const rcomp = compareCategories(rc1, rc2, mask, rcls, areaPx);
