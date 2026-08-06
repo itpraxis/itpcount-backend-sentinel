@@ -445,7 +445,37 @@ async function fetchRvi({ ring, bbox, date, width, height, polarization = 'DV' }
   };
   const buf = await shFetch(payload);
   const { bands } = await parseTiff(buf);
-  return { rvi: bands[0].values, width, height };
+  return { rvi: medianFilter(bands[0].values, width, height, 2), width, height };
+}
+
+// Filtro de mediana (ventana 5x5) sobre un raster de punto flotante con NaN en píxeles inválidos.
+// Reduce el speckle del radar sin desplazar los bordes (a diferencia de un promedio).
+const _medScratch = [];
+function medianFilter(arr, width, height, radius = 2) {
+  if (radius <= 0 || width <= 0 || height <= 0) return arr;
+  const out = new arr.constructor(arr.length);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const idx = y * width + x;
+      if (!Number.isFinite(arr[idx])) { out[idx] = NaN; continue; }
+      _medScratch.length = 0;
+      for (let dy = -radius; dy <= radius; dy++) {
+        const yy = y + dy;
+        if (yy < 0 || yy >= height) continue;
+        const rowBase = yy * width;
+        for (let dx = -radius; dx <= radius; dx++) {
+          const xx = x + dx;
+          if (xx < 0 || xx >= width) continue;
+          const v = arr[rowBase + xx];
+          if (Number.isFinite(v)) _medScratch.push(v);
+        }
+      }
+      if (!_medScratch.length) { out[idx] = NaN; continue; }
+      _medScratch.sort((a, b) => a - b);
+      out[idx] = _medScratch[Math.floor(_medScratch.length / 2)];
+    }
+  }
+  return out;
 }
 // Backscatter VV/VH en dB (para el reporte) — misma escena
 const DB_EVAL = `//VERSION=3
@@ -1172,7 +1202,7 @@ app.post('/api/v2/radar-dates', async (req, res) => {
         relativeOrbit: (f.properties && f.properties['sat:relative_orbit']) || null
       });
     }
-    dates.sort((a, b) => new Date(a.date) - new Date(b.date));
+    dates.sort((a, b) => new Date(b.date) - new Date(a.date));
     res.json({ dates, count: dates.length });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
