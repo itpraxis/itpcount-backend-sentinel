@@ -1142,6 +1142,78 @@ app.post('/api/v2/compare', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// 9) Fechas disponibles de radar (Sentinel-1 GRD dual-pol, modo IW) sobre el polígono
+app.post('/api/v2/radar-dates', async (req, res) => {
+  try {
+    const ring = toRing(req.body.coordinates);
+    const bbox = bboxOf(ring);
+    if (!ring || !bbox) return badParams(res, 'Parámetro coordinates inválido.');
+    const m = await meterEndpoints(req, res, ring);
+    if (!m) return;
+    const now = new Date();
+    const start = new Date();
+    start.setFullYear(now.getFullYear() - 1);
+    const data = await catalogSearch({
+      bbox,
+      collections: ['sentinel-1-grd'],
+      datetime: start.toISOString() + '/' + now.toISOString(),
+      limit: 100
+    });
+    const seen = new Set();
+    const dates = [];
+    for (const f of (data.features || [])) {
+      if (!(f.id && (f.id.includes('1SDV') || f.id.includes('1SDH')))) continue;
+      const d = (f.properties.datetime || '').split('T')[0];
+      if (!d || seen.has(d)) continue;
+      seen.add(d);
+      dates.push({
+        date: d,
+        polarization: f.id.includes('1SDV') ? 'DV' : 'DH',
+        relativeOrbit: (f.properties && f.properties['sat:relative_orbit']) || null
+      });
+    }
+    dates.sort((a, b) => new Date(a.date) - new Date(b.date));
+    res.json({ dates, count: dates.length });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// 10) Comparar superficies por categoría RVI entre dos fechas radar
+app.post('/api/v2/compare-rvi', async (req, res) => {
+  try {
+    const ring = toRing(req.body.coordinates);
+    const date1 = req.body.date1, date2 = req.body.date2;
+    const bbox = bboxOf(ring);
+    if (!ring || !bbox || !date1 || !date2) return badParams(res, 'Faltan coordinates, date1 o date2.');
+    const m = await meterEndpoints(req, res, ring);
+    if (!m) return;
+    const { width, height } = imageSize(bbox, 512);
+    const mask = maskIndices(width, height, bbox, ring);
+    const areaPx = areaPerPixel(bbox, width, height);
+    const [r1, r2] = await Promise.all([
+      fetchRvi({ ring, bbox, date: date1, width, height, polarization: 'DV' }),
+      fetchRvi({ ring, bbox, date: date2, width, height, polarization: 'DV' })
+    ]);
+    const rcls = RVI_CLASSES.map(c => ({ ...c }));
+    const rc1 = classifyMasked(r1.rvi, mask, rcls);
+    const rc2 = classifyMasked(r2.rvi, mask, rcls);
+    const comp = compareCategories(rc1, rc2, mask, rcls, areaPx);
+    const quota = await commitPolygon(req, res, m);
+    res.json({
+      radar: {
+        date1, date2, polarization: 'DV',
+        forest: comp.forest, classes: comp.rows, change: comp.change,
+        agreementPct: comp.agreementPct, changedPct: comp.changedPct,
+        areaPerPixel: areaPx,
+        image1: toPng(rc1, width, height, colorClass(rcls), mask),
+        image2: toPng(rc2, width, height, colorClass(rcls), mask),
+        changeImage: toPng(comp.codes, width, height, colorChangeMap, mask)
+      },
+      bbox, width, height,
+      quota
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 if (require.main === module) {
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`✅ Backend v2 listo en http://localhost:${PORT}`);
