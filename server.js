@@ -1275,11 +1275,14 @@ app.post('/api/v2/compare', async (req, res) => {
     // Radar comparativo (si hay escenas cerca de ambas fechas): alimenta el
     // consenso dual-sensor sin descargar nada extra (reutiliza ra1/ra2 y o1/o2).
     // Si el frontend envía radarDate1/2 usa esas fechas exactas (las mismas de la
-    // pestaña RVI) para que ambas comparaciones usen las mismas escenas.
+    // pestaña RVI) para que ambas comparaciones usen las mismas escenas. Solo las
+    // acepta si están cerca de la fecha óptica correspondiente (±15 días); si no,
+    // busca la escena 1SDV más cercana (evita alinear con fechas sin relación).
+    const inWindow = (ref, v) => v && Math.abs(new Date(v) - new Date(ref)) <= 15 * 864e5;
     let radar = null;
     try {
-      const r1 = radarDate1 ? { date: radarDate1 } : await findRadarDateNear(bbox, date1);
-      const r2 = radarDate2 ? { date: radarDate2 } : await findRadarDateNear(bbox, date2);
+      const r1 = (inWindow(date1, radarDate1)) ? { date: radarDate1 } : await findRadarDateNear(bbox, date1);
+      const r2 = (inWindow(date2, radarDate2)) ? { date: radarDate2 } : await findRadarDateNear(bbox, date2);
       if (r1 && r2 && r1.date !== r2.date) {
         const [ra1, ra2] = await Promise.all([
           cachedRvi({ ring, bbox, date: r1.date, width, height, polarization: radarPol }),
@@ -1381,16 +1384,23 @@ app.post('/api/v2/compare-rvi', async (req, res) => {
     let rc1 = classifyMasked(r1.rvi, mask, rcls);
     let rc2 = classifyMasked(r2.rvi, mask, rcls);
     // Consenso dual: si el frontend envía opticalDate1/2 usa esas fechas S2 exactas
-    // (las mismas de la pestaña "Comparar NDVI"); si no, busca la S2 más cercana.
+    // (las mismas de la pestaña "Comparar NDVI"); solo las acepta si están cerca de
+    // la fecha radar correspondiente (±15 días); si no, busca la S2 más cercana.
     const opticalDate1 = req.body.opticalDate1 || null;
     const opticalDate2 = req.body.opticalDate2 || null;
-    const [sec1, sec2] = await Promise.all([
-      opticalDate1 ? cachedOptical({ ring, bbox, date: opticalDate1, width, height }) : opticalNearRadar({ ring, bbox, date: date1, width, height }),
-      opticalDate2 ? cachedOptical({ ring, bbox, date: opticalDate2, width, height }) : opticalNearRadar({ ring, bbox, date: date2, width, height })
-    ]);
-    rc1 = consensusClassify(r1.rvi, sec1 && sec1.ndvi, mask, rcls, OPTICAL_CLASSES);
-    rc2 = consensusClassify(r2.rvi, sec2 && sec2.ndvi, mask, rcls, OPTICAL_CLASSES);
+    const inWindow = (ref, v) => v && Math.abs(new Date(v) - new Date(ref)) <= 15 * 864e5;
+    const sec1 = inWindow(date1, opticalDate1)
+      ? cachedOptical({ ring, bbox, date: opticalDate1, width, height })
+      : opticalNearRadar({ ring, bbox, date: date1, width, height });
+    const sec2 = inWindow(date2, opticalDate2)
+      ? cachedOptical({ ring, bbox, date: opticalDate2, width, height })
+      : opticalNearRadar({ ring, bbox, date: date2, width, height });
+    const [s1, s2] = await Promise.all([sec1, sec2]);
+    rc1 = consensusClassify(r1.rvi, s1 && s1.ndvi, mask, rcls, OPTICAL_CLASSES);
+    rc2 = consensusClassify(r2.rvi, s2 && s2.ndvi, mask, rcls, OPTICAL_CLASSES);
     const comp = compareCategories(rc1, rc2, mask, rcls, areaPx);
+    const sec1Date = inWindow(date1, opticalDate1) ? opticalDate1 : (s1 && s1.date);
+    const sec2Date = inWindow(date2, opticalDate2) ? opticalDate2 : (s2 && s2.date);
     const quota = await commitPolygon(req, res, m);
     res.json({
       radar: {
@@ -1403,8 +1413,8 @@ app.post('/api/v2/compare-rvi', async (req, res) => {
         changeImage: toPng(comp.codes, width, height, colorChangeMap, mask)
       },
       bbox, width, height,
-      consensus: !!(sec1 && sec1.ndvi) || !!(sec2 && sec2.ndvi),
-      consensusSecondaryDates: [opticalDate1 || (sec1 && sec1.date) || null, opticalDate2 || (sec2 && sec2.date) || null],
+      consensus: !!(s1 && s1.ndvi) || !!(s2 && s2.ndvi),
+      consensusSecondaryDates: [sec1Date, sec2Date],
       quota
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
