@@ -859,6 +859,11 @@ app.post('/api/v2/change', async (req, res) => {
       fetchOptical({ ring, bbox, date: date1, width, height }),
       fetchOptical({ ring, bbox, date: date2, width, height })
     ]);
+    const areaPx = areaPerPixel(bbox, width, height);
+    const cls = OPTICAL_CLASSES.map(c => ({ ...c }));
+    const c1 = classifyMasked(o1.ndvi, mask, cls);
+    const c2 = classifyMasked(o2.ndvi, mask, cls);
+    const comp = compareCategories(c1, c2, mask, cls, areaPx);
     const r1 = await findRadarDate(bbox);
     let radar = null;
     if (r1) {
@@ -904,6 +909,7 @@ app.post('/api/v2/change', async (req, res) => {
         validPixels: agree.valid, agreementPct
       },
       bbox, width, height,
+      classes: comp.rows,
       quota
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
