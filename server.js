@@ -477,6 +477,116 @@ function medianFilter(arr, width, height, radius = 2) {
   }
   return out;
 }
+
+// ============================================================
+// CONSENSO DUAL-SENSOR (Bosque = NDVI alto Y RVI alto)
+// ============================================================
+// Caché en memoria de rasters (S2 óptico / S1 radar) por polígono+fecha+resolución.
+// Evita descargar el sensor complementario varias veces (~15 min).
+const CONSENSUS_TTL_MS = 15 * 60 * 1000;
+const rasterCache = new Map();
+function consensusCacheKey(prefix, ring, date, width, height, extra = '') {
+  return `${prefix}|${polygonHash(ring)}|${date}|${width}x${height}|${extra}`;
+}
+function consensusCacheGet(key) {
+  const e = rasterCache.get(key);
+  if (e && Date.now() - e.t < CONSENSUS_TTL_MS) return e.v;
+  if (e) rasterCache.delete(key);
+  return null;
+}
+function consensusCacheSet(key, v) {
+  rasterCache.set(key, { v, t: Date.now() });
+  if (rasterCache.size > 500) {
+    const now = Date.now();
+    for (const [k, e] of rasterCache) if (now - e.t > CONSENSUS_TTL_MS) rasterCache.delete(k);
+  }
+}
+async function cachedOptical({ ring, bbox, date, width, height }) {
+  const key = consensusCacheKey('s2', ring, date, width, height);
+  const hit = consensusCacheGet(key);
+  if (hit) return hit;
+  const v = await fetchOptical({ ring, bbox, date, width, height });
+  consensusCacheSet(key, v);
+  return v;
+}
+async function cachedRvi({ ring, bbox, date, width, height, polarization = 'DV' }) {
+  const key = consensusCacheKey('s1', ring, date, width, height, polarization);
+  const hit = consensusCacheGet(key);
+  if (hit) return hit;
+  const v = await fetchRvi({ ring, bbox, date, width, height, polarization });
+  consensusCacheSet(key, v);
+  return v;
+}
+// Mejor esfuerzo: RVI cercano a la fecha óptica (nunca revienta la petición principal).
+async function rviNearOptical({ ring, bbox, date, width, height, polarization = 'DV' }) {
+  try {
+    const near = await findRadarDateNear(bbox, date);
+    if (!near) return null;
+    const res = await cachedRvi({ ring, bbox, date: near.date, width, height, polarization });
+    return { rvi: res.rvi, date: near.date };
+  } catch (e) { return null; }
+}
+// Mejor esfuerzo: NDVI cercano a la fecha radar (nunca revienta la petición principal).
+async function opticalNearRadar({ ring, bbox, date, width, height }) {
+  try {
+    const near = await findNearestOpticalDate(bbox, date, 30);
+    if (!near) return null;
+    const res = await cachedOptical({ ring, bbox, date: near, width, height });
+    return { ndvi: res.ndvi, cloud: res.cloud, date: near };
+  } catch (e) { return null; }
+}
+// Clasifica con la banda primaria pero degrada "Bosque" a "Vegetación densa (no boscosa)"
+// cuando el sensor secundario no alcanza su propio umbral de bosque (regla estricta AND:
+// un píxel sin dato del secundario tampoco se confirma como bosque).
+function consensusClassify(primaryVals, secondaryVals, mask, primaryClasses, secondaryClasses) {
+  if (!secondaryVals) return classifyMasked(primaryVals, mask, primaryClasses);
+  const n = primaryClasses.length;
+  const out = new Uint8Array(primaryVals.length).fill(255);
+  const pForest = primaryClasses.map((c, i) => c.forest ? i : -1).filter(i => i >= 0);
+  const sForest = secondaryClasses.map((c, i) => c.forest ? i : -1).filter(i => i >= 0);
+  const demoteTo = primaryClasses.findIndex(c => c.forest) - 1;
+  for (let k = 0; k < mask.length; k++) {
+    const p = mask[k];
+    const v = primaryVals[p];
+    if (v === undefined || v === null || Number.isNaN(v)) continue;
+    let i = -1;
+    for (let c = 0; c < n; c++) {
+      if (v >= primaryClasses[c].from && v < primaryClasses[c].to) { i = c; break; }
+    }
+    if (i < 0) continue;
+    if (pForest.includes(i)) {
+      const sv = secondaryVals[p];
+      if (sv === undefined || sv === null || Number.isNaN(sv)) { i = demoteTo; }
+      else {
+        let j = -1;
+        for (let c = 0; c < secondaryClasses.length; c++) {
+          if (sv >= secondaryClasses[c].from && sv < secondaryClasses[c].to) { j = c; break; }
+        }
+        if (j < 0 || !sForest.includes(j)) i = demoteTo;
+      }
+    }
+    out[p] = i;
+  }
+  return out;
+}
+// Conteo de áreas directamente desde un raster de clases (resultado del consenso).
+function classAreasFromRaster(cls, mask, classes, areaPerPx) {
+  const cnt = new Array(classes.length).fill(0);
+  for (let k = 0; k < mask.length; k++) {
+    const i = cls[mask[k]];
+    if (i >= 0 && i < classes.length) cnt[i]++;
+  }
+  const areas = classes.map((c, i) => ({ ...c, pixels: cnt[i], areaHa: 0, pct: 0 }));
+  let total = 0;
+  for (const c of areas) total += c.pixels;
+  for (const c of areas) {
+    c.areaHa = (c.pixels * areaPerPx) / 10000;
+    c.pct = total ? (c.pixels / total) * 100 : 0;
+    delete c.from; delete c.to;
+  }
+  return { classes: areas, totalPixels: total, areaHa: (total * areaPerPx) / 10000 };
+}
+
 // Backscatter VV/VH en dB (para el reporte) — misma escena
 const DB_EVAL = `//VERSION=3
 function setup() {
@@ -729,20 +839,24 @@ app.post('/api/v2/image', async (req, res) => {
 
     // ---- NDVI (con o sin composite server-side) ----
     if (!composite || composite <= 0) {
-      const { ndvi, cloud } = await fetchOptical({ ring, bbox, date, width, height });
+      const { ndvi, cloud } = await cachedOptical({ ring, bbox, date, width, height });
       const mask = maskIndices(width, height, bbox, ring);
       const cp = cloudPctOf(cloud, mask);
       const st = statsOf(ndvi, mask);
       const hist = histogramOf(ndvi, mask, 60);
       const otsu = otsuFromHist(hist.counts, hist.total);
       const areaPx = areaPerPixel(bbox, width, height);
-      const cls = classAreas(ndvi, mask, OPTICAL_CLASSES.map(c => ({ ...c })), areaPx);
-      const image = toPng(ndvi, width, height, colorNdvi, mask);
+      const cls = OPTICAL_CLASSES.map(c => ({ ...c }));
+      const secondary = await rviNearOptical({ ring, bbox, date, width, height });
+      const clsRaster = consensusClassify(ndvi, secondary && secondary.rvi, mask, cls, RVI_CLASSES);
+      const areas = classAreasFromRaster(clsRaster, mask, cls, areaPx);
+      const image = toPng(clsRaster, width, height, colorClass(cls), mask);
       const quota = await commitPolygon(req, res, m);
       return res.json({
         image, usedDate: date, bbox, width, height, mode: 'ndvi',
         stats: { mean: st.mean, otsu },
-        histogram: hist, areaPerPixel: areaPx, cloudPct: cp.cloudPct, classes: cls.classes, areaHa: cls.areaHa,
+        histogram: hist, areaPerPixel: areaPx, cloudPct: cp.cloudPct, classes: areas.classes, areaHa: areas.areaHa,
+        consensus: !!secondary, consensusSensorDate: secondary ? secondary.date : null,
         quota
       });
     }
@@ -799,14 +913,18 @@ app.post('/api/v2/image', async (req, res) => {
     const hist = histogramOf(median, mask, 60);
     const otsu = otsuFromHist(hist.counts, hist.total);
     const areaPx = areaPerPixel(bbox, width, height);
-    const cls = classAreas(median, mask, OPTICAL_CLASSES.map(c => ({ ...c })), areaPx);
-    const image = toPng(median, width, height, colorNdvi, mask);
+    const cls = OPTICAL_CLASSES.map(c => ({ ...c }));
+    const secondary = await rviNearOptical({ ring, bbox, date, width, height });
+    const clsRaster = consensusClassify(median, secondary && secondary.rvi, mask, cls, RVI_CLASSES);
+    const areas = classAreasFromRaster(clsRaster, mask, cls, areaPx);
+    const image = toPng(clsRaster, width, height, colorClass(cls), mask);
     const bestCloud = used.reduce((m, u) => (u.polygonCloud === null ? m : Math.min(m, u.polygonCloud)), 100);
     const quota = await commitPolygon(req, res, m);
     res.json({
       image, usedDate: date, usedDates: used, bbox, width, height, mode: 'ndvi', composite: true,
       stats: { mean: st.mean, otsu },
-      histogram: hist, areaPerPixel: areaPx, cloudPct: bestCloud, classes: cls.classes, areaHa: cls.areaHa,
+      histogram: hist, areaPerPixel: areaPx, cloudPct: bestCloud, classes: areas.classes, areaHa: areas.areaHa,
+      consensus: !!secondary, consensusSensorDate: secondary ? secondary.date : null,
       quota
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -844,14 +962,14 @@ app.post('/api/v2/radar-stats', async (req, res) => {
       if (!found) return res.status(404).json({ error: 'No se encontraron escenas radar dual-pol en el área.' });
       d = found.date; pol = found.pol; auto = true;
     }
-    let { rvi } = await fetchRvi({ ring, bbox, date: d, width, height, polarization: pol });
+    let { rvi } = await cachedRvi({ ring, bbox, date: d, width, height, polarization: pol });
     const mask = maskIndices(width, height, bbox, ring);
     let st = statsOf(rvi, mask);
     if (st.n === 0 && !auto) {
       const near = await findRadarDateNear(bbox, d);
       if (near) {
         d = near.date;
-        ({ rvi } = await fetchRvi({ ring, bbox, date: d, width, height, polarization: pol }));
+        ({ rvi } = await cachedRvi({ ring, bbox, date: d, width, height, polarization: pol }));
         st = statsOf(rvi, mask);
       }
     }
@@ -859,8 +977,11 @@ app.post('/api/v2/radar-stats', async (req, res) => {
     const hist = histogramOf(rvi, mask, 60);
     const otsu = otsuFromHist(hist.counts, hist.total);
     const areaPx = areaPerPixel(bbox, width, height);
-    const cls = classAreas(rvi, mask, RVI_CLASSES.map(c => ({ ...c })), areaPx);
-    const image = toPng(rvi, width, height, colorRvi, mask);
+    const cls = RVI_CLASSES.map(c => ({ ...c }));
+    const secondary = await opticalNearRadar({ ring, bbox, date: d, width, height });
+    const clsRaster = consensusClassify(rvi, secondary && secondary.ndvi, mask, cls, OPTICAL_CLASSES);
+    const areas = classAreasFromRaster(clsRaster, mask, cls, areaPx);
+    const image = toPng(clsRaster, width, height, colorClass(cls), mask);
     let vvDb = null, vhDb = null;
     try {
       const db = await fetchBackscatterDb({ ring, bbox, date: d, width, height, polarization: pol });
@@ -871,7 +992,8 @@ app.post('/api/v2/radar-stats', async (req, res) => {
     res.json({
       image, usedDate: d, polarization: pol, bbox, width, height,
       stats: { rviMean: st.mean, vvDb, vhDb, otsu },
-      histogram: hist, areaPerPixel: areaPx, classes: cls.classes, areaHa: cls.areaHa,
+      histogram: hist, areaPerPixel: areaPx, classes: areas.classes, areaHa: areas.areaHa,
+      consensus: !!secondary, consensusSensorDate: secondary ? secondary.date : null,
       quota
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -890,25 +1012,27 @@ app.post('/api/v2/change', async (req, res) => {
     const mask = maskIndices(width, height, bbox, ring);
 
     const [o1, o2] = await Promise.all([
-      fetchOptical({ ring, bbox, date: date1, width, height }),
-      fetchOptical({ ring, bbox, date: date2, width, height })
+      cachedOptical({ ring, bbox, date: date1, width, height }),
+      cachedOptical({ ring, bbox, date: date2, width, height })
     ]);
     const areaPx = areaPerPixel(bbox, width, height);
     const cls = OPTICAL_CLASSES.map(c => ({ ...c }));
-    const c1 = classifyMasked(o1.ndvi, mask, cls);
-    const c2 = classifyMasked(o2.ndvi, mask, cls);
-    const comp = compareCategories(c1, c2, mask, cls, areaPx);
+    let c1 = classifyMasked(o1.ndvi, mask, cls);
+    let c2 = classifyMasked(o2.ndvi, mask, cls);
     const r1 = await findRadarDate(bbox);
     let radar = null;
     if (r1) {
       const r2 = await findRadarDateNear(bbox, date2);
       const pol = r1.pol;
       const [rad1, rad2] = await Promise.all([
-        fetchRvi({ ring, bbox, date: r1.date, width, height, polarization: pol }),
-        fetchRvi({ ring, bbox, date: (r2 || r1).date, width, height, polarization: pol })
+        cachedRvi({ ring, bbox, date: r1.date, width, height, polarization: pol }),
+        cachedRvi({ ring, bbox, date: (r2 || r1).date, width, height, polarization: pol })
       ]);
       radar = { rvi1: rad1.rvi, rvi2: rad2.rvi, date1: r1.date, date2: (r2 || r1).date, pol };
+      c1 = consensusClassify(o1.ndvi, rad1.rvi, mask, cls, RVI_CLASSES);
+      c2 = consensusClassify(o2.ndvi, rad2.rvi, mask, cls, RVI_CLASSES);
     }
+    const comp = compareCategories(c1, c2, mask, cls, areaPx);
 
     const dNdvi = new Float32Array(width * height).fill(NaN);
     const dRvi = new Float32Array(width * height).fill(NaN);
@@ -944,6 +1068,7 @@ app.post('/api/v2/change', async (req, res) => {
       },
       bbox, width, height,
       classes: comp.rows,
+      consensus: !!radar,
       quota
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -1126,28 +1251,28 @@ app.post('/api/v2/compare', async (req, res) => {
     const areaPx = areaPerPixel(bbox, width, height);
 
     const [o1, o2] = await Promise.all([
-      fetchOptical({ ring, bbox, date: date1, width, height }),
-      fetchOptical({ ring, bbox, date: date2, width, height })
+      cachedOptical({ ring, bbox, date: date1, width, height }),
+      cachedOptical({ ring, bbox, date: date2, width, height })
     ]);
     const cls = OPTICAL_CLASSES.map(c => ({ ...c }));
-    const c1 = classifyMasked(o1.ndvi, mask, cls);
-    const c2 = classifyMasked(o2.ndvi, mask, cls);
+    let c1 = classifyMasked(o1.ndvi, mask, cls);
+    let c2 = classifyMasked(o2.ndvi, mask, cls);
     const cp1 = cloudPctOf(o1.cloud, mask), cp2 = cloudPctOf(o2.cloud, mask);
-    const comp = compareCategories(c1, c2, mask, cls, areaPx);
 
-    // Radar comparativo (si hay escenas cerca de ambas fechas)
+    // Radar comparativo (si hay escenas cerca de ambas fechas): alimenta el
+    // consenso dual-sensor sin descargar nada extra (reutiliza ra1/ra2 y o1/o2).
     let radar = null;
     try {
       const r1 = await findRadarDateNear(bbox, date1);
       const r2 = await findRadarDateNear(bbox, date2);
       if (r1 && r2 && r1.date !== r2.date) {
         const [ra1, ra2] = await Promise.all([
-          fetchRvi({ ring, bbox, date: r1.date, width, height, polarization: 'DV' }),
-          fetchRvi({ ring, bbox, date: r2.date, width, height, polarization: 'DV' })
+          cachedRvi({ ring, bbox, date: r1.date, width, height, polarization: 'DV' }),
+          cachedRvi({ ring, bbox, date: r2.date, width, height, polarization: 'DV' })
         ]);
         const rcls = RVI_CLASSES.map(c => ({ ...c }));
-        const rc1 = classifyMasked(ra1.rvi, mask, rcls);
-        const rc2 = classifyMasked(ra2.rvi, mask, rcls);
+        const rc1 = consensusClassify(ra1.rvi, o1.ndvi, mask, rcls, cls);
+        const rc2 = consensusClassify(ra2.rvi, o2.ndvi, mask, rcls, cls);
         const rcomp = compareCategories(rc1, rc2, mask, rcls, areaPx);
         radar = {
           date1: r1.date, date2: r2.date, polarization: 'DV',
@@ -1157,9 +1282,12 @@ app.post('/api/v2/compare', async (req, res) => {
           image2: toPng(rc2, width, height, colorClass(rcls), mask),
           changeImage: toPng(rcomp.codes, width, height, colorChangeMap, mask)
         };
+        c1 = consensusClassify(o1.ndvi, ra1.rvi, mask, cls, rcls);
+        c2 = consensusClassify(o2.ndvi, ra2.rvi, mask, cls, rcls);
       }
     } catch (e) { /* radar opcional */ }
 
+    const comp = compareCategories(c1, c2, mask, cls, areaPx);
     const quota = await commitPolygon(req, res, m);
     res.json({
       optical: {
@@ -1176,6 +1304,7 @@ app.post('/api/v2/compare', async (req, res) => {
       },
       radar,
       bbox, width, height,
+      consensus: !!radar,
       quota
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -1229,12 +1358,19 @@ app.post('/api/v2/compare-rvi', async (req, res) => {
     const mask = maskIndices(width, height, bbox, ring);
     const areaPx = areaPerPixel(bbox, width, height);
     const [r1, r2] = await Promise.all([
-      fetchRvi({ ring, bbox, date: date1, width, height, polarization: 'DV' }),
-      fetchRvi({ ring, bbox, date: date2, width, height, polarization: 'DV' })
+      cachedRvi({ ring, bbox, date: date1, width, height, polarization: 'DV' }),
+      cachedRvi({ ring, bbox, date: date2, width, height, polarization: 'DV' })
     ]);
     const rcls = RVI_CLASSES.map(c => ({ ...c }));
-    const rc1 = classifyMasked(r1.rvi, mask, rcls);
-    const rc2 = classifyMasked(r2.rvi, mask, rcls);
+    let rc1 = classifyMasked(r1.rvi, mask, rcls);
+    let rc2 = classifyMasked(r2.rvi, mask, rcls);
+    // Consenso dual: busca el S2 cercano a cada fecha radar (best-effort).
+    const [sec1, sec2] = await Promise.all([
+      opticalNearRadar({ ring, bbox, date: date1, width, height }),
+      opticalNearRadar({ ring, bbox, date: date2, width, height })
+    ]);
+    rc1 = consensusClassify(r1.rvi, sec1 && sec1.ndvi, mask, rcls, OPTICAL_CLASSES);
+    rc2 = consensusClassify(r2.rvi, sec2 && sec2.ndvi, mask, rcls, OPTICAL_CLASSES);
     const comp = compareCategories(rc1, rc2, mask, rcls, areaPx);
     const quota = await commitPolygon(req, res, m);
     res.json({
@@ -1248,6 +1384,8 @@ app.post('/api/v2/compare-rvi', async (req, res) => {
         changeImage: toPng(comp.codes, width, height, colorChangeMap, mask)
       },
       bbox, width, height,
+      consensus: !!(sec1 && sec1.ndvi) || !!(sec2 && sec2.ndvi),
+      consensusSecondaryDates: [sec1 ? sec1.date : null, sec2 ? sec2.date : null],
       quota
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
