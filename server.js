@@ -423,9 +423,10 @@ async function findRadarDate(bbox) {
     datetime: `${start.toISOString().split('T')[0]}T00:00:00Z/${now.toISOString().split('T')[0]}T23:59:59Z`,
     limit: 30
   });
+  // Solo 1SDV (VV/VH): el RVI necesita esas bandas; las escenas 1SDH (HH/HV) no sirven.
   for (const f of data.features) {
-    if (f.id.includes('1SDV') || f.id.includes('1SDH')) {
-      return { date: f.properties.datetime.split('T')[0], id: f.id, pol: f.id.includes('1SDV') ? 'DV' : 'DH' };
+    if (f.id && f.id.includes('1SDV')) {
+      return { date: f.properties.datetime.split('T')[0], id: f.id, pol: 'DV' };
     }
   }
   return null;
@@ -1084,8 +1085,16 @@ async function findRadarDateNear(bbox, date) {
     datetime: `${from.toISOString().split('T')[0]}T00:00:00Z/${to.toISOString().split('T')[0]}T23:59:59Z`,
     limit: 10
   });
-  for (const f of data.features) if (f.id.includes('1SDV') || f.id.includes('1SDH')) return { date: f.properties.datetime.split('T')[0], id: f.id };
-  return null;
+  // Solo 1SDV (VV/VH) y la fecha más cercana a la referencia: así el "Comparar NDVI"
+  // usa la misma escena radar que elegiría el usuario en la pestaña RVI.
+  let best = null, bestDist = Infinity;
+  for (const f of data.features) {
+    if (!f.id || !f.id.includes('1SDV')) continue;
+    const dd = f.properties.datetime.split('T')[0];
+    const dist = Math.abs(new Date(dd) - d);
+    if (dist < bestDist) { bestDist = dist; best = { date: dd, id: f.id }; }
+  }
+  return best;
 }
 
 // 6) Serie temporal NDVI
@@ -1259,23 +1268,29 @@ app.post('/api/v2/compare', async (req, res) => {
     let c2 = classifyMasked(o2.ndvi, mask, cls);
     const cp1 = cloudPctOf(o1.cloud, mask), cp2 = cloudPctOf(o2.cloud, mask);
 
+    const radarDate1 = req.body.radarDate1 || null;
+    const radarDate2 = req.body.radarDate2 || null;
+    const radarPol = req.body.radarPol || 'DV';
+
     // Radar comparativo (si hay escenas cerca de ambas fechas): alimenta el
     // consenso dual-sensor sin descargar nada extra (reutiliza ra1/ra2 y o1/o2).
+    // Si el frontend envía radarDate1/2 usa esas fechas exactas (las mismas de la
+    // pestaña RVI) para que ambas comparaciones usen las mismas escenas.
     let radar = null;
     try {
-      const r1 = await findRadarDateNear(bbox, date1);
-      const r2 = await findRadarDateNear(bbox, date2);
+      const r1 = radarDate1 ? { date: radarDate1 } : await findRadarDateNear(bbox, date1);
+      const r2 = radarDate2 ? { date: radarDate2 } : await findRadarDateNear(bbox, date2);
       if (r1 && r2 && r1.date !== r2.date) {
         const [ra1, ra2] = await Promise.all([
-          cachedRvi({ ring, bbox, date: r1.date, width, height, polarization: 'DV' }),
-          cachedRvi({ ring, bbox, date: r2.date, width, height, polarization: 'DV' })
+          cachedRvi({ ring, bbox, date: r1.date, width, height, polarization: radarPol }),
+          cachedRvi({ ring, bbox, date: r2.date, width, height, polarization: radarPol })
         ]);
         const rcls = RVI_CLASSES.map(c => ({ ...c }));
         const rc1 = consensusClassify(ra1.rvi, o1.ndvi, mask, rcls, cls);
         const rc2 = consensusClassify(ra2.rvi, o2.ndvi, mask, rcls, cls);
         const rcomp = compareCategories(rc1, rc2, mask, rcls, areaPx);
         radar = {
-          date1: r1.date, date2: r2.date, polarization: 'DV',
+          date1: r1.date, date2: r2.date, polarization: radarPol,
           forest: rcomp.forest, classes: rcomp.rows, change: rcomp.change,
           agreementPct: rcomp.agreementPct, changedPct: rcomp.changedPct,
           image1: toPng(rc1, width, height, colorClass(rcls), mask),
@@ -1330,13 +1345,14 @@ app.post('/api/v2/radar-dates', async (req, res) => {
     const seen = new Set();
     const dates = [];
     for (const f of (data.features || [])) {
-      if (!(f.id && (f.id.includes('1SDV') || f.id.includes('1SDH')))) continue;
+      // Solo 1SDV (VV/VH): el RVI requiere esas bandas; 1SDH (HH/HV) no es usable.
+      if (!(f.id && f.id.includes('1SDV'))) continue;
       const d = (f.properties.datetime || '').split('T')[0];
       if (!d || seen.has(d)) continue;
       seen.add(d);
       dates.push({
         date: d,
-        polarization: f.id.includes('1SDV') ? 'DV' : 'DH',
+        polarization: 'DV',
         relativeOrbit: (f.properties && f.properties['sat:relative_orbit']) || null
       });
     }
@@ -1364,10 +1380,13 @@ app.post('/api/v2/compare-rvi', async (req, res) => {
     const rcls = RVI_CLASSES.map(c => ({ ...c }));
     let rc1 = classifyMasked(r1.rvi, mask, rcls);
     let rc2 = classifyMasked(r2.rvi, mask, rcls);
-    // Consenso dual: busca el S2 cercano a cada fecha radar (best-effort).
+    // Consenso dual: si el frontend envía opticalDate1/2 usa esas fechas S2 exactas
+    // (las mismas de la pestaña "Comparar NDVI"); si no, busca la S2 más cercana.
+    const opticalDate1 = req.body.opticalDate1 || null;
+    const opticalDate2 = req.body.opticalDate2 || null;
     const [sec1, sec2] = await Promise.all([
-      opticalNearRadar({ ring, bbox, date: date1, width, height }),
-      opticalNearRadar({ ring, bbox, date: date2, width, height })
+      opticalDate1 ? cachedOptical({ ring, bbox, date: opticalDate1, width, height }) : opticalNearRadar({ ring, bbox, date: date1, width, height }),
+      opticalDate2 ? cachedOptical({ ring, bbox, date: opticalDate2, width, height }) : opticalNearRadar({ ring, bbox, date: date2, width, height })
     ]);
     rc1 = consensusClassify(r1.rvi, sec1 && sec1.ndvi, mask, rcls, OPTICAL_CLASSES);
     rc2 = consensusClassify(r2.rvi, sec2 && sec2.ndvi, mask, rcls, OPTICAL_CLASSES);
@@ -1385,7 +1404,7 @@ app.post('/api/v2/compare-rvi', async (req, res) => {
       },
       bbox, width, height,
       consensus: !!(sec1 && sec1.ndvi) || !!(sec2 && sec2.ndvi),
-      consensusSecondaryDates: [sec1 ? sec1.date : null, sec2 ? sec2.date : null],
+      consensusSecondaryDates: [opticalDate1 || (sec1 && sec1.date) || null, opticalDate2 || (sec2 && sec2.date) || null],
       quota
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
