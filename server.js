@@ -568,15 +568,15 @@ function toPng(values, width, height, colorFn, idx) {
 const colorNdvi = (v) => {
   if (v < 0.55) return [37, 99, 235];        // agua / sin vegetación
   if (v < 0.68) return [194, 178, 128];      // suelo desnudo
-  if (v < 0.75) return [163, 217, 119];      // escasa
-  if (v < 0.8) return [76, 175, 80];         // moderada
+  if (v < 0.75) return [227, 198, 26];       // escasa
+  if (v < 0.8) return [47, 158, 68];         // moderada
   return [20, 83, 45];                       // bosque denso
 };
 const colorRvi = (v) => {
   if (v < 0.15) return [37, 99, 235];
   if (v < 0.3) return [194, 178, 128];
-  if (v < 0.5) return [163, 217, 119];
-  if (v < 0.6) return [76, 175, 80];
+  if (v < 0.5) return [227, 198, 26];
+  if (v < 0.6) return [47, 158, 68];
   return [20, 83, 45];
 };
 const colorDiff = (v) => {
@@ -592,15 +592,15 @@ const colorDiff = (v) => {
 const OPTICAL_CLASSES = [
   { id: 'water', label: 'Agua / sin vegetación', from: -Infinity, to: 0.55, color: '#2563eb' },
   { id: 'barren', label: 'Suelo desnudo', from: 0.55, to: 0.68, color: '#c2b280' },
-  { id: 'sparse', label: 'Vegetación escasa', from: 0.68, to: 0.75, color: '#a3d977' },
-  { id: 'moderate', label: 'Vegetación moderada', from: 0.75, to: 0.8, color: '#4caf50' },
+  { id: 'sparse', label: 'Vegetación escasa', from: 0.68, to: 0.75, color: '#e3c61a' },
+  { id: 'moderate', label: 'Vegetación moderada', from: 0.75, to: 0.8, color: '#2f9e44' },
   { id: 'dense', label: 'Bosque / vegetación densa', from: 0.8, to: Infinity, color: '#14532d' }
 ];
 const RVI_CLASSES = [
   { id: 'water', label: 'Agua / sin vegetación', from: -Infinity, to: 0.15, color: '#2563eb' },
   { id: 'bare', label: 'Suelo desnudo', from: 0.15, to: 0.3, color: '#c2b280' },
-  { id: 'grass', label: 'Vegetación escasa', from: 0.3, to: 0.5, color: '#a3d977' },
-  { id: 'shrub', label: 'Vegetación moderada', from: 0.5, to: 0.6, color: '#4caf50' },
+  { id: 'grass', label: 'Vegetación escasa', from: 0.3, to: 0.5, color: '#e3c61a' },
+  { id: 'shrub', label: 'Vegetación moderada', from: 0.5, to: 0.6, color: '#2f9e44' },
   { id: 'forest', label: 'Bosque / vegetación densa', from: 0.6, to: Infinity, color: '#14532d' }
 ];
 
