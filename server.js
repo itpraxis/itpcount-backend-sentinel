@@ -1034,6 +1034,7 @@ app.post('/api/v2/change', async (req, res) => {
       c2 = consensusClassify(o2.ndvi, rad2.rvi, mask, cls, RVI_CLASSES);
     }
     const comp = compareCategories(c1, c2, mask, cls, areaPx);
+    const robust = robustChange(c1, c2, o1.ndvi, o2.ndvi, mask, cls, areaPx);
 
     const dNdvi = new Float32Array(width * height).fill(NaN);
     const dRvi = new Float32Array(width * height).fill(NaN);
@@ -1069,6 +1070,7 @@ app.post('/api/v2/change', async (req, res) => {
       },
       bbox, width, height,
       classes: comp.rows,
+      robust,
       consensus: !!radar,
       quota
     });
@@ -1246,6 +1248,35 @@ const colorChangeMap = (c) => {
   return [0, 0, 0];
 };
 
+// Cambio "robusto" contra el churn: un píxel solo se cuenta como perdido/ganado si
+// cruza el umbral de bosque del sensor primario por más que la banda de tolerancia
+// (histéresis). Los que oscilan alrededor del umbral (NDVI≈0.85, RVI≈0.70) no se
+// contabilizan como cambio. Se construye sobre las clases finales (consenso si hubo
+// radar), por lo que no altera las superficies por categoría ya mostradas.
+const FOREST_BAND = 0.03;
+function robustChange(c1, c2, v1, v2, mask, classes, areaPerPx, band = FOREST_BAND) {
+  const f = classes.findIndex(c => c.forest);
+  const out = { lost: 0, gained: 0, valid: 0 };
+  if (f >= 0) {
+    const thr = classes[f].from;
+    for (let k = 0; k < mask.length; k++) {
+      const p = mask[k];
+      const a = v1[p], b = v2[p];
+      if (a === undefined || a === null || b === undefined || b === null || Number.isNaN(a) || Number.isNaN(b)) continue;
+      out.valid++;
+      const was = c1[p] === f, is = c2[p] === f;
+      if (was && !is) { if (a >= thr + band && b <= thr - band) out.lost++; }
+      else if (!was && is) { if (a <= thr - band && b >= thr + band) out.gained++; }
+    }
+  }
+  const toHa = (c) => Math.round(((c * areaPerPx) / 10000) * 100) / 100;
+  return {
+    lost: toHa(out.lost), gained: toHa(out.gained), net: toHa(out.gained - out.lost),
+    band, validPixels: out.valid,
+    changedPct: out.valid ? Math.round(((out.lost + out.gained) / out.valid) * 1000) / 10 : null
+  };
+}
+
 // 8) Comparar superficies por categoría entre dos fechas
 app.post('/api/v2/compare', async (req, res) => {
   try {
@@ -1292,10 +1323,12 @@ app.post('/api/v2/compare', async (req, res) => {
         const rc1 = consensusClassify(ra1.rvi, o1.ndvi, mask, rcls, cls);
         const rc2 = consensusClassify(ra2.rvi, o2.ndvi, mask, rcls, cls);
         const rcomp = compareCategories(rc1, rc2, mask, rcls, areaPx);
+        const rrobust = robustChange(rc1, rc2, ra1.rvi, ra2.rvi, mask, rcls, areaPx);
         radar = {
           date1: r1.date, date2: r2.date, polarization: radarPol,
           forest: rcomp.forest, classes: rcomp.rows, change: rcomp.change,
           agreementPct: rcomp.agreementPct, changedPct: rcomp.changedPct,
+          robust: rrobust,
           image1: toPng(rc1, width, height, colorClass(rcls), mask),
           image2: toPng(rc2, width, height, colorClass(rcls), mask),
           changeImage: toPng(rcomp.codes, width, height, colorChangeMap, mask)
@@ -1306,6 +1339,7 @@ app.post('/api/v2/compare', async (req, res) => {
     } catch (e) { /* radar opcional */ }
 
     const comp = compareCategories(c1, c2, mask, cls, areaPx);
+    const robust = robustChange(c1, c2, o1.ndvi, o2.ndvi, mask, cls, areaPx);
     const quota = await commitPolygon(req, res, m);
     res.json({
       optical: {
@@ -1314,6 +1348,7 @@ app.post('/api/v2/compare', async (req, res) => {
         forest: comp.forest,
         classes: comp.rows,
         change: comp.change,
+        robust,
         agreementPct: comp.agreementPct, changedPct: comp.changedPct,
         areaPerPixel: areaPx,
         image1: toPng(c1, width, height, colorClass(cls), mask),
@@ -1399,6 +1434,7 @@ app.post('/api/v2/compare-rvi', async (req, res) => {
     rc1 = consensusClassify(r1.rvi, s1 && s1.ndvi, mask, rcls, OPTICAL_CLASSES);
     rc2 = consensusClassify(r2.rvi, s2 && s2.ndvi, mask, rcls, OPTICAL_CLASSES);
     const comp = compareCategories(rc1, rc2, mask, rcls, areaPx);
+    const robust = robustChange(rc1, rc2, r1.rvi, r2.rvi, mask, rcls, areaPx);
     const sec1Date = inWindow(date1, opticalDate1) ? opticalDate1 : (s1 && s1.date);
     const sec2Date = inWindow(date2, opticalDate2) ? opticalDate2 : (s2 && s2.date);
     const quota = await commitPolygon(req, res, m);
@@ -1407,6 +1443,7 @@ app.post('/api/v2/compare-rvi', async (req, res) => {
         date1, date2, polarization: 'DV',
         forest: comp.forest, classes: comp.rows, change: comp.change,
         agreementPct: comp.agreementPct, changedPct: comp.changedPct,
+        robust,
         areaPerPixel: areaPx,
         image1: toPng(rc1, width, height, colorClass(rcls), mask),
         image2: toPng(rc2, width, height, colorClass(rcls), mask),
