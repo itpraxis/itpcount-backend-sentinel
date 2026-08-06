@@ -600,14 +600,16 @@ const colorNdvi = (v) => {
   if (v < 0.68) return [194, 178, 128];      // suelo desnudo
   if (v < 0.75) return [227, 198, 26];       // escasa
   if (v < 0.8) return [47, 158, 68];         // moderada
-  return [20, 83, 45];                       // bosque denso
+  if (v < 0.85) return [22, 101, 52];        // vegetación densa (no boscosa)
+  return [5, 46, 22];                        // bosque
 };
 const colorRvi = (v) => {
   if (v < 0.15) return [37, 99, 235];
   if (v < 0.3) return [194, 178, 128];
   if (v < 0.5) return [227, 198, 26];
   if (v < 0.6) return [47, 158, 68];
-  return [20, 83, 45];
+  if (v < 0.7) return [22, 101, 52];
+  return [5, 46, 22];
 };
 const colorDiff = (v) => {
   const t = Math.max(-1, Math.min(1, v));
@@ -624,14 +626,16 @@ const OPTICAL_CLASSES = [
   { id: 'barren', label: 'Suelo desnudo', from: 0.55, to: 0.68, color: '#c2b280' },
   { id: 'sparse', label: 'Vegetación escasa', from: 0.68, to: 0.75, color: '#e3c61a' },
   { id: 'moderate', label: 'Vegetación moderada', from: 0.75, to: 0.8, color: '#2f9e44' },
-  { id: 'dense', label: 'Bosque / vegetación densa', from: 0.8, to: Infinity, color: '#14532d' }
+  { id: 'vegdense', label: 'Vegetación densa (no boscosa)', from: 0.8, to: 0.85, color: '#166534' },
+  { id: 'forest', label: 'Bosque', from: 0.85, to: Infinity, color: '#052e16', forest: true }
 ];
 const RVI_CLASSES = [
   { id: 'water', label: 'Agua / sin vegetación', from: -Infinity, to: 0.15, color: '#2563eb' },
   { id: 'bare', label: 'Suelo desnudo', from: 0.15, to: 0.3, color: '#c2b280' },
   { id: 'grass', label: 'Vegetación escasa', from: 0.3, to: 0.5, color: '#e3c61a' },
   { id: 'shrub', label: 'Vegetación moderada', from: 0.5, to: 0.6, color: '#2f9e44' },
-  { id: 'forest', label: 'Bosque / vegetación densa', from: 0.6, to: Infinity, color: '#14532d' }
+  { id: 'vegdense', label: 'Vegetación densa (no boscosa)', from: 0.6, to: 0.7, color: '#166534' },
+  { id: 'forest', label: 'Bosque', from: 0.7, to: Infinity, color: '#052e16', forest: true }
 ];
 
 // ============================================================
@@ -1040,7 +1044,8 @@ function colorClass(classes) {
 }
 function compareCategories(c1, c2, mask, classes, areaPerPx) {
   const n = classes.length;
-  const forestId = n - 1;
+  const forestIds = classes.map((c, i) => c.forest ? i : -1).filter(i => i >= 0);
+  const isForest = (i) => forestIds.includes(i);
   const cnt1 = new Array(n).fill(0), cnt2 = new Array(n).fill(0);
   const matrix = Array.from({ length: n }, () => new Array(n).fill(0));
   let valid = 0, same = 0;
@@ -1062,17 +1067,21 @@ function compareCategories(c1, c2, mask, classes, areaPerPx) {
   }));
   let lost = 0, gained = 0;
   for (let i = 0; i < n; i++) {
-    if (i !== forestId) { lost += matrix[forestId][i]; gained += matrix[i][forestId]; }
+    if (isForest(i)) continue;
+    for (const fid of forestIds) { lost += matrix[fid][i]; gained += matrix[i][fid]; }
   }
-  const forest1 = toHa(cnt1[forestId]), forest2 = toHa(cnt2[forestId]);
+  let fcnt1 = 0, fcnt2 = 0;
+  for (const fid of forestIds) { fcnt1 += cnt1[fid]; fcnt2 += cnt2[fid]; }
+  const forest1 = toHa(fcnt1), forest2 = toHa(fcnt2);
   const codes = new Uint8Array(c1.length).fill(255);
   let cLost = 0, cGained = 0, cOther = 0, cUnchanged = 0;
   for (let k = 0; k < mask.length; k++) {
     const p = mask[k];
     const a = c1[p], b = c2[p];
     if (a === 255 || b === 255) continue;
-    if (a === forestId && b !== forestId) { codes[p] = 1; cLost++; }
-    else if (a !== forestId && b === forestId) { codes[p] = 2; cGained++; }
+    if (isForest(a) && isForest(b)) { codes[p] = 4; cUnchanged++; }
+    else if (isForest(a) && !isForest(b)) { codes[p] = 1; cLost++; }
+    else if (!isForest(a) && isForest(b)) { codes[p] = 2; cGained++; }
     else if (a !== b) { codes[p] = 3; cOther++; }
     else { codes[p] = 4; cUnchanged++; }
   }
