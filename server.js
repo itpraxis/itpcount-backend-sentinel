@@ -116,6 +116,8 @@ function parseMesesNieve(v) {
   if (Array.isArray(v)) { for (const x of v) push(Number(x)); }
   else if (typeof v === 'number') { push(v); }
   else if (typeof v === 'string') {
+    v = v.trim();
+    if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1);
     for (const part of v.split(',')) {
       const t = part.trim();
       if (!t) continue;
@@ -974,6 +976,7 @@ app.post('/api/v2/image', async (req, res) => {
         stats: { mean: st.mean, otsu },
         histogram: hist, areaPerPixel: areaPx, cloudPct: cp.cloudPct, classes: areas.classes, areaHa: areas.areaHa,
         consensus: !!secondary, consensusSensorDate: secondary ? secondary.date : null,
+        snow: { months: snowMonthsOf(m) || [], mask: useSnowForDate(date, snowMonthsOf(m)) },
         quota
       });
     }
@@ -1204,6 +1207,7 @@ app.post('/api/v2/change', async (req, res) => {
       classes: comp.rows,
       robust,
       consensus: !!radar,
+      snow: { months: snowMonthsOf(m) || [], mask1: useSnowForDate(date1, snowMonthsOf(m)), mask2: useSnowForDate(date2, snowMonthsOf(m)) },
       quota
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -1491,6 +1495,7 @@ app.post('/api/v2/compare', async (req, res) => {
       radar,
       bbox, width, height,
       consensus: !!radar,
+      snow: { months: snowMonthsOf(m) || [], mask1: useSnowForDate(date1, snowMonthsOf(m)), mask2: useSnowForDate(date2, snowMonthsOf(m)) },
       quota
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
