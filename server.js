@@ -92,10 +92,36 @@ async function checkUser(req, res) {
   if (!meteringEnabled) return true;
   const m = (req.headers.authorization || '').match(/^Bearer (.+)$/i);
   if (!m) { res.status(401).json({ error: 'No autenticado. Vuelve a iniciar sesión.' }); return false; }
-  try { req.uid = (await admin.auth().verifyIdToken(m[1])).uid; return true; }
+  try { req.uid = (await admin.auth().verifyIdToken(m[1])).uid; }
   catch (e) { res.status(401).json({ error: 'Sesión inválida o expirada. Vuelve a iniciar sesión.' }); return false; }
+  // Sesión única: si el usuario inició sesión en otro dispositivo, este queda invalidado.
+  try {
+    const snap = await db.collection('users').doc(req.uid).get();
+    const sid = snap.exists ? snap.data().sessionId : null;
+    if (sid && req.headers['x-session-id'] !== sid) {
+      res.status(401).json({
+        code: 'SESION_OTRO_DISPOSITIVO',
+        error: 'Tu sesión se cerró porque tu cuenta inició sesión en otro dispositivo. Si fuiste tú, no tienes que hacer nada. De lo contrario, solicita el cambio de tu contraseña.'
+      });
+      return false;
+    }
+  } catch (e) { /* no bloquear si falla la lectura */ }
+  return true;
 }
-// Pre-chequeo: bloquea (429) solo si el polígono-día es NUEVO y el mes está al tope.
+// Lee la cuota mensual de la empresa del usuario (colección `empresas`, doc id = valor de `empresa`).
+async function readEmpresa(data) {
+  const key = data && typeof data.empresa === 'string' ? data.empresa.trim() : '';
+  if (!key) return null;
+  const snap = await db.collection('empresas').doc(key).get();
+  if (!snap.exists) return null;
+  const d = snap.data() || {};
+  const limit = Number(d.cuota_mensual) || 0;
+  if (limit <= 0) return null;
+  const day = dayKey();
+  const pusage = (d.polygonUsage && typeof d.polygonUsage === 'object') ? d.polygonUsage : {};
+  return { key, limit, used: usageOfMonth(pusage, monthKey()), todayUsage: pusage[day] || [], hashDay: day };
+}
+// Pre-chequeo: bloquea (429) solo si el polígono-día es NUEVO y la cuota del mes (usuario o empresa) está al tope.
 async function meterPolygon(req, res, ring) {
   if (!meteringEnabled) return { ok: true, counted: false };
   const hash = polygonHash(ring);
@@ -107,7 +133,8 @@ async function meterPolygon(req, res, ring) {
   const pusage = (data.polygonUsage && typeof data.polygonUsage === 'object') ? data.polygonUsage : {};
   const todayUsage = pusage[day] || [];
   const used = usageOfMonth(pusage, month);
-  if (todayUsage.includes(hash)) return { ok: true, counted: false, hash, day, month };
+  const emp = await readEmpresa(data);
+  if (todayUsage.includes(hash)) return { ok: true, counted: false, hash, day, month, empresa: emp ? { ...emp, counted: false } : null };
   if (used >= limit) {
     res.status(429).json({
       error: `Has alcanzado tu límite mensual de ${limit} polígonos. Contacta al administrador para ampliarlo.`,
@@ -115,9 +142,16 @@ async function meterPolygon(req, res, ring) {
     });
     return { ok: false };
   }
-  return { ok: true, counted: true, hash, day, month };
+  if (emp && !emp.todayUsage.includes(hash) && emp.used >= emp.limit) {
+    res.status(429).json({
+      error: `La cuota mensual de tu empresa (${emp.limit} polígonos) se agotó. Contacta al administrador para ampliarla.`,
+      quota: { used, limit, remaining: Math.max(0, limit - used), empresa: { used: emp.used, limit: emp.limit, remaining: 0 } }
+    });
+    return { ok: false };
+  }
+  return { ok: true, counted: true, hash, day, month, empresa: emp ? { ...emp, counted: !emp.todayUsage.includes(hash) } : null };
 }
-// Commit al finalizar con éxito: suma el hash del día (transacción) y devuelve la cuota mensual.
+// Commit al finalizar con éxito: suma el hash del día (transacción, usuario y empresa) y devuelve las cuotas mensuales.
 async function commitPolygon(req, res, m) {
   if (!meteringEnabled) return null;
   if (m.counted) {
@@ -134,12 +168,35 @@ async function commitPolygon(req, res, m) {
       t.set(ref, { polygonUsage: { ...pusage, [m.day]: usage } }, { merge: true });
     });
   }
+  if (m.empresa && m.empresa.counted) {
+    const ref = db.collection('empresas').doc(m.empresa.key);
+    await db.runTransaction(async (t) => {
+      const snap = await t.get(ref);
+      const d = snap.exists ? snap.data() : {};
+      const limit = Number(d.cuota_mensual) || 0;
+      if (limit <= 0) return;
+      const pusage = (d.polygonUsage && typeof d.polygonUsage === 'object') ? d.polygonUsage : {};
+      const usage = pusage[m.empresa.hashDay] || [];
+      const used = usageOfMonth(pusage, m.month);
+      if (usage.includes(m.hash) || used >= limit) return;
+      usage.push(m.hash);
+      t.set(ref, { polygonUsage: { ...pusage, [m.empresa.hashDay]: usage } }, { merge: true });
+    });
+  }
   const snap = await db.collection('users').doc(req.uid).get();
   const data = snap.exists ? snap.data() : {};
   const limit = Number(data.polygonLimit) || 100;
   const pusage = (data.polygonUsage && typeof data.polygonUsage === 'object') ? data.polygonUsage : {};
   const used = usageOfMonth(pusage, monthKey());
-  return { used, limit, remaining: Math.max(0, limit - used) };
+  const quota = { used, limit, remaining: Math.max(0, limit - used) };
+  if (m.empresa) {
+    const empSnap = await db.collection('empresas').doc(m.empresa.key).get();
+    const ed = empSnap.exists ? empSnap.data() : {};
+    const epusage = (ed.polygonUsage && typeof ed.polygonUsage === 'object') ? ed.polygonUsage : {};
+    const eused = usageOfMonth(epusage, monthKey());
+    quota.empresa = { used: eused, limit: m.empresa.limit, remaining: Math.max(0, m.empresa.limit - eused) };
+  }
+  return quota;
 }
 async function meterEndpoints(req, res, ring) {
   if (!(await checkUser(req, res))) return null;
