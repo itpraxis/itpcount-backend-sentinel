@@ -1591,6 +1591,7 @@ app.post('/api/v2/compare-rvi', async (req, res) => {
       bbox, width, height,
       consensus: !!(s1 && s1.ndvi) || !!(s2 && s2.ndvi),
       consensusSecondaryDates: [sec1Date, sec2Date],
+      snow: { months: snowMonthsOf(m) || [], mask1: useSnowForDate(sec1Date, snowMonthsOf(m)), mask2: useSnowForDate(sec2Date, snowMonthsOf(m)) },
       quota
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
