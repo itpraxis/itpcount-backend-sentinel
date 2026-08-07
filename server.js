@@ -373,9 +373,10 @@ async function parseTiff(buf) {
   const data = await image.readRasters({ interleave: false });
   return { width, height, bands: data.map((d, i) => ({ values: d, band: i })) };
 }
-async function catalogSearch({ bbox, collections, datetime, limit = 100, filter }) {
+async function catalogSearch({ bbox, collections, datetime, limit = 100, filter, next }) {
   const payload = { bbox, collections, datetime, limit };
   if (filter) payload.filter = filter;
+  if (next) payload.next = next;
   const r = await fetch(CATALOG_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${await getToken()}` },
@@ -384,6 +385,11 @@ async function catalogSearch({ bbox, collections, datetime, limit = 100, filter 
   const text = await r.text();
   if (!r.ok) throw new Error('Catálogo: ' + text.slice(0, 300));
   return JSON.parse(text);
+}
+// Token de paginación del catálogo (rel=next con body.next, estilo offset).
+function catalogNext(j) {
+  const n = (j && (j.links || [])).find(l => l.rel === 'next');
+  return (n && n.body && n.body.next) || null;
 }
 
 // ============================================================
@@ -898,20 +904,29 @@ app.post('/api/v2/get-valid-dates', async (req, res) => {
     if (!ring || !bbox) return badParams(res, 'Parámetro coordinates inválido.');
     const now = new Date();
     const start = new Date(); start.setDate(now.getDate() - daysBack);
-    const data = await catalogSearch({
+    const params = {
       bbox,
       collections: ['sentinel-2-l2a'],
       datetime: `${start.toISOString().split('T')[0]}T00:00:00Z/${now.toISOString().split('T')[0]}T23:59:59Z`,
       limit: 100,
       filter: `eo:cloud_cover < ${maxCloud}`
-    });
+    };
+    // Pagina el catálogo (rel=next con body.next) para no truncar en 100 escenas:
+    // cada fecha S2 genera ~4 escenas, así que 100 escenas ≈ solo 24 fechas. Con
+    // paginación se obtienen TODAS las fechas del año.
     const seen = new Set();
     const dates = [];
-    for (const f of data.features) {
-      const d = f.properties.datetime.split('T')[0];
-      if (seen.has(d)) continue;
-      seen.add(d);
-      dates.push({ date: d, cloudCover: Math.round(f.properties['eo:cloud_cover'] * 10) / 10 });
+    let data = await catalogSearch(params);
+    for (let page = 0; page < 6 && data; page++) {
+      for (const f of data.features || []) {
+        const d = f.properties.datetime.split('T')[0];
+        if (seen.has(d)) continue;
+        seen.add(d);
+        dates.push({ date: d, cloudCover: Math.round(f.properties['eo:cloud_cover'] * 10) / 10 });
+      }
+      const tok = catalogNext(data);
+      if (!tok) break;
+      data = await catalogSearch({ ...params, next: tok });
     }
     dates.sort((a, b) => new Date(b.date) - new Date(a.date));
     res.json({ hasCoverage: dates.length > 0, totalDates: dates.length, dates, areaHa: polygonAreaHa(ring) });
