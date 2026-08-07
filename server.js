@@ -1020,21 +1020,34 @@ app.post('/api/v2/change', async (req, res) => {
     const cls = OPTICAL_CLASSES.map(c => ({ ...c }));
     let c1 = classifyMasked(o1.ndvi, mask, cls);
     let c2 = classifyMasked(o2.ndvi, mask, cls);
-    const r1 = await findRadarDate(bbox);
+    // Radar para el consenso y el acuerdo: usa las fechas de la pestaña RVI si están
+    // dentro de ±15 días de la fecha óptica correspondiente; si no, la escena 1SDV más
+    // cercana a cada fecha. Antes usaba la más reciente del último año para el "antes",
+    // lo que desalineaba el consenso con una escena futura (p. ej. 08-04 para un date1
+    // de 04-02). Ahora el "antes" se alinea con date1.
+    const radarDate1 = req.body.radarDate1 || null;
+    const radarDate2 = req.body.radarDate2 || null;
+    const band = (Number(req.body.band) > 0 && Number(req.body.band) < 0.5) ? Number(req.body.band) : FOREST_BAND;
+    const inWindow = (ref, v) => v && Math.abs(new Date(v) - new Date(ref)) <= 15 * 864e5;
+    const r1 = (inWindow(date1, radarDate1) ? { date: radarDate1, pol: 'DV' } : null)
+      || (await findRadarDateNear(bbox, date1))
+      || (await findRadarDate(bbox));
     let radar = null;
     if (r1) {
-      const r2 = await findRadarDateNear(bbox, date2);
-      const pol = r1.pol;
+      const r2 = (inWindow(date2, radarDate2) ? { date: radarDate2, pol: 'DV' } : null)
+        || (await findRadarDateNear(bbox, date2))
+        || r1;
+      const pol = r1.pol || 'DV';
       const [rad1, rad2] = await Promise.all([
         cachedRvi({ ring, bbox, date: r1.date, width, height, polarization: pol }),
-        cachedRvi({ ring, bbox, date: (r2 || r1).date, width, height, polarization: pol })
+        cachedRvi({ ring, bbox, date: r2.date, width, height, polarization: pol })
       ]);
-      radar = { rvi1: rad1.rvi, rvi2: rad2.rvi, date1: r1.date, date2: (r2 || r1).date, pol };
+      radar = { rvi1: rad1.rvi, rvi2: rad2.rvi, date1: r1.date, date2: r2.date, pol };
       c1 = consensusClassify(o1.ndvi, rad1.rvi, mask, cls, RVI_CLASSES);
       c2 = consensusClassify(o2.ndvi, rad2.rvi, mask, cls, RVI_CLASSES);
     }
     const comp = compareCategories(c1, c2, mask, cls, areaPx);
-    const robust = robustChange(c1, c2, o1.ndvi, o2.ndvi, mask, cls, areaPx);
+    const robust = robustChange(c1, c2, o1.ndvi, o2.ndvi, mask, cls, areaPx, band);
 
     const dNdvi = new Float32Array(width * height).fill(NaN);
     const dRvi = new Float32Array(width * height).fill(NaN);
@@ -1253,7 +1266,7 @@ const colorChangeMap = (c) => {
 // (histéresis). Los que oscilan alrededor del umbral (NDVI≈0.85, RVI≈0.70) no se
 // contabilizan como cambio. Se construye sobre las clases finales (consenso si hubo
 // radar), por lo que no altera las superficies por categoría ya mostradas.
-const FOREST_BAND = 0.03;
+const FOREST_BAND = 0.02;
 function robustChange(c1, c2, v1, v2, mask, classes, areaPerPx, band = FOREST_BAND) {
   const f = classes.findIndex(c => c.forest);
   const out = { lost: 0, gained: 0, valid: 0 };
@@ -1302,6 +1315,7 @@ app.post('/api/v2/compare', async (req, res) => {
     const radarDate1 = req.body.radarDate1 || null;
     const radarDate2 = req.body.radarDate2 || null;
     const radarPol = req.body.radarPol || 'DV';
+    const band = (Number(req.body.band) > 0 && Number(req.body.band) < 0.5) ? Number(req.body.band) : FOREST_BAND;
 
     // Radar comparativo (si hay escenas cerca de ambas fechas): alimenta el
     // consenso dual-sensor sin descargar nada extra (reutiliza ra1/ra2 y o1/o2).
@@ -1323,7 +1337,7 @@ app.post('/api/v2/compare', async (req, res) => {
         const rc1 = consensusClassify(ra1.rvi, o1.ndvi, mask, rcls, cls);
         const rc2 = consensusClassify(ra2.rvi, o2.ndvi, mask, rcls, cls);
         const rcomp = compareCategories(rc1, rc2, mask, rcls, areaPx);
-        const rrobust = robustChange(rc1, rc2, ra1.rvi, ra2.rvi, mask, rcls, areaPx);
+        const rrobust = robustChange(rc1, rc2, ra1.rvi, ra2.rvi, mask, rcls, areaPx, band);
         radar = {
           date1: r1.date, date2: r2.date, polarization: radarPol,
           forest: rcomp.forest, classes: rcomp.rows, change: rcomp.change,
@@ -1337,9 +1351,9 @@ app.post('/api/v2/compare', async (req, res) => {
         c2 = consensusClassify(o2.ndvi, ra2.rvi, mask, cls, rcls);
       }
     } catch (e) { /* radar opcional */ }
-
     const comp = compareCategories(c1, c2, mask, cls, areaPx);
-    const robust = robustChange(c1, c2, o1.ndvi, o2.ndvi, mask, cls, areaPx);
+    const robust = robustChange(c1, c2, o1.ndvi, o2.ndvi, mask, cls, areaPx, band);
+
     const quota = await commitPolygon(req, res, m);
     res.json({
       optical: {
@@ -1423,6 +1437,7 @@ app.post('/api/v2/compare-rvi', async (req, res) => {
     // la fecha radar correspondiente (±15 días); si no, busca la S2 más cercana.
     const opticalDate1 = req.body.opticalDate1 || null;
     const opticalDate2 = req.body.opticalDate2 || null;
+    const band = (Number(req.body.band) > 0 && Number(req.body.band) < 0.5) ? Number(req.body.band) : FOREST_BAND;
     const inWindow = (ref, v) => v && Math.abs(new Date(v) - new Date(ref)) <= 15 * 864e5;
     const sec1 = inWindow(date1, opticalDate1)
       ? cachedOptical({ ring, bbox, date: opticalDate1, width, height })
@@ -1434,7 +1449,7 @@ app.post('/api/v2/compare-rvi', async (req, res) => {
     rc1 = consensusClassify(r1.rvi, s1 && s1.ndvi, mask, rcls, OPTICAL_CLASSES);
     rc2 = consensusClassify(r2.rvi, s2 && s2.ndvi, mask, rcls, OPTICAL_CLASSES);
     const comp = compareCategories(rc1, rc2, mask, rcls, areaPx);
-    const robust = robustChange(rc1, rc2, r1.rvi, r2.rvi, mask, rcls, areaPx);
+    const robust = robustChange(rc1, rc2, r1.rvi, r2.rvi, mask, rcls, areaPx, band);
     const sec1Date = inWindow(date1, opticalDate1) ? opticalDate1 : (s1 && s1.date);
     const sec2Date = inWindow(date2, opticalDate2) ? opticalDate2 : (s2 && s2.date);
     const quota = await commitPolygon(req, res, m);
