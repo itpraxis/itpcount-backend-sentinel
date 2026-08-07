@@ -396,6 +396,18 @@ function useSnowForDate(date, snowMonths) {
   const mon = Number(date.slice(5, 7));
   return Number.isFinite(mon) && snowMonths.includes(mon);
 }
+// Diagnóstico: píxeles del óptico secundario enmascarados por nieve (ndvi NaN con cloud=0),
+// válidos y nube. null si no hay óptico.
+function snowMaskStats(s) {
+  if (!s || !s.ndvi || !s.cloud) return null;
+  let masked = 0, valid = 0, cloud = 0;
+  for (let i = 0; i < s.ndvi.length; i++) {
+    const n = s.ndvi[i], c = s.cloud[i];
+    if (Number.isFinite(n) && Number.isFinite(c)) { valid++; if (c === 1) cloud++; }
+    else if (!Number.isFinite(n) && Number.isFinite(c) && c === 0) masked++;
+  }
+  return { masked, valid, cloud, total: s.ndvi.length };
+}
 const OPTICAL_EVAL = `//VERSION=3
 function setup() {
   return {
@@ -1592,6 +1604,7 @@ app.post('/api/v2/compare-rvi', async (req, res) => {
       consensus: !!(s1 && s1.ndvi) || !!(s2 && s2.ndvi),
       consensusSecondaryDates: [sec1Date, sec2Date],
       snow: { months: snowMonthsOf(m) || [], mask1: useSnowForDate(sec1Date, snowMonthsOf(m)), mask2: useSnowForDate(sec2Date, snowMonthsOf(m)) },
+      snowStats1: snowMaskStats(s1), snowStats2: snowMaskStats(s2),
       quota
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
