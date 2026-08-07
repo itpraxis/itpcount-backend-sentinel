@@ -108,7 +108,33 @@ async function checkUser(req, res) {
   } catch (e) { /* no bloquear si falla la lectura */ }
   return true;
 }
-// Lee la cuota mensual de la empresa del usuario (colección `empresas`, doc id = valor de `empresa`).
+// Ventana de nieve por empresa: `meses_nieve` admite "4-10", "4,5,6,7,8,9,10" o un rango que cruza
+// el año ("11-3"). Si falta, está vacío o no es válido → null (sin máscara de nieve: no se pide B11).
+function parseMesesNieve(v) {
+  const out = new Set();
+  const push = (n) => { if (Number.isFinite(n) && n >= 1 && n <= 12) out.add(n); };
+  if (Array.isArray(v)) { for (const x of v) push(Number(x)); }
+  else if (typeof v === 'number') { push(v); }
+  else if (typeof v === 'string') {
+    for (const part of v.split(',')) {
+      const t = part.trim();
+      if (!t) continue;
+      const m = t.match(/^(\d{1,2})\s*-\s*(\d{1,2})$/);
+      if (m) {
+        const a = parseInt(m[1], 10), b = parseInt(m[2], 10);
+        if (a >= 1 && a <= 12 && b >= 1 && b <= 12) {
+          if (a <= b) { for (let i = a; i <= b; i++) push(i); }
+          else { for (let i = a; i <= 12; i++) push(i); for (let i = 1; i <= b; i++) push(i); }
+        }
+      } else {
+        push(parseInt(t, 10));
+      }
+    }
+  }
+  return out.size ? Array.from(out).sort((x, y) => x - y) : null;
+}
+// Lee la cuota mensual y la ventana de nieve de la empresa del usuario (colección `empresas`,
+// doc id = valor de `empresa`). Devuelve null si el usuario no tiene empresa o el doc no existe.
 async function readEmpresa(data) {
   const key = data && typeof data.empresa === 'string' ? data.empresa.trim() : '';
   if (!key) return null;
@@ -116,10 +142,9 @@ async function readEmpresa(data) {
   if (!snap.exists) return null;
   const d = snap.data() || {};
   const limit = Number(d.cuota_mensual) || 0;
-  if (limit <= 0) return null;
   const day = dayKey();
   const pusage = (d.polygonUsage && typeof d.polygonUsage === 'object') ? d.polygonUsage : {};
-  return { key, limit, used: usageOfMonth(pusage, monthKey()), todayUsage: pusage[day] || [], hashDay: day };
+  return { key, limit, used: usageOfMonth(pusage, monthKey()), todayUsage: pusage[day] || [], hashDay: day, mesesNieve: parseMesesNieve(d.meses_nieve) };
 }
 // Pre-chequeo: bloquea (429) solo si el polígono-día es NUEVO y la cuota del mes (usuario o empresa) está al tope.
 async function meterPolygon(req, res, ring) {
@@ -142,7 +167,7 @@ async function meterPolygon(req, res, ring) {
     });
     return { ok: false };
   }
-  if (emp && !emp.todayUsage.includes(hash) && emp.used >= emp.limit) {
+  if (emp && emp.limit > 0 && !emp.todayUsage.includes(hash) && emp.used >= emp.limit) {
     res.status(429).json({
       error: `La cuota mensual de tu empresa (${emp.limit} polígonos) se agotó. Contacta al administrador para ampliarla.`,
       quota: { used, limit, remaining: Math.max(0, limit - used), empresa: { used: emp.used, limit: emp.limit, remaining: 0 } }
@@ -168,7 +193,7 @@ async function commitPolygon(req, res, m) {
       t.set(ref, { polygonUsage: { ...pusage, [m.day]: usage } }, { merge: true });
     });
   }
-  if (m.empresa && m.empresa.counted) {
+  if (m.empresa && m.empresa.counted && m.empresa.limit > 0) {
     const ref = db.collection('empresas').doc(m.empresa.key);
     await db.runTransaction(async (t) => {
       const snap = await t.get(ref);
@@ -189,7 +214,7 @@ async function commitPolygon(req, res, m) {
   const pusage = (data.polygonUsage && typeof data.polygonUsage === 'object') ? data.polygonUsage : {};
   const used = usageOfMonth(pusage, monthKey());
   const quota = { used, limit, remaining: Math.max(0, limit - used) };
-  if (m.empresa) {
+  if (m.empresa && m.empresa.limit > 0) {
     const empSnap = await db.collection('empresas').doc(m.empresa.key).get();
     const ed = empSnap.exists ? empSnap.data() : {};
     const epusage = (ed.polygonUsage && typeof ed.polygonUsage === 'object') ? ed.polygonUsage : {};
@@ -203,6 +228,11 @@ async function meterEndpoints(req, res, ring) {
   const m = await meterPolygon(req, res, ring);
   if (!m.ok) return null;
   return m;
+}
+// Ventana de nieve activa para la petición (según `meses_nieve` de la empresa del usuario).
+// null = la empresa no la configuró → no se pide la banda SWIR y no se enmascara nieve.
+function snowMonthsOf(m) {
+  return m && m.empresa && Array.isArray(m.empresa.mesesNieve) ? m.empresa.mesesNieve : null;
 }
 
 const PORT = process.env.PORT || 10002;
@@ -357,6 +387,13 @@ async function catalogSearch({ bbox, collections, datetime, limit = 100, filter 
 // ============================================================
 // EVALUACIÓN ÓPTICA (NDVI + nubes SCL, un grupo DN)
 // ============================================================
+// ¿Aplica la máscara de nieve a una fecha? Solo si la empresa configuró `meses_nieve`
+// y el mes de la fecha cae dentro de la ventana. Fechas en otro formato → false (seguro).
+function useSnowForDate(date, snowMonths) {
+  if (!snowMonths || !snowMonths.length || typeof date !== 'string' || date.length < 7) return false;
+  const mon = Number(date.slice(5, 7));
+  return Number.isFinite(mon) && snowMonths.includes(mon);
+}
 const OPTICAL_EVAL = `//VERSION=3
 function setup() {
   return {
@@ -373,7 +410,29 @@ function evaluatePixel(sample) {
   return { res: [(ndvi + 1) / 2, isCloud(scl) ? 1 : 0] };
 }`;
 
-async function fetchOptical({ ring, bbox, date, width, height, maxCloud = 100 }) {
+// Igual al anterior + banda SWIR (B11) para la máscara de nieve: píxeles con NDSI alto
+// (nieve brillante) se marcan como sin dato (NaN) sin contarlos como nube. La nieve en
+// SCL queda etiquetada como nube (8/9/10), por eso el chequeo va ANTES del isCloud.
+// B11 en L2A es reflectancia x10000; B04 >= 2000 (refl >= 0.2) descarta agua turbia/vegetación.
+const OPTICAL_EVAL_SNOW = `//VERSION=3
+function setup() {
+  return {
+    input: [{ bands: ["B04","B08","B11","SCL"], units: "DN" }],
+    output: [{ id: "res", bands: 2, sampleType: "FLOAT32" }]
+  };
+}
+function isCloud(scl) { return scl === 3 || scl === 8 || scl === 9 || scl === 10; }
+function valid(scl) { return scl !== 0 && scl !== 1 && scl !== 11; }
+function evaluatePixel(sample) {
+  var scl = sample.SCL;
+  if (!valid(scl)) return { res: [NaN, NaN] };
+  var ndsi = (sample.B04 - sample.B11) / (sample.B04 + sample.B11 + 1e-8);
+  if (ndsi >= 0.45 && sample.B04 >= 2000) return { res: [NaN, 0] };
+  var ndvi = (sample.B08 - sample.B04) / (sample.B08 + sample.B04 + 1e-8);
+  return { res: [(ndvi + 1) / 2, isCloud(scl) ? 1 : 0] };
+}`;
+
+async function fetchOptical({ ring, bbox, date, width, height, maxCloud = 100, snowMonths = null }) {
   const payload = {
     input: {
       bounds: { geometry: { type: 'Polygon', coordinates: [ring] } },
@@ -383,7 +442,7 @@ async function fetchOptical({ ring, bbox, date, width, height, maxCloud = 100 })
       width, height,
       responses: [{ identifier: 'res', format: { type: 'image/tiff' } }]
     },
-    evalscript: OPTICAL_EVAL
+    evalscript: useSnowForDate(date, snowMonths) ? OPTICAL_EVAL_SNOW : OPTICAL_EVAL
   };
   const buf = await shFetch(payload);
   const { bands } = await parseTiff(buf);
@@ -559,11 +618,11 @@ function consensusCacheSet(key, v) {
     for (const [k, e] of rasterCache) if (now - e.t > CONSENSUS_TTL_MS) rasterCache.delete(k);
   }
 }
-async function cachedOptical({ ring, bbox, date, width, height }) {
-  const key = consensusCacheKey('s2', ring, date, width, height);
+async function cachedOptical({ ring, bbox, date, width, height, snowMonths = null }) {
+  const key = consensusCacheKey('s2', ring, date, width, height, useSnowForDate(date, snowMonths) ? 'snow' : '');
   const hit = consensusCacheGet(key);
   if (hit) return hit;
-  const v = await fetchOptical({ ring, bbox, date, width, height });
+  const v = await fetchOptical({ ring, bbox, date, width, height, snowMonths });
   consensusCacheSet(key, v);
   return v;
 }
@@ -585,17 +644,18 @@ async function rviNearOptical({ ring, bbox, date, width, height, polarization = 
   } catch (e) { return null; }
 }
 // Mejor esfuerzo: NDVI cercano a la fecha radar (nunca revienta la petición principal).
-async function opticalNearRadar({ ring, bbox, date, width, height }) {
+async function opticalNearRadar({ ring, bbox, date, width, height, snowMonths = null }) {
   try {
     const near = await findNearestOpticalDate(bbox, date, 30);
     if (!near) return null;
-    const res = await cachedOptical({ ring, bbox, date: near, width, height });
+    const res = await cachedOptical({ ring, bbox, date: near, width, height, snowMonths });
     return { ndvi: res.ndvi, cloud: res.cloud, date: near };
   } catch (e) { return null; }
 }
 // Clasifica con la banda primaria pero degrada "Bosque" a "Vegetación densa (no boscosa)"
-// cuando el sensor secundario no alcanza su propio umbral de bosque (regla estricta AND:
-// un píxel sin dato del secundario tampoco se confirma como bosque).
+// cuando el sensor secundario TIENE dato pero no alcanza su propio umbral de bosque (regla
+// estricta AND). Si el secundario NO tiene dato para el píxel (nieve, nube, fuera de escena),
+// el primario no se degrada: sin evidencia en contra, se respeta la lectura del primario.
 function consensusClassify(primaryVals, secondaryVals, mask, primaryClasses, secondaryClasses) {
   if (!secondaryVals) return classifyMasked(primaryVals, mask, primaryClasses);
   const n = primaryClasses.length;
@@ -614,8 +674,7 @@ function consensusClassify(primaryVals, secondaryVals, mask, primaryClasses, sec
     if (i < 0) continue;
     if (pForest.includes(i)) {
       const sv = secondaryVals[p];
-      if (sv === undefined || sv === null || Number.isNaN(sv)) { i = demoteTo; }
-      else {
+      if (sv !== undefined && sv !== null && !Number.isNaN(sv)) {
         let j = -1;
         for (let c = 0; c < secondaryClasses.length; c++) {
           if (sv >= secondaryClasses[c].from && sv < secondaryClasses[c].to) { j = c; break; }
@@ -858,7 +917,7 @@ app.post('/api/v2/cloud-polygon', async (req, res) => {
     const out = [];
     for (const d of dates) {
       try {
-        const { ndvi, cloud } = await fetchOptical({ ring, bbox, date: d.date || d, width: size, height: size });
+        const { ndvi, cloud } = await fetchOptical({ ring, bbox, date: d.date || d, width: size, height: size, snowMonths: snowMonthsOf(m) });
         const mask = maskIndices(size, size, bbox, ring);
         const cp = cloudPctOf(cloud, mask);
         out.push({ date: d.date || d, sceneCloud: d.cloudCover ?? null, polygonCloud: cp.cloudPct });
@@ -897,7 +956,7 @@ app.post('/api/v2/image', async (req, res) => {
 
     // ---- NDVI (con o sin composite server-side) ----
     if (!composite || composite <= 0) {
-      const { ndvi, cloud } = await cachedOptical({ ring, bbox, date, width, height });
+      const { ndvi, cloud } = await cachedOptical({ ring, bbox, date, width, height, snowMonths: snowMonthsOf(m) });
       const mask = maskIndices(width, height, bbox, ring);
       const cp = cloudPctOf(cloud, mask);
       const st = statsOf(ndvi, mask);
@@ -943,7 +1002,7 @@ app.post('/api/v2/image', async (req, res) => {
     const used = [];
     for (const p of picks) {
       try {
-        const { ndvi, cloud } = await fetchOptical({ ring, bbox, date: p.date, width, height });
+        const { ndvi, cloud } = await fetchOptical({ ring, bbox, date: p.date, width, height, snowMonths: snowMonthsOf(m) });
         const mask = maskIndices(width, height, bbox, ring);
         const cp = cloudPctOf(cloud, mask);
         stacks.push({ ndvi, mask, cloudPct: cp.cloudPct, date: p.date });
@@ -1039,7 +1098,7 @@ app.post('/api/v2/radar-stats', async (req, res) => {
     const otsu = otsuFromHist(hist.counts, hist.total);
     const areaPx = areaPerPixel(bbox, width, height);
     const cls = RVI_CLASSES.map(c => ({ ...c }));
-    const secondary = await opticalNearRadar({ ring, bbox, date: d, width, height });
+    const secondary = await opticalNearRadar({ ring, bbox, date: d, width, height, snowMonths: snowMonthsOf(m) });
     const clsRaster = consensusClassify(rvi, secondary && secondary.ndvi, mask, cls, OPTICAL_CLASSES);
     const areas = classAreasFromRaster(clsRaster, mask, cls, areaPx);
     const image = toPng(clsRaster, width, height, colorClass(cls), mask);
@@ -1073,8 +1132,8 @@ app.post('/api/v2/change', async (req, res) => {
     const mask = maskIndices(width, height, bbox, ring);
 
     const [o1, o2] = await Promise.all([
-      cachedOptical({ ring, bbox, date: date1, width, height }),
-      cachedOptical({ ring, bbox, date: date2, width, height })
+      cachedOptical({ ring, bbox, date: date1, width, height, snowMonths: snowMonthsOf(m) }),
+      cachedOptical({ ring, bbox, date: date2, width, height, snowMonths: snowMonthsOf(m) })
     ]);
     const areaPx = areaPerPixel(bbox, width, height);
     const cls = OPTICAL_CLASSES.map(c => ({ ...c }));
@@ -1204,7 +1263,7 @@ app.post('/api/v2/ndvi-timeseries', async (req, res) => {
     const series = [];
     for (const p of picks) {
       try {
-        const { ndvi, cloud } = await fetchOptical({ ring, bbox, date: p.date, width: W, height: H });
+        const { ndvi, cloud } = await fetchOptical({ ring, bbox, date: p.date, width: W, height: H, snowMonths: snowMonthsOf(m) });
         const cp = cloudPctOf(cloud, mask);
         const st = statsOf(ndvi, mask);
         series.push({ date: p.date, sceneCloud: Math.round(p.cloud * 10) / 10, polygonCloud: cp.cloudPct, ndviMean: st.mean });
@@ -1364,8 +1423,8 @@ app.post('/api/v2/compare', async (req, res) => {
     const areaPx = areaPerPixel(bbox, width, height);
 
     const [o1, o2] = await Promise.all([
-      cachedOptical({ ring, bbox, date: date1, width, height }),
-      cachedOptical({ ring, bbox, date: date2, width, height })
+      cachedOptical({ ring, bbox, date: date1, width, height, snowMonths: snowMonthsOf(m) }),
+      cachedOptical({ ring, bbox, date: date2, width, height, snowMonths: snowMonthsOf(m) })
     ]);
     const cls = OPTICAL_CLASSES.map(c => ({ ...c }));
     let c1 = classifyMasked(o1.ndvi, mask, cls);
@@ -1500,11 +1559,11 @@ app.post('/api/v2/compare-rvi', async (req, res) => {
     const band = (Number(req.body.band) > 0 && Number(req.body.band) < 0.5) ? Number(req.body.band) : FOREST_BAND;
     const inWindow = (ref, v) => v && Math.abs(new Date(v) - new Date(ref)) <= 15 * 864e5;
     const sec1 = inWindow(date1, opticalDate1)
-      ? cachedOptical({ ring, bbox, date: opticalDate1, width, height })
-      : opticalNearRadar({ ring, bbox, date: date1, width, height });
+      ? cachedOptical({ ring, bbox, date: opticalDate1, width, height, snowMonths: snowMonthsOf(m) })
+      : opticalNearRadar({ ring, bbox, date: date1, width, height, snowMonths: snowMonthsOf(m) });
     const sec2 = inWindow(date2, opticalDate2)
-      ? cachedOptical({ ring, bbox, date: opticalDate2, width, height })
-      : opticalNearRadar({ ring, bbox, date: date2, width, height });
+      ? cachedOptical({ ring, bbox, date: opticalDate2, width, height, snowMonths: snowMonthsOf(m) })
+      : opticalNearRadar({ ring, bbox, date: date2, width, height, snowMonths: snowMonthsOf(m) });
     const [s1, s2] = await Promise.all([sec1, sec2]);
     rc1 = consensusClassify(r1.rvi, s1 && s1.ndvi, mask, rcls, OPTICAL_CLASSES);
     rc2 = consensusClassify(r2.rvi, s2 && s2.ndvi, mask, rcls, OPTICAL_CLASSES);
