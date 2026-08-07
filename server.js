@@ -940,7 +940,10 @@ app.post('/api/v2/recent-scene', async (req, res) => {
     const bbox = bboxOf(ring);
     if (!ring || !bbox || !date) return badParams(res, 'Faltan coordinates o date.');
     const { width, height } = imageSize(bbox, 512);
-    const image = await fetchTrueColorMasked({ ring, bbox, date, width, height });
+    // Misma imagen truecolor que el "Ver color real" de los paneles (/api/v2/image
+    // mode=truecolor), sin enmascarar al polígono: así el estiraje de
+    // enhanceTrueColor usa el mismo histograma y el mapa se ve igual que los análisis.
+    const image = await fetchTrueColor({ ring, bbox, date, width, height });
     res.json({ image, usedDate: date, bbox, width, height });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
