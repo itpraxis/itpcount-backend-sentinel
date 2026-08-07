@@ -931,7 +931,9 @@ app.post('/api/v2/cloud-polygon', async (req, res) => {
     const out = [];
     for (const d of dates) {
       try {
-        const { ndvi, cloud } = await fetchOptical({ ring, bbox, date: d.date || d, width: size, height: size, snowMonths: snowMonthsOf(m) });
+        // cachedOptical: reusa el raster óptico cacheado (15 min) para que repetir
+        // "Cargar fechas"/gráfico de nubes no vuelva a pedir la escena a Sentinel Hub.
+        const { ndvi, cloud } = await cachedOptical({ ring, bbox, date: d.date || d, width: size, height: size, snowMonths: snowMonthsOf(m) });
         const mask = maskIndices(size, size, bbox, ring);
         const cp = cloudPctOf(cloud, mask);
         out.push({ date: d.date || d, sceneCloud: d.cloudCover ?? null, polygonCloud: cp.cloudPct });
