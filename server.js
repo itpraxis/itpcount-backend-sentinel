@@ -453,9 +453,10 @@ function evaluatePixel(sample) {
 }`;
 
 // Variantes con detector de CALIMA/NIEBLA para la nubosidad por polígono (cloud-polygon):
-// además de la máscara SCL, un píxel cuenta como nube si es brillante y casi blanco en las
-// 3 bandas visibles (B02/B03/B04) con NDVI bajo. El SCL de L2A no clasifica la calima fina,
-// por eso fechas como 2026-07-03 mostraban 0% con la imagen blanca por neblina.
+// además de la máscara SCL, un píxel cuenta como nube si el azul (B02) está elevado con
+// NDVI bajo (calima fina que el SCL de L2A no clasifica), o si es brillante y casi blanco
+// en las 3 bandas visibles. Así fechas como 2026-07-03/2026-06-26 (imagen blanca por
+// neblina) dejan de mostrar 0% de nubosidad.
 const OPTICAL_EVAL_HAZE = `//VERSION=3
 function setup() {
   return {
@@ -469,7 +470,7 @@ function evaluatePixel(sample) {
   var scl = sample.SCL;
   if (!valid(scl)) return { res: [NaN, NaN] };
   var ndvi = (sample.B08 - sample.B04) / (sample.B08 + sample.B04 + 1e-8);
-  var hazy = sample.B02 > 1700 && sample.B03 > 1700 && sample.B04 > 1700 && ndvi < 0.3;
+  var hazy = (sample.B02 > 1000 && ndvi < 0.25) || (sample.B02 > 1700 && sample.B03 > 1700 && sample.B04 > 1700);
   return { res: [(ndvi + 1) / 2, (isCloud(scl) || hazy) ? 1 : 0] };
 }`;
 const OPTICAL_EVAL_HAZE_SNOW = `//VERSION=3
@@ -487,7 +488,7 @@ function evaluatePixel(sample) {
   var ndsi = (sample.B04 - sample.B11) / (sample.B04 + sample.B11 + 1e-8);
   if (ndsi >= 0.45 && sample.B04 >= 2000) return { res: [NaN, 0] };
   var ndvi = (sample.B08 - sample.B04) / (sample.B08 + sample.B04 + 1e-8);
-  var hazy = sample.B02 > 1700 && sample.B03 > 1700 && sample.B04 > 1700 && ndvi < 0.3;
+  var hazy = (sample.B02 > 1000 && ndvi < 0.25) || (sample.B02 > 1700 && sample.B03 > 1700 && sample.B04 > 1700);
   return { res: [(ndvi + 1) / 2, (isCloud(scl) || hazy) ? 1 : 0] };
 }`;
 
