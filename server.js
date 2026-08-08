@@ -452,6 +452,45 @@ function evaluatePixel(sample) {
   return { res: [(ndvi + 1) / 2, isCloud(scl) ? 1 : 0] };
 }`;
 
+// Variantes con detector de CALIMA/NIEBLA para la nubosidad por polígono (cloud-polygon):
+// además de la máscara SCL, un píxel cuenta como nube si es brillante y casi blanco en las
+// 3 bandas visibles (B02/B03/B04) con NDVI bajo. El SCL de L2A no clasifica la calima fina,
+// por eso fechas como 2026-07-03 mostraban 0% con la imagen blanca por neblina.
+const OPTICAL_EVAL_HAZE = `//VERSION=3
+function setup() {
+  return {
+    input: [{ bands: ["B02","B03","B04","B08","SCL"], units: "DN" }],
+    output: [{ id: "res", bands: 2, sampleType: "FLOAT32" }]
+  };
+}
+function isCloud(scl) { return scl === 3 || scl === 8 || scl === 9 || scl === 10; }
+function valid(scl) { return scl !== 0 && scl !== 1 && scl !== 11; }
+function evaluatePixel(sample) {
+  var scl = sample.SCL;
+  if (!valid(scl)) return { res: [NaN, NaN] };
+  var ndvi = (sample.B08 - sample.B04) / (sample.B08 + sample.B04 + 1e-8);
+  var hazy = sample.B02 > 1700 && sample.B03 > 1700 && sample.B04 > 1700 && ndvi < 0.3;
+  return { res: [(ndvi + 1) / 2, (isCloud(scl) || hazy) ? 1 : 0] };
+}`;
+const OPTICAL_EVAL_HAZE_SNOW = `//VERSION=3
+function setup() {
+  return {
+    input: [{ bands: ["B02","B03","B04","B08","B11","SCL"], units: "DN" }],
+    output: [{ id: "res", bands: 2, sampleType: "FLOAT32" }]
+  };
+}
+function isCloud(scl) { return scl === 3 || scl === 8 || scl === 9 || scl === 10; }
+function valid(scl) { return scl !== 0 && scl !== 1 && scl !== 11; }
+function evaluatePixel(sample) {
+  var scl = sample.SCL;
+  if (!valid(scl)) return { res: [NaN, NaN] };
+  var ndsi = (sample.B04 - sample.B11) / (sample.B04 + sample.B11 + 1e-8);
+  if (ndsi >= 0.45 && sample.B04 >= 2000) return { res: [NaN, 0] };
+  var ndvi = (sample.B08 - sample.B04) / (sample.B08 + sample.B04 + 1e-8);
+  var hazy = sample.B02 > 1700 && sample.B03 > 1700 && sample.B04 > 1700 && ndvi < 0.3;
+  return { res: [(ndvi + 1) / 2, (isCloud(scl) || hazy) ? 1 : 0] };
+}`;
+
 async function fetchOptical({ ring, bbox, date, width, height, maxCloud = 100, snowMonths = null }) {
   const payload = {
     input: {
@@ -463,6 +502,25 @@ async function fetchOptical({ ring, bbox, date, width, height, maxCloud = 100, s
       responses: [{ identifier: 'res', format: { type: 'image/tiff' } }]
     },
     evalscript: useSnowForDate(date, snowMonths) ? OPTICAL_EVAL_SNOW : OPTICAL_EVAL
+  };
+  const buf = await shFetch(payload);
+  const { bands } = await parseTiff(buf);
+  if (bands.length < 2) throw new Error('Respuesta óptica incompleta (bands=' + bands.length + ')');
+  return { ndvi: bands[0].values, cloud: bands[1].values, width, height };
+}
+
+// Igual a fetchOptical pero con la máscara de calima (solo se usa para nubosidad por polígono).
+async function fetchOpticalHaze({ ring, bbox, date, width, height, maxCloud = 100, snowMonths = null }) {
+  const payload = {
+    input: {
+      bounds: { geometry: { type: 'Polygon', coordinates: [ring] } },
+      data: [{ type: 'sentinel-2-l2a', dataFilter: { timeRange: { from: `${date}T00:00:00Z`, to: `${date}T23:59:59Z` }, maxCloudCoverage: maxCloud } }]
+    },
+    output: {
+      width, height,
+      responses: [{ identifier: 'res', format: { type: 'image/tiff' } }]
+    },
+    evalscript: useSnowForDate(date, snowMonths) ? OPTICAL_EVAL_HAZE_SNOW : OPTICAL_EVAL_HAZE
   };
   const buf = await shFetch(payload);
   const { bands } = await parseTiff(buf);
@@ -643,6 +701,14 @@ async function cachedOptical({ ring, bbox, date, width, height, snowMonths = nul
   const hit = consensusCacheGet(key);
   if (hit) return hit;
   const v = await fetchOptical({ ring, bbox, date, width, height, snowMonths });
+  consensusCacheSet(key, v);
+  return v;
+}
+async function cachedOpticalHaze({ ring, bbox, date, width, height, snowMonths = null }) {
+  const key = consensusCacheKey('s2h', ring, date, width, height, useSnowForDate(date, snowMonths) ? 'snow' : '');
+  const hit = consensusCacheGet(key);
+  if (hit) return hit;
+  const v = await fetchOpticalHaze({ ring, bbox, date, width, height, snowMonths });
   consensusCacheSet(key, v);
   return v;
 }
@@ -946,9 +1012,9 @@ app.post('/api/v2/cloud-polygon', async (req, res) => {
     const out = [];
     for (const d of dates) {
       try {
-        // cachedOptical: reusa el raster óptico cacheado (15 min) para que repetir
-        // "Cargar fechas"/gráfico de nubes no vuelva a pedir la escena a Sentinel Hub.
-        const { ndvi, cloud } = await cachedOptical({ ring, bbox, date: d.date || d, width: size, height: size, snowMonths: snowMonthsOf(m) });
+        // cachedOpticalHaze: reusa el raster óptico cacheado (15 min) y aplica la máscara
+        // de calima además del SCL, para que la nubosidad "real" coincida con lo visible.
+        const { ndvi, cloud } = await cachedOpticalHaze({ ring, bbox, date: d.date || d, width: size, height: size, snowMonths: snowMonthsOf(m) });
         const mask = maskIndices(size, size, bbox, ring);
         const cp = cloudPctOf(cloud, mask);
         out.push({ date: d.date || d, sceneCloud: d.cloudCover ?? null, polygonCloud: cp.cloudPct });
