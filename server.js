@@ -957,6 +957,17 @@ const RVI_CLASSES = [
 // ============================================================
 app.get('/', (req, res) => res.json({ name: 'ITP-EarthWatch API v2', status: 'ok' }));
 app.get('/healthz', (req, res) => res.json({ ok: true, time: new Date().toISOString() }));
+// Calienta la instancia: despierta Render si estaba dormida y deja el token de Sentinel Hub
+// en caché, para que la primera consulta del día no pague además la obtención del token.
+app.get('/warmup', async (req, res) => {
+  try {
+    const fresh = !tokenCache.value || Date.now() >= tokenCache.expiresAt;
+    await getToken();
+    res.json({ ok: true, token: fresh ? 'refrescado' : 'en caché', time: new Date().toISOString() });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String((e && e.message) || e) });
+  }
+});
 app.post('/api/prueba', (req, res) => res.json({ ok: true, received: Object.keys(req.body || {}) }));
 
 function badParams(res, msg) { return res.status(400).json({ error: msg }); }
