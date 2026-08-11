@@ -391,6 +391,54 @@ function catalogNext(j) {
   const n = (j && (j.links || [])).find(l => l.rel === 'next');
   return (n && n.body && n.body.next) || null;
 }
+function sleep(ms) { return new Promise(res => setTimeout(res, ms)); }
+
+// ============================================================
+// TRUE COLOR CON REINTENTO ANTE RESPUESTAS DEGRADADAS
+// ============================================================
+// Sentinel Hub a veces sirve la escena degradada para el mismo granulo: en escala
+// x10000 (el evalscript 2.5*B04*255 satura a blanco, mean ~230) o un granulo casi
+// vacio (imagen negra). El detector mira la fraccion de pixeles saturados (>230) o
+// anegados (<8) Y la dispersion: una escena sana extrema (bosque oscuro, nieve) tiene
+// estructura (std alto); la degradada es un campo uniforme (std casi nulo).
+// Se puede desactivar con TRUECOLOR_RETRY=0 (deploy) o revertir por git.
+const TRUECOLOR_RETRY = process.env.TRUECOLOR_RETRY !== '0';
+function trueColorStats(buf) {
+  const png = PNG.sync.read(buf);
+  const n = png.width * png.height;
+  let white = 0, black = 0, sum = 0, sumSq = 0;
+  for (let i = 0; i < n; i++) {
+    const i4 = i * 4;
+    const lum = 0.299 * png.data[i4] + 0.587 * png.data[i4 + 1] + 0.114 * png.data[i4 + 2];
+    sum += lum; sumSq += lum * lum;
+    if (lum > 230) white++;
+    else if (lum < 8) black++;
+  }
+  const mean = sum / n;
+  const std = Math.sqrt(Math.max(0, sumSq / n - mean * mean));
+  return {
+    whiteFraction: white / n,
+    blackFraction: black / n,
+    mean, std,
+    degraded: (white / n > 0.55 && std < 12) || (black / n > 0.7 && std < 8),
+    width: png.width, height: png.height
+  };
+}
+async function shFetchTrueColor(payload, { attempts = 4, baseDelay = 1500 } = {}) {
+  if (!TRUECOLOR_RETRY) return shFetch(payload);
+  let lastErr = null, lastStats = null;
+  for (let a = 0; a < attempts; a++) {
+    let buf;
+    try { buf = await shFetch(payload); }
+    catch (e) { lastErr = e; if (a < attempts - 1) { await sleep(baseDelay * Math.pow(2, a) * (0.75 + Math.random() * 0.5)); continue; } throw e; }
+    const stats = trueColorStats(buf);
+    if (!stats.degraded) return buf;
+    lastStats = stats;
+    if (a < attempts - 1) await sleep(baseDelay * Math.pow(2, a) * (0.75 + Math.random() * 0.5));
+  }
+  const w = Math.round(lastStats.whiteFraction * 100), b = Math.round(lastStats.blackFraction * 100);
+  throw new Error(`Sentinel Hub sirvió una respuesta truecolor degradada (${w}% blanco, ${b}% negro, std ${lastStats.std.toFixed(1)}); se reintentó ${attempts} veces sin éxito.`);
+}
 
 // ============================================================
 // EVALUACIÓN ÓPTICA (NDVI + nubes SCL, un grupo DN)
@@ -540,7 +588,7 @@ async function fetchTrueColor({ ring, bbox, date, width, height }) {
 function setup() { return { input: ["B02","B03","B04"], output: { bands: 3, sampleType: "UINT8" } }; }
 function evaluatePixel(sample) { return [2.5 * sample.B04 * 255, 2.5 * sample.B03 * 255, 2.5 * sample.B02 * 255]; }`
   };
-  const buf = await shFetch(payload);
+  const buf = await shFetchTrueColor(payload);
   return 'data:image/png;base64,' + buf.toString('base64');
 }
 
@@ -556,7 +604,7 @@ async function fetchTrueColorMasked({ ring, bbox, date, width, height }) {
 function setup() { return { input: ["B02","B03","B04"], output: { bands: 3, sampleType: "UINT8" } }; }
 function evaluatePixel(sample) { return [2.5 * sample.B04 * 255, 2.5 * sample.B03 * 255, 2.5 * sample.B02 * 255]; }`
   };
-  const buf = await shFetch(payload);
+  const buf = await shFetchTrueColor(payload);
   const src = PNG.sync.read(buf);
   const mask = maskIndices(width, height, bbox, ring);
   const inside = new Uint8Array(width * height);
