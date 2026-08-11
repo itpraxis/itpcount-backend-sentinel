@@ -422,11 +422,14 @@ function trueColorPayload({ ring, date, width, height }) {
     evalscript: TRUECOLOR_EVAL
   };
 }
-// Detecta un granulo degradado en las bandas crudas: vacio (todo ~0, imagen negra)
-// o con la banda azul muerta (B02 ~0 mientras B04/B03 sanos, imagen amarilla).
+// Detecta un granulo degradado en las bandas crudas: vacio (todo ~0, imagen negra),
+// con la banda azul muerta (B02 ~0 mientras B04/B03 sanos, imagen amarilla) o
+// "improbablemente oscuro" (ninguna banda supera DN 250 en todo el bbox: no hay nada
+// brillante; suele ser el otro granulo del mismo dia, sin el cultivo, en vez del correcto).
 function trueColorBandStats(bands, width, height) {
   const n = width * height;
   const means = [0, 0, 0];
+  const maxs = [0, 0, 0];
   let valid = 0;
   for (let i = 0; i < n; i++) {
     let all = true;
@@ -434,14 +437,16 @@ function trueColorBandStats(bands, width, height) {
       const v = bands[b][i];
       if (v === undefined || v === null || Number.isNaN(v)) { all = false; break; }
       means[b] += v;
+      if (v > maxs[b]) maxs[b] = v;
     }
     if (all) valid++;
   }
-  if (valid === 0) return { degraded: true, validFraction: 0, means: [0, 0, 0] };
+  if (valid === 0) return { degraded: true, validFraction: 0, means: [0, 0, 0], maxs: [0, 0, 0] };
   const m = means.map(x => x / valid);
   const empty = m[0] < 5 && m[1] < 5 && m[2] < 5;
   const deadBlue = m[2] < 30 && m[0] > 200 && m[1] > 200;
-  return { degraded: valid / n < 0.3 || empty || deadBlue, validFraction: valid / n, means: m };
+  const allDark = Math.max(...maxs) < 250;
+  return { degraded: valid / n < 0.3 || empty || deadBlue || allDark, validFraction: valid / n, means: m, maxs };
 }
 async function shFetchTrueColorBands(payload, { attempts = 4, baseDelay = 1500 } = {}) {
   if (!TRUECOLOR_RETRY) {
@@ -459,7 +464,8 @@ async function shFetchTrueColorBands(payload, { attempts = 4, baseDelay = 1500 }
     if (a < attempts - 1) await sleep(baseDelay * Math.pow(2, a) * (0.75 + Math.random() * 0.5));
   }
   const m = lastStats.means.map(x => Math.round(x));
-  throw new Error(`Sentinel Hub sirvió un granulo truecolor degradado (B04/B03/B02 medio ${m.join('/')}, válidos ${Math.round(lastStats.validFraction * 100)}%); se reintentó ${attempts} veces sin éxito.`);
+  const x = lastStats.maxs.map(x => Math.round(x));
+  throw new Error(`Sentinel Hub sirvió un granulo truecolor degradado (B04/B03/B02 medio ${m.join('/')} máx ${x.join('/')}, válidos ${Math.round(lastStats.validFraction * 100)}%); se reintentó ${attempts} veces sin éxito.`);
 }
 // Render propio del truecolor desde bandas DN (0-10000) → reflectancia 0-1 → *2.5.
 function renderTrueColorPng(bands, width, height) {
