@@ -14,6 +14,7 @@ const cors = require('cors');
 const rateLimit = require('express-rate-limit');
 const crypto = require('crypto');
 const fs = require('fs');
+const path = require('path');
 const { fromArrayBuffer } = require('geotiff');
 const { PNG } = require('pngjs');
 
@@ -1021,6 +1022,165 @@ const RVI_CLASSES = [
 ];
 
 // ============================================================
+// ESTIMACIÓN DE VOLUMEN (ha cosechadas × vol_ha)
+// Tabla de rendimiento POR DEFECTO, referencial INFOR (IT220, 2018),
+// recalibrable con los datos reales del cliente (Solicitud-cliente).
+// ============================================================
+// MAI (m³/ha/año) a la edad de rotación según clase de sitio. Valores tipo del
+// estudio INFOR IT220: pino radiata ~23-28 en zonas 4/6/7 (macrorregión II),
+// E. globulus ~19-26 con corrección a la baja de 20-30% por Gonipterus/sequía,
+// E. nitens ~34 (sus zonas principales son 4, 6, 7 y 9). La forma de la curva de
+// volumen en pie es Chapman-Richards (k, m), calibrada para que el IMA a la edad
+// de rotación sea exactamente el MAI del sitio.
+const YIELD_CFG = {
+  pinus:    { rot: 24, k: 0.08, m: 2.5, alto: 30, medio: 24, bajo: 16 },
+  globulus: { rot: 12, k: 0.22, m: 2.5, alto: 26, medio: 19, bajo: 12 },
+  nitens:   { rot: 14, k: 0.14, m: 2.2, alto: 38, medio: 33, bajo: 24 }
+};
+const YIELD_MIN_AGE = 5, YIELD_MAX_AGE = 30;
+const VALID_SPECIES = ['pinus', 'globulus', 'nitens'];
+const VALID_SITES = ['alto', 'medio', 'bajo'];
+const SPECIES_LABELS = { pinus: 'Pino radiata', globulus: 'Eucalyptus globulus', nitens: 'Eucalyptus nitens' };
+
+// Genera la tabla de vol_ha (m³/ha por especie, sitio y edad) con la curva de
+// Chapman-Richards calibrada para que el IMA a la rotación sea el MAI del sitio.
+function buildYieldTable(cfg) {
+  const out = {};
+  for (const [sp, c] of Object.entries(cfg)) {
+    out[sp] = {};
+    for (const site of VALID_SITES) {
+      const denom = Math.pow(1 - Math.exp(-c.k * c.rot), c.m);
+      out[sp][site] = {};
+      for (let a = YIELD_MIN_AGE; a <= YIELD_MAX_AGE; a++) {
+        out[sp][site][a] = Math.round((c[site] * c.rot) * Math.pow(1 - Math.exp(-c.k * a), c.m) / denom);
+      }
+    }
+  }
+  return out;
+}
+
+// Tabla de rendimiento EDITABLE: si existe data/rendimiento_volumen.csv (columnas
+// especie,sitio,edad,vol_ha; una fila por edad) se carga y tiene prioridad sobre la
+// tabla por defecto. Eliminando el CSV se vuelve a la curva YIELD_CFG (INFOR IT220).
+function loadYieldTable() {
+  const csvPath = path.join(__dirname, 'data', 'rendimiento_volumen.csv');
+  try {
+    const rows = {};
+    for (const raw of fs.readFileSync(csvPath, 'utf8').split(/\r?\n/)) {
+      const line = raw.trim();
+      if (!line || line.startsWith('#')) continue;
+      const [esp, sitio, edad, vol] = line.split(',').map(s => s.trim());
+      if (!VALID_SPECIES.includes(esp) || !VALID_SITES.includes(sitio)) continue;
+      const a = parseInt(edad, 10), v = parseFloat(vol);
+      if (!Number.isFinite(a) || !Number.isFinite(v)) continue;
+      if (a < YIELD_MIN_AGE || a > YIELD_MAX_AGE) continue;
+      (rows[esp] = rows[esp] || {})[sitio] = rows[esp][sitio] || {};
+      rows[esp][sitio][a] = Math.round(v);
+    }
+    const complete = VALID_SPECIES.every(sp => VALID_SITES.every(site => rows[sp] && rows[sp][site]));
+    if (complete) {
+      console.log('[volumen] tabla de rendimiento cargada desde ' + csvPath);
+      return rows;
+    }
+    console.warn('[volumen] CSV incompleto (' + csvPath + '); se usa la tabla por defecto');
+  } catch (e) {
+    console.warn('[volumen] sin CSV de rendimiento; se usa la tabla por defecto (' + e.message + ')');
+  }
+  return buildYieldTable(YIELD_CFG);
+}
+const YIELD_TABLE = loadYieldTable();
+let _yieldTable = null, _yieldMtime = -1;
+// Relee el CSV en cada llamada si cambió (mtime): editar data/rendimiento_volumen.csv
+// se aplica en la siguiente petición, sin reiniciar el servidor.
+function yieldTable() {
+  const csvPath = path.join(__dirname, 'data', 'rendimiento_volumen.csv');
+  try {
+    const st = fs.statSync(csvPath);
+    if (st.mtimeMs !== _yieldMtime) {
+      _yieldTable = loadYieldTable();
+      _yieldMtime = st.mtimeMs;
+    }
+  } catch (e) {
+    if (!_yieldTable) _yieldTable = buildYieldTable(YIELD_CFG);
+  }
+  return _yieldTable;
+}
+function volHaOf(speciesId, siteId, age) {
+  const sp = yieldTable()[speciesId];
+  const st = sp && sp[siteId];
+  if (!st) return null;
+  const a = Math.round(Number(age));
+  if (!Number.isFinite(a) || a < YIELD_MIN_AGE || a > YIELD_MAX_AGE) return null;
+  return { age: a, volHa: st[a] };
+}
+
+// Detección heurística de especie sobre los píxeles clasificados como bosque en la
+// escena "antes". El eucalipto de copa cerrada muestra NDVI medio alto y poca
+// dispersión; el pino radiata presenta NDVI algo menor y mayor variabilidad (dosel
+// más abierto con sotobosque). Es una clasificación referencial: el usuario puede
+// corregirla manualmente. No distingue globulus de nitens (espectro similar).
+function detectSpecies(ndvi, mask) {
+  if (!ndvi || !mask) return { group: 'unknown', label: 'Sin escena óptica de referencia', confidence: 0 };
+  const vals = [];
+  for (let k = 0; k < mask.length; k++) {
+    const p = mask[k];
+    const v = ndvi[p];
+    if (v === undefined || v === null || Number.isNaN(v) || v < 0.80) continue;
+    vals.push(v);
+  }
+  const n = vals.length;
+  if (n < 50) return { group: 'unknown', label: 'Sin píxeles de bosque suficientes', confidence: 0 };
+  const mean = vals.reduce((s, v) => s + v, 0) / n;
+  const sd = Math.sqrt(vals.reduce((s, v) => s + (v - mean) * (v - mean), 0) / n);
+  const cv = sd / mean;
+  if (mean >= 0.88 && cv <= 0.10) return { group: 'eucalipto', label: 'Eucalyptus (copas cerradas)', confidence: 0.8 };
+  if (mean >= 0.85 && cv <= 0.14) return { group: 'eucalipto', label: 'Eucalyptus (probable)', confidence: 0.6 };
+  if (mean >= 0.80) return { group: 'pino', label: 'Pino radiata (probable)', confidence: 0.6 };
+  return { group: 'pino', label: 'Pino radiata', confidence: 0.5 };
+}
+
+// Clase de sitio inferida por coordenadas (heurística por latitud; referencial y
+// editable en el formulario). El mapa fino por comuna/zona de crecimiento se puede
+// calibrar después con los propios sitios/índices de sitio de las geocercas del cliente.
+function inferSiteClass(lat) {
+  if (lat < -37.5) return { id: 'alto', label: 'Alto', note: 'inferida: sur (Araucanía sur / Los Ríos)' };
+  if (lat > -34.8) return { id: 'bajo', label: 'Bajo', note: 'inferida: norte (Valparaíso / RM / O\'Higgins norte)' };
+  return { id: 'medio', label: 'Medio', note: 'inferida: centro (Maule / Biobío / Araucanía norte)' };
+}
+
+// Construye el bloque "volumen" para cualquier análisis que entregue ha de bosque
+// perdido (cosecha): detección de especie + clase de sitio + m³ estimados.
+function computeVolumeInfo(reqBody, ndviBefore, mask, bbox, lostHa, date2) {
+  const speciesIn = String(reqBody.especie || '').trim().toLowerCase();
+  const siteIn = String(reqBody.sitio || 'auto').trim().toLowerCase();
+  const ageIn = (reqBody.edad !== undefined && reqBody.edad !== null && reqBody.edad !== '') ? Number(reqBody.edad) : NaN;
+  const anioIn = (reqBody.anioPlantacion !== undefined && reqBody.anioPlantacion !== null && reqBody.anioPlantacion !== '') ? Number(reqBody.anioPlantacion) : NaN;
+  const detected = detectSpecies(ndviBefore, mask);
+  const speciesSel = VALID_SPECIES.includes(speciesIn)
+    ? speciesIn
+    : (detected.group === 'eucalipto' ? 'globulus' : (detected.group === 'pino' ? 'pinus' : null));
+  const siteSel = VALID_SITES.includes(siteIn)
+    ? { id: siteIn, label: siteIn[0].toUpperCase() + siteIn.slice(1), inferred: false, note: 'seleccionado manualmente' }
+    : inferSiteClass(bbox[1] + (bbox[3] - bbox[1]) / 2);
+  const edad = !Number.isNaN(ageIn) ? ageIn : (!Number.isNaN(anioIn) ? (new Date(date2).getFullYear() - anioIn) : NaN);
+  const estimado = (!Number.isNaN(edad) && speciesSel && lostHa !== null)
+    ? (() => { const v = volHaOf(speciesSel, siteSel.id, edad); return v ? {
+          especie: speciesSel, especieLabel: SPECIES_LABELS[speciesSel],
+          edad: v.age, volHa: v.volHa, haCosechadas: lostHa, m3: Math.round(lostHa * v.volHa),
+          sitio: siteSel.id, sitioLabel: siteSel.label,
+          fuente: 'INFOR 2018 (IT220) · valores referenciales'
+        } : null; })()
+    : null;
+  return {
+    haCosechadas: lostHa,
+    especie: { deteccion: detected, seleccion: speciesSel, pista: 'Detección heurística sobre los píxeles de bosque de la escena "antes" (NDVI medio y dispersión); corregible por el usuario.' },
+    sitio: siteSel,
+    edad: !Number.isNaN(edad) ? edad : null,
+    estimado
+  };
+}
+
+// ============================================================
 // RUTAS
 // ============================================================
 app.get('/', (req, res) => res.json({ name: 'ITP-EarthWatch API v2', status: 'ok' }));
@@ -1371,6 +1531,11 @@ app.post('/api/v2/change', async (req, res) => {
     const imgR = radar ? toPng(dRvi, width, height, colorDiff, mask) : null;
     const agreementPct = agree.valid ? (((agree.bothDecrease + agree.bothIncrease) / agree.valid) * 100) : null;
     const quota = await commitPolygon(req, res, m);
+
+    // ---- Estimación de volumen (ha cosechadas × vol_ha) ----
+    const lostHa = (robust && typeof robust.lost === 'number') ? robust.lost
+      : ((comp.forest && typeof comp.forest.lost === 'number') ? comp.forest.lost : null);
+    const volumen = computeVolumeInfo(req.body, o1.ndvi, mask, bbox, lostHa, date2);
     res.json({
       optical: { date1, date2, dNdviMean: mean(dNdvi), image: imgN },
       radar: radar ? { date1: radar.date1, date2: radar.date2, polarization: radar.pol, dRviMean: mean(dRvi), image: imgR } : null,
@@ -1383,6 +1548,7 @@ app.post('/api/v2/change', async (req, res) => {
       robust,
       consensus: !!radar,
       snow: { months: snowMonthsOf(m) || [], mask1: useSnowForDate(date1, snowMonthsOf(m)), mask2: useSnowForDate(date2, snowMonthsOf(m)) },
+      volumen,
       quota
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -1651,6 +1817,9 @@ app.post('/api/v2/compare', async (req, res) => {
     } catch (e) { /* radar opcional */ }
     const comp = compareCategories(c1, c2, mask, cls, areaPx);
     const robust = robustChange(c1, c2, o1.ndvi, o2.ndvi, mask, cls, areaPx, band);
+    const lostHa = (robust && typeof robust.lost === 'number') ? robust.lost
+      : ((comp.forest && typeof comp.forest.lost === 'number') ? comp.forest.lost : null);
+    const volumen = computeVolumeInfo(req.body, o1.ndvi, mask, bbox, lostHa, date2);
 
     const quota = await commitPolygon(req, res, m);
     res.json({
@@ -1671,6 +1840,7 @@ app.post('/api/v2/compare', async (req, res) => {
       bbox, width, height,
       consensus: !!radar,
       snow: { months: snowMonthsOf(m) || [], mask1: useSnowForDate(date1, snowMonthsOf(m)), mask2: useSnowForDate(date2, snowMonthsOf(m)) },
+      volumen,
       quota
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -1749,6 +1919,9 @@ app.post('/api/v2/compare-rvi', async (req, res) => {
     rc2 = consensusClassify(r2.rvi, s2 && s2.ndvi, mask, rcls, OPTICAL_CLASSES);
     const comp = compareCategories(rc1, rc2, mask, rcls, areaPx);
     const robust = robustChange(rc1, rc2, r1.rvi, r2.rvi, mask, rcls, areaPx, band);
+    const lostHa = (robust && typeof robust.lost === 'number') ? robust.lost
+      : ((comp.forest && typeof comp.forest.lost === 'number') ? comp.forest.lost : null);
+    const volumen = computeVolumeInfo(req.body, s1 && s1.ndvi, mask, bbox, lostHa, date2);
     const sec1Date = inWindow(date1, opticalDate1) ? opticalDate1 : (s1 && s1.date);
     const sec2Date = inWindow(date2, opticalDate2) ? opticalDate2 : (s2 && s2.date);
     const quota = await commitPolygon(req, res, m);
@@ -1768,6 +1941,7 @@ app.post('/api/v2/compare-rvi', async (req, res) => {
       consensusSecondaryDates: [sec1Date, sec2Date],
       snow: { months: snowMonthsOf(m) || [], mask1: useSnowForDate(sec1Date, snowMonthsOf(m)), mask2: useSnowForDate(sec2Date, snowMonthsOf(m)) },
       snowStats1: snowMaskStats(s1), snowStats2: snowMaskStats(s2),
+      volumen,
       quota
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
