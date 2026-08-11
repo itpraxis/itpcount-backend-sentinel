@@ -394,50 +394,84 @@ function catalogNext(j) {
 function sleep(ms) { return new Promise(res => setTimeout(res, ms)); }
 
 // ============================================================
-// TRUE COLOR CON REINTENTO ANTE RESPUESTAS DEGRADADAS
+// TRUE COLOR AUTORENDERIZADO (bandas TIFF con units DN)
 // ============================================================
-// Sentinel Hub a veces sirve la escena degradada para el mismo granulo: en escala
-// x10000 (el evalscript 2.5*B04*255 satura a blanco, mean ~230) o un granulo casi
-// vacio (imagen negra). El detector mira la fraccion de pixeles saturados (>230) o
-// anegados (<8) Y la dispersion: una escena sana extrema (bosque oscuro, nieve) tiene
-// estructura (std alto); la degradada es un campo uniforme (std casi nulo).
-// Se puede desactivar con TRUECOLOR_RETRY=0 (deploy) o revertir por git.
+// El render PNG delegado a Sentinel Hub era inestable: cuando el granulo se servia en
+// escala x10000 (nativa L2A) en vez de reflectancia 0-1, el evalscript 2.5*B*255
+// saturada a blanco; con la banda B02 muerta quedaba amarillo. Pedimos las bandas
+// crudas B04/B03/B02 como TIFF con units:"DN" (escala forzada 0-10000, independiente
+// de lo que el granulo interno use) y renderizamos nosotros: refl = DN/10000, *2.5,
+// clamp. El estado blanco pasa a ser imposible. Detector de granulo degradado en las
+// bandas (vacio o banda azul muerta) con reintento; desactivable con TRUECOLOR_RETRY=0.
 const TRUECOLOR_RETRY = process.env.TRUECOLOR_RETRY !== '0';
-function trueColorStats(buf) {
-  const png = PNG.sync.read(buf);
-  const n = png.width * png.height;
-  let white = 0, black = 0, sum = 0, sumSq = 0;
-  for (let i = 0; i < n; i++) {
-    const i4 = i * 4;
-    const lum = 0.299 * png.data[i4] + 0.587 * png.data[i4 + 1] + 0.114 * png.data[i4 + 2];
-    sum += lum; sumSq += lum * lum;
-    if (lum > 230) white++;
-    else if (lum < 8) black++;
-  }
-  const mean = sum / n;
-  const std = Math.sqrt(Math.max(0, sumSq / n - mean * mean));
+const TRUECOLOR_EVAL = `//VERSION=3
+function setup() {
   return {
-    whiteFraction: white / n,
-    blackFraction: black / n,
-    mean, std,
-    degraded: (white / n > 0.55 && std < 12) || (black / n > 0.7 && std < 8),
-    width: png.width, height: png.height
+    input: [{ bands: ["B04","B03","B02"], units: "DN" }],
+    output: { id: "res", bands: 3, sampleType: "FLOAT32" }
   };
 }
-async function shFetchTrueColor(payload, { attempts = 4, baseDelay = 1500 } = {}) {
-  if (!TRUECOLOR_RETRY) return shFetch(payload);
-  let lastErr = null, lastStats = null;
+function evaluatePixel(sample) { return { res: [sample.B04, sample.B03, sample.B02] }; }`;
+function trueColorPayload({ ring, date, width, height }) {
+  return {
+    input: {
+      bounds: { geometry: { type: 'Polygon', coordinates: [ring] } },
+      data: [{ type: 'sentinel-2-l2a', dataFilter: { timeRange: { from: `${date}T00:00:00Z`, to: `${date}T23:59:59Z` }, maxCloudCoverage: 100 }, mosaicking: 'SCENE', units: 'DN' }]
+    },
+    output: { width, height, responses: [{ identifier: 'res', format: { type: 'image/tiff' } }] },
+    evalscript: TRUECOLOR_EVAL
+  };
+}
+// Detecta un granulo degradado en las bandas crudas: vacio (todo ~0, imagen negra)
+// o con la banda azul muerta (B02 ~0 mientras B04/B03 sanos, imagen amarilla).
+function trueColorBandStats(bands, width, height) {
+  const n = width * height;
+  const means = [0, 0, 0];
+  let valid = 0;
+  for (let i = 0; i < n; i++) {
+    let all = true;
+    for (let b = 0; b < 3; b++) {
+      const v = bands[b][i];
+      if (v === undefined || v === null || Number.isNaN(v)) { all = false; break; }
+      means[b] += v;
+    }
+    if (all) valid++;
+  }
+  if (valid === 0) return { degraded: true, validFraction: 0, means: [0, 0, 0] };
+  const m = means.map(x => x / valid);
+  const empty = m[0] < 5 && m[1] < 5 && m[2] < 5;
+  const deadBlue = m[2] < 30 && m[0] > 200 && m[1] > 200;
+  return { degraded: valid / n < 0.3 || empty || deadBlue, validFraction: valid / n, means: m };
+}
+async function shFetchTrueColorBands(payload, { attempts = 4, baseDelay = 1500 } = {}) {
+  if (!TRUECOLOR_RETRY) {
+    const { bands } = await parseTiff(await shFetch(payload));
+    return bands.map(b => b.values);
+  }
+  let lastStats = null;
   for (let a = 0; a < attempts; a++) {
-    let buf;
-    try { buf = await shFetch(payload); }
-    catch (e) { lastErr = e; if (a < attempts - 1) { await sleep(baseDelay * Math.pow(2, a) * (0.75 + Math.random() * 0.5)); continue; } throw e; }
-    const stats = trueColorStats(buf);
-    if (!stats.degraded) return buf;
+    let bands;
+    try { bands = (await parseTiff(await shFetch(payload))).bands.map(b => b.values); }
+    catch (e) { if (a < attempts - 1) { await sleep(baseDelay * Math.pow(2, a) * (0.75 + Math.random() * 0.5)); continue; } throw e; }
+    const stats = trueColorBandStats(bands, payload.output.width, payload.output.height);
+    if (!stats.degraded) return bands;
     lastStats = stats;
     if (a < attempts - 1) await sleep(baseDelay * Math.pow(2, a) * (0.75 + Math.random() * 0.5));
   }
-  const w = Math.round(lastStats.whiteFraction * 100), b = Math.round(lastStats.blackFraction * 100);
-  throw new Error(`Sentinel Hub sirvió una respuesta truecolor degradada (${w}% blanco, ${b}% negro, std ${lastStats.std.toFixed(1)}); se reintentó ${attempts} veces sin éxito.`);
+  const m = lastStats.means.map(x => Math.round(x));
+  throw new Error(`Sentinel Hub sirvió un granulo truecolor degradado (B04/B03/B02 medio ${m.join('/')}, válidos ${Math.round(lastStats.validFraction * 100)}%); se reintentó ${attempts} veces sin éxito.`);
+}
+// Render propio del truecolor desde bandas DN (0-10000) → reflectancia 0-1 → *2.5.
+function renderTrueColorPng(bands, width, height) {
+  const out = new PNG({ width, height });
+  for (let i = 0; i < width * height; i++) {
+    const rv = v => (Number.isFinite(v) ? v : 0);
+    out.data[i * 4] = Math.max(0, Math.min(255, Math.round(2.5 * (rv(bands[0][i]) / 10000) * 255)));
+    out.data[i * 4 + 1] = Math.max(0, Math.min(255, Math.round(2.5 * (rv(bands[1][i]) / 10000) * 255)));
+    out.data[i * 4 + 2] = Math.max(0, Math.min(255, Math.round(2.5 * (rv(bands[2][i]) / 10000) * 255)));
+    out.data[i * 4 + 3] = 255;
+  }
+  return PNG.sync.write(out);
 }
 
 // ============================================================
@@ -578,34 +612,14 @@ async function fetchOpticalHaze({ ring, bbox, date, width, height, maxCloud = 10
 }
 
 async function fetchTrueColor({ ring, bbox, date, width, height }) {
-  const payload = {
-    input: {
-      bounds: { geometry: { type: 'Polygon', coordinates: [ring] } },
-      data: [{ type: 'sentinel-2-l2a', dataFilter: { timeRange: { from: `${date}T00:00:00Z`, to: `${date}T23:59:59Z` }, maxCloudCoverage: 100 }, mosaicking: 'SCENE' }]
-    },
-    output: { width, height, bands: 3, format: 'image/png', crs: CRS },
-    evalscript: `//VERSION=3
-function setup() { return { input: ["B02","B03","B04"], output: { bands: 3, sampleType: "UINT8" } }; }
-function evaluatePixel(sample) { return [2.5 * sample.B04 * 255, 2.5 * sample.B03 * 255, 2.5 * sample.B02 * 255]; }`
-  };
-  const buf = await shFetchTrueColor(payload);
-  return 'data:image/png;base64,' + buf.toString('base64');
+  const bands = await shFetchTrueColorBands(trueColorPayload({ ring, date, width, height }));
+  return 'data:image/png;base64,' + renderTrueColorPng(bands, width, height).toString('base64');
 }
 
 // Truecolor recortado al polígono: fuera del anillo queda transparente (para superponer en el mapa).
 async function fetchTrueColorMasked({ ring, bbox, date, width, height }) {
-  const payload = {
-    input: {
-      bounds: { geometry: { type: 'Polygon', coordinates: [ring] } },
-      data: [{ type: 'sentinel-2-l2a', dataFilter: { timeRange: { from: `${date}T00:00:00Z`, to: `${date}T23:59:59Z` }, maxCloudCoverage: 100 }, mosaicking: 'SCENE' }]
-    },
-    output: { width, height, bands: 3, format: 'image/png', crs: CRS },
-    evalscript: `//VERSION=3
-function setup() { return { input: ["B02","B03","B04"], output: { bands: 3, sampleType: "UINT8" } }; }
-function evaluatePixel(sample) { return [2.5 * sample.B04 * 255, 2.5 * sample.B03 * 255, 2.5 * sample.B02 * 255]; }`
-  };
-  const buf = await shFetchTrueColor(payload);
-  const src = PNG.sync.read(buf);
+  const bands = await shFetchTrueColorBands(trueColorPayload({ ring, date, width, height }));
+  const src = PNG.sync.read(renderTrueColorPng(bands, width, height));
   const mask = maskIndices(width, height, bbox, ring);
   const inside = new Uint8Array(width * height);
   for (const p of mask) inside[p] = 1;
@@ -1011,7 +1025,7 @@ app.get('/warmup', async (req, res) => {
   try {
     const fresh = !tokenCache.value || Date.now() >= tokenCache.expiresAt;
     await getToken();
-    res.json({ ok: true, token: fresh ? 'refrescado' : 'en caché', time: new Date().toISOString() });
+    res.json({ ok: true, token: fresh ? 'refrescado' : 'en caché', time: new Date().toISOString(), truecolor: 'bands-tiff' });
   } catch (e) {
     res.status(500).json({ ok: false, error: String((e && e.message) || e) });
   }
