@@ -1059,11 +1059,18 @@ function buildYieldTable(cfg) {
   return out;
 }
 
-// Tabla de rendimiento EDITABLE: si existe data/rendimiento_volumen.csv (columnas
+// Tabla de rendimiento EDITABLE: si existe rendimiento_volumen.csv (columnas
 // especie,sitio,edad,vol_ha; una fila por edad) se carga y tiene prioridad sobre la
 // tabla por defecto. Eliminando el CSV se vuelve a la curva YIELD_CFG (INFOR IT220).
+// Ubicación: se prefiere la carpeta del Frontend (más accesible para el cliente);
+// si no existe, la del Backend; y RENDIMIENTO_CSV con un path explícito gana siempre.
+function yieldCsvPath() {
+  if (process.env.RENDIMIENTO_CSV) return process.env.RENDIMIENTO_CSV;
+  const front = path.join(__dirname, '..', 'Frontend', 'data', 'rendimiento_volumen.csv');
+  return fs.existsSync(front) ? front : path.join(__dirname, 'data', 'rendimiento_volumen.csv');
+}
 function loadYieldTable() {
-  const csvPath = path.join(__dirname, 'data', 'rendimiento_volumen.csv');
+  const csvPath = yieldCsvPath();
   try {
     const rows = {};
     for (const raw of fs.readFileSync(csvPath, 'utf8').split(/\r?\n/)) {
@@ -1090,10 +1097,10 @@ function loadYieldTable() {
 }
 const YIELD_TABLE = loadYieldTable();
 let _yieldTable = null, _yieldMtime = -1;
-// Relee el CSV en cada llamada si cambió (mtime): editar data/rendimiento_volumen.csv
+// Relee el CSV en cada llamada si cambió (mtime): editar el CSV
 // se aplica en la siguiente petición, sin reiniciar el servidor.
 function yieldTable() {
-  const csvPath = path.join(__dirname, 'data', 'rendimiento_volumen.csv');
+  const csvPath = yieldCsvPath();
   try {
     const st = fs.statSync(csvPath);
     if (st.mtimeMs !== _yieldMtime) {
@@ -1112,6 +1119,13 @@ function volHaOf(speciesId, siteId, age) {
   const a = Math.round(Number(age));
   if (!Number.isFinite(a) || a < YIELD_MIN_AGE || a > YIELD_MAX_AGE) return null;
   return { age: a, volHa: st[a] };
+}
+// Metadatos de la tabla en uso, para /warmup (verificar deploy del backend).
+function yieldMeta() {
+  const t = yieldTable();
+  let filas = 0;
+  for (const sp of Object.values(t)) for (const st of Object.values(sp)) filas += Object.keys(st).length;
+  return { archivo: yieldCsvPath(), filas, csv: 'Frontend\\data\\rendimiento_volumen.csv (preferido) o Backend\\data\\rendimiento_volumen.csv' };
 }
 
 // Detección heurística de especie sobre los píxeles clasificados como bosque en la
@@ -1191,7 +1205,7 @@ app.get('/warmup', async (req, res) => {
   try {
     const fresh = !tokenCache.value || Date.now() >= tokenCache.expiresAt;
     await getToken();
-    res.json({ ok: true, token: fresh ? 'refrescado' : 'en caché', time: new Date().toISOString(), truecolor: 'bands-tiff' });
+    res.json({ ok: true, token: fresh ? 'refrescado' : 'en caché', time: new Date().toISOString(), truecolor: 'bands-tiff', volumen: yieldMeta() });
   } catch (e) {
     res.status(500).json({ ok: false, error: String((e && e.message) || e) });
   }

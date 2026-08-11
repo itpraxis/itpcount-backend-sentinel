@@ -1,5 +1,5 @@
 # Tabla de rendimiento de volumen en pie (m3/ha) por especie, clase de sitio y edad.
-# EDITABLE: modifica los valores y reinicia el backend para que se apliquen.
+# EDITABLE: modifica los valores; el backend los aplica en la siguiente peticion (sin reiniciar).
 # Este archivo tiene prioridad sobre la curva por defecto (INFOR IT220, 2018).
 # Para volver a los valores por defecto, elimina o renombra este archivo.
 # Columnas: especie,sitio,edad,vol_ha   (especie: pinus|globulus|nitens; sitio: alto|medio|bajo; edad: 5..30)
