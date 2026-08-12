@@ -1519,6 +1519,7 @@ app.post('/api/v2/change', async (req, res) => {
     }
     const comp = compareCategories(c1, c2, mask, cls, areaPx);
     const robust = robustChange(c1, c2, o1.ndvi, o2.ndvi, mask, cls, areaPx, band);
+    const corte = robustChange(c1, c2, o1.ndvi, o2.ndvi, mask, cls, areaPx, CORTE_BAND);
 
     const dNdvi = new Float32Array(width * height).fill(NaN);
     const dRvi = new Float32Array(width * height).fill(NaN);
@@ -1547,9 +1548,12 @@ app.post('/api/v2/change', async (req, res) => {
     const quota = await commitPolygon(req, res, m);
 
     // ---- Estimación de volumen (ha cosechadas × vol_ha) ----
-    const lostHa = (robust && typeof robust.lost === 'number') ? robust.lost
+    // La cosecha se estima con la banda FIJA de corte claro (CORTE_BAND), no con la
+    // banda ajustable del formulario: así el número de cosecha no cambia con ese control.
+    const lostHa = (corte && typeof corte.lost === 'number') ? corte.lost
       : ((comp.forest && typeof comp.forest.lost === 'number') ? comp.forest.lost : null);
     const volumen = computeVolumeInfo(req.body, o1.ndvi, mask, bbox, lostHa, date2);
+    if (volumen && corte) volumen.corteBand = corte.band;
     res.json({
       optical: { date1, date2, dNdviMean: mean(dNdvi), image: imgN },
       radar: radar ? { date1: radar.date1, date2: radar.date2, polarization: radar.pol, dRviMean: mean(dRvi), image: imgR } : null,
@@ -1560,6 +1564,7 @@ app.post('/api/v2/change', async (req, res) => {
       bbox, width, height,
       classes: comp.rows,
       robust,
+      corte,
       consensus: !!radar,
       snow: { months: snowMonthsOf(m) || [], mask1: useSnowForDate(date1, snowMonthsOf(m)), mask2: useSnowForDate(date2, snowMonthsOf(m)) },
       volumen,
@@ -1745,6 +1750,9 @@ const colorChangeMap = (c) => {
 // contabilizan como cambio. Se construye sobre las clases finales (consenso si hubo
 // radar), por lo que no altera las superficies por categoría ya mostradas.
 const FOREST_BAND = 0.02;
+// Banda FIJA para estimar la cosecha (corte claro): no depende de la banda que el
+// usuario ajuste en el formulario, para que "cuánto se cosechó" sea un número estable.
+const CORTE_BAND = 0.02;
 function robustChange(c1, c2, v1, v2, mask, classes, areaPerPx, band = FOREST_BAND) {
   const f = classes.findIndex(c => c.forest);
   const out = { lost: 0, gained: 0, valid: 0 };
@@ -1831,9 +1839,11 @@ app.post('/api/v2/compare', async (req, res) => {
     } catch (e) { /* radar opcional */ }
     const comp = compareCategories(c1, c2, mask, cls, areaPx);
     const robust = robustChange(c1, c2, o1.ndvi, o2.ndvi, mask, cls, areaPx, band);
-    const lostHa = (robust && typeof robust.lost === 'number') ? robust.lost
+    const corte = robustChange(c1, c2, o1.ndvi, o2.ndvi, mask, cls, areaPx, CORTE_BAND);
+    const lostHa = (corte && typeof corte.lost === 'number') ? corte.lost
       : ((comp.forest && typeof comp.forest.lost === 'number') ? comp.forest.lost : null);
     const volumen = computeVolumeInfo(req.body, o1.ndvi, mask, bbox, lostHa, date2);
+    if (volumen && corte) volumen.corteBand = corte.band;
 
     const quota = await commitPolygon(req, res, m);
     res.json({
@@ -1844,6 +1854,7 @@ app.post('/api/v2/compare', async (req, res) => {
         classes: comp.rows,
         change: comp.change,
         robust,
+        corte,
         agreementPct: comp.agreementPct, changedPct: comp.changedPct,
         areaPerPixel: areaPx,
         image1: toPng(c1, width, height, colorClass(cls), mask),
@@ -1933,9 +1944,11 @@ app.post('/api/v2/compare-rvi', async (req, res) => {
     rc2 = consensusClassify(r2.rvi, s2 && s2.ndvi, mask, rcls, OPTICAL_CLASSES);
     const comp = compareCategories(rc1, rc2, mask, rcls, areaPx);
     const robust = robustChange(rc1, rc2, r1.rvi, r2.rvi, mask, rcls, areaPx, band);
-    const lostHa = (robust && typeof robust.lost === 'number') ? robust.lost
+    const corte = robustChange(rc1, rc2, r1.rvi, r2.rvi, mask, rcls, areaPx, CORTE_BAND);
+    const lostHa = (corte && typeof corte.lost === 'number') ? corte.lost
       : ((comp.forest && typeof comp.forest.lost === 'number') ? comp.forest.lost : null);
     const volumen = computeVolumeInfo(req.body, s1 && s1.ndvi, mask, bbox, lostHa, date2);
+    if (volumen && corte) volumen.corteBand = corte.band;
     const sec1Date = inWindow(date1, opticalDate1) ? opticalDate1 : (s1 && s1.date);
     const sec2Date = inWindow(date2, opticalDate2) ? opticalDate2 : (s2 && s2.date);
     const quota = await commitPolygon(req, res, m);
@@ -1945,6 +1958,7 @@ app.post('/api/v2/compare-rvi', async (req, res) => {
         forest: comp.forest, classes: comp.rows, change: comp.change,
         agreementPct: comp.agreementPct, changedPct: comp.changedPct,
         robust,
+        corte,
         areaPerPixel: areaPx,
         image1: toPng(rc1, width, height, colorClass(rcls), mask),
         image2: toPng(rc2, width, height, colorClass(rcls), mask),
