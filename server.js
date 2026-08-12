@@ -1563,6 +1563,7 @@ app.post('/api/v2/change', async (req, res) => {
       },
       bbox, width, height,
       classes: comp.rows,
+      forest: comp.forest,
       robust,
       corte,
       consensus: !!radar,
