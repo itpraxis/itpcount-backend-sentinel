@@ -1157,9 +1157,9 @@ function detectSpecies(ndvi, mask) {
 // editable en el formulario). El mapa fino por comuna/zona de crecimiento se puede
 // calibrar después con los propios sitios/índices de sitio de las geocercas del cliente.
 function inferSiteClass(lat) {
-  if (lat < -37.5) return { id: 'alto', label: 'Alto', note: 'inferida: sur (Araucanía sur / Los Ríos)' };
-  if (lat > -34.8) return { id: 'bajo', label: 'Bajo', note: 'inferida: norte (Valparaíso / RM / O\'Higgins norte)' };
-  return { id: 'medio', label: 'Medio', note: 'inferida: centro (Maule / Biobío / Araucanía norte)' };
+  if (lat < -37.5) return { id: 'alto', label: 'Alto', inferred: true, note: 'inferida: sur (Araucanía sur / Los Ríos)' };
+  if (lat > -34.8) return { id: 'bajo', label: 'Bajo', inferred: true, note: 'inferida: norte (Valparaíso / RM / O\'Higgins norte)' };
+  return { id: 'medio', label: 'Medio', inferred: true, note: 'inferida: centro (Maule / Biobío / Araucanía norte)' };
 }
 
 // Construye el bloque "volumen" para cualquier análisis que entregue ha de bosque
@@ -1187,7 +1187,7 @@ function computeVolumeInfo(reqBody, ndviBefore, mask, bbox, lostHa, date2) {
     : null;
   return {
     haCosechadas: lostHa,
-    especie: { deteccion: detected, seleccion: speciesSel, pista: 'Detección heurística sobre los píxeles de bosque de la escena "antes" (NDVI medio y dispersión); corregible por el usuario.' },
+    especie: { deteccion: detected, seleccion: speciesSel, pista: 'Detección heurística sobre los píxeles de bosque de la escena "antes" (NDVI medio y dispersión); corregible por el usuario. En "Auto": pino → Pino radiata; eucalipto → E. globulus (si es E. nitens, selecciónala manualmente).' },
     sitio: siteSel,
     edad: !Number.isNaN(edad) ? edad : null,
     estimado
