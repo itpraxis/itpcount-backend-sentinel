@@ -1520,6 +1520,7 @@ app.post('/api/v2/change', async (req, res) => {
     const comp = compareCategories(c1, c2, mask, cls, areaPx);
     const robust = robustChange(c1, c2, o1.ndvi, o2.ndvi, mask, cls, areaPx, band);
     const corte = robustChange(c1, c2, o1.ndvi, o2.ndvi, mask, cls, areaPx, CORTE_BAND);
+    const compR = compareCategories(c1, robustAfter(c1, c2, o1.ndvi, o2.ndvi, mask, cls, CORTE_BAND), mask, cls, areaPx);
 
     const dNdvi = new Float32Array(width * height).fill(NaN);
     const dRvi = new Float32Array(width * height).fill(NaN);
@@ -1564,6 +1565,8 @@ app.post('/api/v2/change', async (req, res) => {
       bbox, width, height,
       classes: comp.rows,
       forest: comp.forest,
+      forestRob: compR.forest,
+      classesRob: compR.rows,
       robust,
       corte,
       consensus: !!radar,
@@ -1776,6 +1779,22 @@ function robustChange(c1, c2, v1, v2, mask, classes, areaPerPx, band = FOREST_BA
     changedPct: out.valid ? Math.round(((out.lost + out.gained) / out.valid) * 1000) / 10 : null
   };
 }
+function robustAfter(c1, c2, v1, v2, mask, classes, band = FOREST_BAND) {
+  const f = classes.findIndex(c => c.forest);
+  const out = c2.slice();
+  if (f >= 0) {
+    const thr = classes[f].from;
+    for (let k = 0; k < mask.length; k++) {
+      const p = mask[k];
+      const a = v1[p], b = v2[p];
+      if (a === undefined || a === null || b === undefined || b === null || Number.isNaN(a) || Number.isNaN(b)) continue;
+      const was = c1[p] === f, is = c2[p] === f;
+      if (!was && is) out[p] = c1[p];
+      else if (was && !is) { if (!(a >= thr + band && b <= thr - band)) out[p] = c1[p]; }
+    }
+  }
+  return out;
+}
 
 // 8) Comparar superficies por categoría entre dos fechas
 app.post('/api/v2/compare', async (req, res) => {
@@ -1841,6 +1860,8 @@ app.post('/api/v2/compare', async (req, res) => {
     const comp = compareCategories(c1, c2, mask, cls, areaPx);
     const robust = robustChange(c1, c2, o1.ndvi, o2.ndvi, mask, cls, areaPx, band);
     const corte = robustChange(c1, c2, o1.ndvi, o2.ndvi, mask, cls, areaPx, CORTE_BAND);
+    const c2r = robustAfter(c1, c2, o1.ndvi, o2.ndvi, mask, cls, CORTE_BAND);
+    const compR = compareCategories(c1, c2r, mask, cls, areaPx);
     const lostHa = (corte && typeof corte.lost === 'number') ? corte.lost
       : ((comp.forest && typeof comp.forest.lost === 'number') ? comp.forest.lost : null);
     const volumen = computeVolumeInfo(req.body, o1.ndvi, mask, bbox, lostHa, date2);
@@ -1854,13 +1875,18 @@ app.post('/api/v2/compare', async (req, res) => {
         forest: comp.forest,
         classes: comp.rows,
         change: comp.change,
+        forestRob: compR.forest,
+        classesRob: compR.rows,
+        changeRob: compR.change,
         robust,
         corte,
         agreementPct: comp.agreementPct, changedPct: comp.changedPct,
         areaPerPixel: areaPx,
         image1: toPng(c1, width, height, colorClass(cls), mask),
         image2: toPng(c2, width, height, colorClass(cls), mask),
-        changeImage: toPng(comp.codes, width, height, colorChangeMap, mask)
+        image2Rob: toPng(c2r, width, height, colorClass(cls), mask),
+        changeImage: toPng(comp.codes, width, height, colorChangeMap, mask),
+        changeImageRob: toPng(compR.codes, width, height, colorChangeMap, mask)
       },
       radar,
       bbox, width, height,
@@ -1946,6 +1972,8 @@ app.post('/api/v2/compare-rvi', async (req, res) => {
     const comp = compareCategories(rc1, rc2, mask, rcls, areaPx);
     const robust = robustChange(rc1, rc2, r1.rvi, r2.rvi, mask, rcls, areaPx, band);
     const corte = robustChange(rc1, rc2, r1.rvi, r2.rvi, mask, rcls, areaPx, CORTE_BAND);
+    const rc2r = robustAfter(rc1, rc2, r1.rvi, r2.rvi, mask, rcls, CORTE_BAND);
+    const rcompR = compareCategories(rc1, rc2r, mask, rcls, areaPx);
     const lostHa = (corte && typeof corte.lost === 'number') ? corte.lost
       : ((comp.forest && typeof comp.forest.lost === 'number') ? comp.forest.lost : null);
     const volumen = computeVolumeInfo(req.body, s1 && s1.ndvi, mask, bbox, lostHa, date2);
@@ -1957,13 +1985,18 @@ app.post('/api/v2/compare-rvi', async (req, res) => {
       radar: {
         date1, date2, polarization: 'DV',
         forest: comp.forest, classes: comp.rows, change: comp.change,
+        forestRob: rcompR.forest,
+        classesRob: rcompR.rows,
+        changeRob: rcompR.change,
         agreementPct: comp.agreementPct, changedPct: comp.changedPct,
         robust,
         corte,
         areaPerPixel: areaPx,
         image1: toPng(rc1, width, height, colorClass(rcls), mask),
         image2: toPng(rc2, width, height, colorClass(rcls), mask),
-        changeImage: toPng(comp.codes, width, height, colorChangeMap, mask)
+        image2Rob: toPng(rc2r, width, height, colorClass(rcls), mask),
+        changeImage: toPng(comp.codes, width, height, colorChangeMap, mask),
+        changeImageRob: toPng(rcompR.codes, width, height, colorChangeMap, mask)
       },
       bbox, width, height,
       consensus: !!(s1 && s1.ndvi) || !!(s2 && s2.ndvi),
