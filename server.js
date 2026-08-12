@@ -1195,6 +1195,127 @@ function computeVolumeInfo(reqBody, ndviBefore, mask, bbox, lostHa, date2) {
 }
 
 // ============================================================
+// COSECHA NETA (antes − desp) Y SU DESCOMPOSICIÓN POR ESPECIE (V4)
+// ============================================================
+// La "cosecha" se define como el Δ neto de bosque entre las dos fechas sobre la
+// clasificación CONSENSO dual (Bosque = NDVI≥0.85 Y RVI≥0.70): cosecha = antes −
+// desp = perdido bruto − ganado bruto. Como el consenso es el MISMO en las dos
+// pestañas (NDVI y RVI comparten la máscara de bosque), el número de cosecha es
+// idéntico en ambas (esto elimina la divergencia que causaba el "corte claro por
+// sensor"). La descomposición por especie se hace sobre los píxeles que realmente
+// salieron de bosque ("perdido" bruto) y su mix se aplica a la superficie neta:
+// ha_esp = netoHa × pct_esp (Opción A).
+// Clasificación de especie por píxel desde el NDVI de la escena "antes" (heurística,
+// misma base que detectSpecies): eucalipto de copa cerrada → NDVI alto; pino → NDVI
+// algo menor. Solo separa Eucalipto/Pino/Otra; el E. globulus vs E. nitens no se
+// distingue por espectro (se asigna globulus y el usuario puede corregir).
+function speciesOfPixel(ndviVal) {
+  if (ndviVal === undefined || ndviVal === null || Number.isNaN(ndviVal)) return null;
+  if (ndviVal >= 0.88) return { group: 'eucalipto', species: 'globulus', label: 'Eucalyptus (copas cerradas)' };
+  if (ndviVal >= 0.85) return { group: 'pino', species: 'pinus', label: 'Pino radiata (probable)' };
+  return { group: 'otra', species: null, label: 'Mezcla / borde' };
+}
+function computeCosechaInfo(reqBody, ndviBefore, c1, c2, mask, classes, areaPx, forest, bbox, date2) {
+  const f = classes.findIndex(c => c.forest);
+  const groups = {
+    eucalipto: { species: 'globulus', label: 'Eucalyptus (copas cerradas)', px: 0 },
+    pino:      { species: 'pinus',    label: 'Pino radiata',                  px: 0 },
+    otra:      { species: null,       label: 'Mezcla / borde',                px: 0 }
+  };
+  let lostPx = 0;
+  if (f >= 0) {
+    for (let k = 0; k < mask.length; k++) {
+      const p = mask[k];
+      if (c1[p] === f && c2[p] !== f && c2[p] !== 255) {
+        lostPx++;
+        const g = speciesOfPixel(ndviBefore && ndviBefore[p]);
+        groups[g ? g.group : 'otra'].px++;
+      }
+    }
+  }
+  // Parámetros de volumen (misma lógica que computeVolumeInfo).
+  const speciesIn = String(reqBody.especie || '').trim().toLowerCase();
+  const siteIn = String(reqBody.sitio || 'auto').trim().toLowerCase();
+  const ageIn = (reqBody.edad !== undefined && reqBody.edad !== null && reqBody.edad !== '') ? Number(reqBody.edad) : NaN;
+  const anioIn = (reqBody.anioPlantacion !== undefined && reqBody.anioPlantacion !== null && reqBody.anioPlantacion !== '') ? Number(reqBody.anioPlantacion) : NaN;
+  const siteSel = VALID_SITES.includes(siteIn)
+    ? { id: siteIn, label: siteIn[0].toUpperCase() + siteIn.slice(1), inferred: false, note: 'seleccionado manualmente' }
+    : inferSiteClass(bbox[1] + (bbox[3] - bbox[1]) / 2);
+  const edad = !Number.isNaN(ageIn) ? ageIn : (!Number.isNaN(anioIn) ? (new Date(date2).getFullYear() - anioIn) : NaN);
+  const manual = VALID_SPECIES.includes(speciesIn) ? speciesIn : null;
+  // Superficies de bosque y cosecha neta (antes − desp) derivadas del objeto `forest`
+  // (comp.forest de compareCategories): perdido/ganado brutos en ha; neto = perdido −
+  // ganado; antes/después vienen de ha1/ha2 (si faltan, se derivan del neto).
+  const perdidoHa = (forest && typeof forest.lost === 'number') ? forest.lost : 0;
+  const ganadoHa = (forest && typeof forest.gained === 'number') ? forest.gained : 0;
+  const netoHa = perdidoHa - ganadoHa;
+  const antesHa = (forest && typeof forest.ha1 === 'number') ? forest.ha1 : Math.max(0, perdidoHa);
+  const despuesHa = (forest && typeof forest.ha2 === 'number') ? forest.ha2 : Math.max(0, antesHa - netoHa);
+  const neto = (Number.isFinite(netoHa) && netoHa > 0) ? netoHa : 0;
+  // Descomposición por especie y volumen por fila.
+  const porEspecie = [];
+  let totalM3 = 0;
+  if (!Number.isNaN(edad) && neto > 0) {
+    const addRow = (species, label, ha) => {
+      const v = volHaOf(species, siteSel.id, edad);
+      if (!v) return;
+      const m3 = Math.round(ha * v.volHa);
+      totalM3 += m3;
+      porEspecie.push({
+        especie: species, label,
+        ha: Math.round(ha * 100) / 100,
+        pct: Math.round((ha / neto) * 1000) / 10,
+        volHa: v.volHa, edad: v.age, m3
+      });
+    };
+    if (manual) {
+      addRow(manual, SPECIES_LABELS[manual], neto);
+    } else if (lostPx > 0) {
+      for (const g of [groups.eucalipto, groups.pino]) {
+        if (g.px > 0 && g.species) addRow(g.species, g.label, neto * g.px / lostPx);
+      }
+      if (groups.otra.px > 0) {
+        porEspecie.push({
+          especie: null, label: groups.otra.label,
+          ha: Math.round((neto * groups.otra.px / lostPx) * 100) / 100,
+          pct: Math.round((groups.otra.px / lostPx) * 1000) / 10,
+          volHa: null, m3: null
+        });
+      }
+    } else if (perdidoHa > 0) {
+      addRow(manual || 'pinus', SPECIES_LABELS[manual || 'pinus'], neto);
+    }
+  }
+  const eucPct = lostPx ? Math.round((groups.eucalipto.px / lostPx) * 1000) / 10 : 0;
+  const pinPct = lostPx ? Math.round((groups.pino.px / lostPx) * 1000) / 10 : 0;
+  const otPct  = lostPx ? Math.round((groups.otra.px / lostPx) * 1000) / 10 : 0;
+  const conf = lostPx ? Math.round((Math.max(groups.eucalipto.px, groups.pino.px) / lostPx) * 100) : 0;
+  return {
+    cosechaHa: Math.round(neto * 100) / 100,
+    antesHa: Math.round(antesHa * 100) / 100,
+    despuesHa: Math.round(despuesHa * 100) / 100,
+    perdidoHa: Math.round(perdidoHa * 100) / 100,
+    ganadoHa: Math.round(ganadoHa * 100) / 100,
+    netoHa: Math.round(netoHa * 100) / 100,
+    mixPerdido: { eucalipto: eucPct, pino: pinPct, otra: otPct, pixels: lostPx },
+    porEspecie,
+    totalM3,
+    especie: {
+      manual: !!manual,
+      seleccion: manual,
+      deteccion: {
+        label: lostPx ? 'Mezcla por píxel según NDVI de la escena "antes" (Eucalipto ≥ 0.88 / Pino 0.85–0.88)' : 'Sin píxeles perdidos',
+        confidence: lostPx ? conf : 0,
+        pista: 'La descomposición por especie se hizo sobre los píxeles que salieron de bosque (perdido bruto) y se aplicó al neto (cosecha = antes − desp). Estimación gruesa heurística desde NDVI de 10 m; corregible seleccionando especie manualmente.'
+      }
+    },
+    sitio: siteSel,
+    edad: !Number.isNaN(edad) ? edad : null,
+    fuente: 'INFOR 2018 (IT220) · valores referenciales'
+  };
+}
+
+// ============================================================
 // RUTAS
 // ============================================================
 app.get('/', (req, res) => res.json({ name: 'ITP-EarthWatch API v2', status: 'ok' }));
@@ -1521,6 +1642,8 @@ app.post('/api/v2/change', async (req, res) => {
     const robust = robustChange(c1, c2, o1.ndvi, o2.ndvi, mask, cls, areaPx, band);
     const corte = robustChange(c1, c2, o1.ndvi, o2.ndvi, mask, cls, areaPx, CORTE_BAND);
     const compR = compareCategories(c1, robustAfter(c1, c2, o1.ndvi, o2.ndvi, mask, cls, CORTE_BAND), mask, cls, areaPx);
+    // Cosecha neta (antes − desp) con descomposición por especie (V4, aditivo).
+    const cosecha = computeCosechaInfo(req.body, o1.ndvi, c1, c2, mask, cls, areaPx, comp.forest, bbox, date2);
 
     const dNdvi = new Float32Array(width * height).fill(NaN);
     const dRvi = new Float32Array(width * height).fill(NaN);
@@ -1572,6 +1695,7 @@ app.post('/api/v2/change', async (req, res) => {
       consensus: !!radar,
       snow: { months: snowMonthsOf(m) || [], mask1: useSnowForDate(date1, snowMonthsOf(m)), mask2: useSnowForDate(date2, snowMonthsOf(m)) },
       volumen,
+      cosecha,
       quota
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -1866,6 +1990,8 @@ app.post('/api/v2/compare', async (req, res) => {
       : ((comp.forest && typeof comp.forest.lost === 'number') ? comp.forest.lost : null);
     const volumen = computeVolumeInfo(req.body, o1.ndvi, mask, bbox, lostHa, date2);
     if (volumen && corte) volumen.corteBand = corte.band;
+    // Cosecha neta (antes − desp) con descomposición por especie (V4, aditivo).
+    const cosecha = computeCosechaInfo(req.body, o1.ndvi, c1, c2, mask, cls, areaPx, comp.forest, bbox, date2);
 
     const quota = await commitPolygon(req, res, m);
     res.json({
@@ -1893,6 +2019,7 @@ app.post('/api/v2/compare', async (req, res) => {
       consensus: !!radar,
       snow: { months: snowMonthsOf(m) || [], mask1: useSnowForDate(date1, snowMonthsOf(m)), mask2: useSnowForDate(date2, snowMonthsOf(m)) },
       volumen,
+      cosecha,
       quota
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -1978,6 +2105,8 @@ app.post('/api/v2/compare-rvi', async (req, res) => {
       : ((comp.forest && typeof comp.forest.lost === 'number') ? comp.forest.lost : null);
     const volumen = computeVolumeInfo(req.body, s1 && s1.ndvi, mask, bbox, lostHa, date2);
     if (volumen && corte) volumen.corteBand = corte.band;
+    // Cosecha neta (antes − desp) con descomposición por especie (V4, aditivo).
+    const cosecha = computeCosechaInfo(req.body, s1 && s1.ndvi, rc1, rc2, mask, rcls, areaPx, comp.forest, bbox, date2);
     const sec1Date = inWindow(date1, opticalDate1) ? opticalDate1 : (s1 && s1.date);
     const sec2Date = inWindow(date2, opticalDate2) ? opticalDate2 : (s2 && s2.date);
     const quota = await commitPolygon(req, res, m);
@@ -2004,6 +2133,7 @@ app.post('/api/v2/compare-rvi', async (req, res) => {
       snow: { months: snowMonthsOf(m) || [], mask1: useSnowForDate(sec1Date, snowMonthsOf(m)), mask2: useSnowForDate(sec2Date, snowMonthsOf(m)) },
       snowStats1: snowMaskStats(s1), snowStats2: snowMaskStats(s2),
       volumen,
+      cosecha,
       quota
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
