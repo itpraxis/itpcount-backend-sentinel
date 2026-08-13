@@ -1128,6 +1128,136 @@ function yieldMeta() {
   return { archivo: yieldCsvPath(), filas, csv: 'Frontend\\data\\rendimiento_volumen.csv (preferido) o Backend\\data\\rendimiento_volumen.csv' };
 }
 
+// ============================================================
+// V5 — RENDIMIENTO POR COMUNA EN METROS RUMA (MR)
+// Fórmula: MR = edad (años) × factor_MR(comuna, especie) × superficie (ha).
+// Tabla: rendimiento_ruma.csv (NOM_COMUNA;PINO_MR;EGG_MR;EN_MR), editable en caliente.
+// Comuna: se infiere desde las coordenadas del polígono con comunas_chile.geojson,
+// o se pasa manualmente en req.body.comuna.
+// ============================================================
+function normComunaName(s) {
+  return String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .toUpperCase().replace(/[-–—]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+function rumaCsvPath() {
+  if (process.env.RENDIMIENTO_RUMA_CSV) return process.env.RENDIMIENTO_RUMA_CSV;
+  const front = path.join(__dirname, '..', 'Frontend', 'data', 'rendimiento_ruma.csv');
+  return fs.existsSync(front) ? front : path.join(__dirname, 'data', 'rendimiento_ruma.csv');
+}
+let _rumaTable = null, _rumaMtime = -1;
+function loadRumaTable() {
+  const csvPath = rumaCsvPath();
+  const out = {};
+  try {
+    for (const raw of fs.readFileSync(csvPath, 'utf8').split(/\r?\n/)) {
+      const line = raw.trim();
+      if (!line || line.startsWith('#')) continue;
+      const cols = line.split(';').map(s => s.trim());
+      if (cols.length < 4) continue;
+      const key = normComunaName(cols[0]);
+      const p = parseFloat(cols[1]), g = parseFloat(cols[2]), n = parseFloat(cols[3]);
+      if (!key || !Number.isFinite(p) || !Number.isFinite(g) || !Number.isFinite(n)) continue;
+      out[key] = { comuna: cols[0].toUpperCase(), pino: p, globulus: g, nitens: n };
+    }
+    console.log('[ruma] tabla MR por comuna cargada: ' + Object.keys(out).length + ' comunas desde ' + csvPath);
+  } catch (e) {
+    console.warn('[ruma] sin CSV de rendimiento MR (' + e.message + ')');
+  }
+  return out;
+}
+function rumaTable() {
+  const csvPath = rumaCsvPath();
+  try {
+    const st = fs.statSync(csvPath);
+    if (st.mtimeMs !== _rumaMtime) { _rumaTable = loadRumaTable(); _rumaMtime = st.mtimeMs; }
+  } catch (e) {
+    if (!_rumaTable) { _rumaTable = loadRumaTable(); _rumaMtime = -1; }
+  }
+  return _rumaTable || {};
+}
+function rumaComunaList() {
+  return Object.values(rumaTable()).map(r => r.comuna).sort((a, b) => a.localeCompare(b, 'es'));
+}
+// Índice de comunas desde GeoJSON (346 comunas de Chile).
+function comunasGeoPath() {
+  if (process.env.COMUNAS_GEOJSON) return process.env.COMUNAS_GEOJSON;
+  return path.join(__dirname, 'data', 'comunas_chile.geojson');
+}
+let COMUNAS_INDEX = null;
+function loadComunasIndex() {
+  const p = comunasGeoPath();
+  try {
+    const gj = JSON.parse(fs.readFileSync(p, 'utf8'));
+    const index = [];
+    for (const f of (gj.features || [])) {
+      const name = (f.properties && (f.properties.Comuna || f.properties.comuna || f.properties.NOMBRE)) || '';
+      const key = normComunaName(name);
+      if (!key) continue;
+      const geom = f.geometry || {};
+      const polys = geom.type === 'Polygon' ? [geom.coordinates]
+        : geom.type === 'MultiPolygon' ? geom.coordinates : [];
+      if (!polys.length) continue;
+      index.push({ key, name, region: (f.properties && f.properties.Region) || null, polys });
+    }
+    console.log('[comunas] índice cargado: ' + index.length + ' comunas desde ' + p);
+    return index;
+  } catch (e) {
+    console.warn('[comunas] sin GeoJSON de comunas (' + e.message + '); la comuna se resolverá manual.');
+    return [];
+  }
+}
+function pointInPolys(lon, lat, polys) {
+  let inside = false;
+  for (const poly of polys) {
+    for (const ring of poly) {
+      let c = false;
+      for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+        const xi = ring[i][0], yi = ring[i][1], xj = ring[j][0], yj = ring[j][1];
+        if (((yi > lat) !== (yj > lat)) && (lon < (xj - xi) * (lat - yi) / (yj - yi) + xi)) c = !c;
+      }
+      if (c) inside = !inside;
+    }
+  }
+  return inside;
+}
+function comunaAt(lon, lat) {
+  if (!COMUNAS_INDEX || !COMUNAS_INDEX.length) return null;
+  for (const fe of COMUNAS_INDEX) if (pointInPolys(lon, lat, fe.polys)) return fe;
+  return null;
+}
+function polygonCentroid(ring) {
+  let a = 0, cx = 0, cy = 0;
+  for (let i = 0; i < ring.length - 1; i++) {
+    const p = ring[i], q = ring[i + 1];
+    const cr = p[0] * q[1] - q[0] * p[1];
+    a += cr; cx += (p[0] + q[0]) * cr; cy += (p[1] + q[1]) * cr;
+  }
+  a /= 2;
+  if (!a || !Number.isFinite(a)) return { lon: ring[0][0], lat: ring[0][1] };
+  return { lon: cx / (6 * a), lat: cy / (6 * a) };
+}
+function comunaOfRing(ring, bbox) {
+  if (!COMUNAS_INDEX || !COMUNAS_INDEX.length) return null;
+  const c = polygonCentroid(ring);
+  let hit = comunaAt(c.lon, c.lat);
+  if (hit) return hit;
+  const votes = {};
+  const N = 6;
+  for (let i = 0; i <= N; i++) {
+    for (let j = 0; j <= N; j++) {
+      const lon = bbox[0] + (bbox[2] - bbox[0]) * i / N;
+      const lat = bbox[1] + (bbox[3] - bbox[1]) * j / N;
+      if (!pointInPolys(lon, lat, [ring])) continue;
+      const h = comunaAt(lon, lat);
+      if (h) votes[h.key] = (votes[h.key] || 0) + 1;
+    }
+  }
+  let bestKey = null, bestN = 0;
+  for (const k in votes) if (votes[k] > bestN) { bestN = votes[k]; bestKey = k; }
+  return bestKey ? (COMUNAS_INDEX.find(x => x.key === bestKey) || null) : null;
+}
+COMUNAS_INDEX = loadComunasIndex();
+
 // Detección heurística de especie sobre los píxeles clasificados como bosque en la
 // escena "antes". El eucalipto de copa cerrada muestra NDVI medio alto y poca
 // dispersión; el pino radiata presenta NDVI algo menor y mayor variabilidad (dosel
@@ -1233,16 +1363,39 @@ function computeCosechaInfo(reqBody, ndviBefore, c1, c2, mask, classes, areaPx, 
       }
     }
   }
-  // Parámetros de volumen (misma lógica que computeVolumeInfo).
+  // ---- V5 (Metros Ruma): solo Edad; comuna automática o manual; override por grupo. ----
   const speciesIn = String(reqBody.especie || '').trim().toLowerCase();
-  const siteIn = String(reqBody.sitio || 'auto').trim().toLowerCase();
   const ageIn = (reqBody.edad !== undefined && reqBody.edad !== null && reqBody.edad !== '') ? Number(reqBody.edad) : NaN;
-  const anioIn = (reqBody.anioPlantacion !== undefined && reqBody.anioPlantacion !== null && reqBody.anioPlantacion !== '') ? Number(reqBody.anioPlantacion) : NaN;
-  const siteSel = VALID_SITES.includes(siteIn)
-    ? { id: siteIn, label: siteIn[0].toUpperCase() + siteIn.slice(1), inferred: false, note: 'seleccionado manualmente' }
-    : inferSiteClass(bbox[1] + (bbox[3] - bbox[1]) / 2);
-  const edad = !Number.isNaN(ageIn) ? ageIn : (!Number.isNaN(anioIn) ? (new Date(date2).getFullYear() - anioIn) : NaN);
+  const overrideIn = (reqBody.especieOverride && typeof reqBody.especieOverride === 'object') ? reqBody.especieOverride : {};
   const manual = VALID_SPECIES.includes(speciesIn) ? speciesIn : null;
+  const edad = !Number.isNaN(ageIn) ? ageIn : NaN;
+  // Comuna: manual si viene req.body.comuna; si no, inferida desde el polígono (GeoJSON).
+  const ruma = rumaTable();
+  let comunaRow = null, comuna = null;
+  const comunaInput = String(reqBody.comuna || '').trim();
+  if (comunaInput) {
+    const key = normComunaName(comunaInput);
+    comunaRow = ruma[key] || null;
+    comuna = {
+      id: key,
+      label: comunaRow ? comunaRow.comuna : comunaInput,
+      inferred: false,
+      note: 'seleccionada manualmente' + (comunaRow ? '' : ' — no está en la tabla MR')
+    };
+  } else {
+    const ringIn = toRing(reqBody.coordinates || []);
+    const geo = (ringIn && ringIn.length) ? comunaOfRing(ringIn, bbox) : null;
+    if (geo) {
+      const key = normComunaName(geo.name);
+      comunaRow = ruma[key] || null;
+      comuna = {
+        id: key,
+        label: comunaRow ? comunaRow.comuna : geo.name,
+        inferred: true,
+        note: comunaRow ? 'inferida desde las coordenadas del polígono' : 'comuna no está en la tabla MR'
+      };
+    }
+  }
   // Superficies de bosque y cosecha neta (antes − desp) derivadas del objeto `forest`
   // (comp.forest de compareCategories): perdido/ganado brutos en ha; neto = perdido −
   // ganado; antes/después vienen de ha1/ha2 (si faltan, se derivan del neto).
@@ -1252,38 +1405,46 @@ function computeCosechaInfo(reqBody, ndviBefore, c1, c2, mask, classes, areaPx, 
   const antesHa = (forest && typeof forest.ha1 === 'number') ? forest.ha1 : Math.max(0, perdidoHa);
   const despuesHa = (forest && typeof forest.ha2 === 'number') ? forest.ha2 : Math.max(0, antesHa - netoHa);
   const neto = (Number.isFinite(netoHa) && netoHa > 0) ? netoHa : 0;
-  // Descomposición por especie y volumen por fila.
+  // Descomposición por especie y volumen (MR) por fila.
   const porEspecie = [];
-  let totalM3 = 0;
-  if (!Number.isNaN(edad) && neto > 0) {
-    const addRow = (species, label, ha) => {
-      const v = volHaOf(species, siteSel.id, edad);
-      if (!v) return;
-      const m3 = Math.round(ha * v.volHa);
-      totalM3 += m3;
+  let totalMR = 0;
+  if (!Number.isNaN(edad) && neto > 0 && comunaRow) {
+    const speciesOfGroup = group => {
+      const ov = overrideIn[group];
+      return VALID_SPECIES.includes(ov) ? ov : (groups[group].species || null);
+    };
+    const MR_COL = { pinus: 'pino', globulus: 'globulus', nitens: 'nitens' };
+    const factorOf = sp => comunaRow ? comunaRow[MR_COL[sp]] : null; // comunaRow: {pino, globulus, nitens}
+    const addRowMR = (species, group, ha) => {
+      const factor = factorOf(species);
+      if (!Number.isFinite(factor)) return;
+      const mr = Math.round(edad * factor * ha);
+      totalMR += mr;
       porEspecie.push({
-        especie: species, label,
+        especie: species, group,
+        label: SPECIES_LABELS[species],
         ha: Math.round(ha * 100) / 100,
         pct: Math.round((ha / neto) * 1000) / 10,
-        volHa: v.volHa, edad: v.age, m3
+        factorMR: factor, mr
       });
     };
     if (manual) {
-      addRow(manual, SPECIES_LABELS[manual], neto);
+      addRowMR(manual, null, neto);
     } else if (lostPx > 0) {
       for (const g of [groups.eucalipto, groups.pino]) {
-        if (g.px > 0 && g.species) addRow(g.species, g.label, neto * g.px / lostPx);
+        const grp = g === groups.eucalipto ? 'eucalipto' : 'pino';
+        if (g.px > 0) addRowMR(speciesOfGroup(grp), grp, neto * g.px / lostPx);
       }
       if (groups.otra.px > 0) {
         porEspecie.push({
-          especie: null, label: groups.otra.label,
+          especie: null, group: 'otra', label: groups.otra.label,
           ha: Math.round((neto * groups.otra.px / lostPx) * 100) / 100,
           pct: Math.round((groups.otra.px / lostPx) * 1000) / 10,
-          volHa: null, m3: null
+          factorMR: null, mr: null
         });
       }
     } else if (perdidoHa > 0) {
-      addRow(manual || 'pinus', SPECIES_LABELS[manual || 'pinus'], neto);
+      addRowMR(manual || 'pinus', null, neto);
     }
   }
   const eucPct = lostPx ? Math.round((groups.eucalipto.px / lostPx) * 1000) / 10 : 0;
@@ -1299,20 +1460,49 @@ function computeCosechaInfo(reqBody, ndviBefore, c1, c2, mask, classes, areaPx, 
     netoHa: Math.round(netoHa * 100) / 100,
     mixPerdido: { eucalipto: eucPct, pino: pinPct, otra: otPct, pixels: lostPx },
     porEspecie,
-    totalM3,
+    totalMR,
+    comuna,
     especie: {
       manual: !!manual,
       seleccion: manual,
       deteccion: {
         label: lostPx ? 'Mezcla por píxel según NDVI de la escena "antes" (Eucalipto ≥ 0.88 / Pino 0.85–0.88)' : 'Sin píxeles perdidos',
         confidence: lostPx ? conf : 0,
-        pista: 'La descomposición por especie se hizo sobre los píxeles que salieron de bosque (perdido bruto) y se aplicó al neto (cosecha = antes − desp). Estimación gruesa heurística desde NDVI de 10 m; corregible seleccionando especie manualmente.'
+        pista: 'La descomposición por especie se hizo sobre los píxeles que salieron de bosque (perdido bruto) y se aplicó al neto (cosecha = antes − desp). La detección separa Eucalipto/Pino desde NDVI de 10 m; puedes ajustar qué especie asignar a cada grupo en el paso "Ajustar especies".'
       }
     },
-    sitio: siteSel,
     edad: !Number.isNaN(edad) ? edad : null,
-    fuente: 'INFOR 2018 (IT220) · valores referenciales'
+    fuente: 'Tabla de rendimiento por comuna y especie (Metros Ruma, MR) — datos del cliente'
   };
+  // ============================================================
+  // (CONSERVADO COMENTADO) Cálculo ANTERIOR en m³ por sitio/edad (INFOR 2018):
+  //   const siteIn = String(reqBody.sitio || 'auto').trim().toLowerCase();
+  //   const anioIn = (reqBody.anioPlantacion !== undefined && reqBody.anioPlantacion !== null && reqBody.anioPlantacion !== '') ? Number(reqBody.anioPlantacion) : NaN;
+  //   const siteSel = VALID_SITES.includes(siteIn)
+  //     ? { id: siteIn, label: siteIn[0].toUpperCase() + siteIn.slice(1), inferred: false, note: 'seleccionado manualmente' }
+  //     : inferSiteClass(bbox[1] + (bbox[3] - bbox[1]) / 2);
+  //   const edadM3 = !Number.isNaN(ageIn) ? ageIn : (!Number.isNaN(anioIn) ? (new Date(date2).getFullYear() - anioIn) : NaN);
+  //   let totalM3 = 0;
+  //   if (!Number.isNaN(edadM3) && neto > 0) {
+  //     const addRow = (species, label, ha) => {
+  //       const v = volHaOf(species, siteSel.id, edadM3);
+  //       if (!v) return;
+  //       const m3 = Math.round(ha * v.volHa);
+  //       totalM3 += m3;
+  //       porEspecie.push({ especie: species, label, ha: Math.round(ha * 100) / 100,
+  //         pct: Math.round((ha / neto) * 1000) / 10, volHa: v.volHa, edad: v.age, m3 });
+  //     };
+  //     if (manual) addRow(manual, SPECIES_LABELS[manual], neto);
+  //     else if (lostPx > 0) {
+  //       for (const g of [groups.eucalipto, groups.pino])
+  //         if (g.px > 0 && g.species) addRow(g.species, g.label, neto * g.px / lostPx);
+  //       if (groups.otra.px > 0) porEspecie.push({ especie: null, label: groups.otra.label,
+  //         ha: Math.round((neto * groups.otra.px / lostPx) * 100) / 100,
+  //         pct: Math.round((groups.otra.px / lostPx) * 1000) / 10, volHa: null, m3: null });
+  //     } else if (perdidoHa > 0) addRow(manual || 'pinus', SPECIES_LABELS[manual || 'pinus'], neto);
+  //   }
+  //   // return { ... (V3/V4) ..., totalM3, sitio: siteSel, fuente: 'INFOR 2018 (IT220) · valores referenciales' };
+  // ============================================================
 }
 
 // ============================================================
@@ -1334,6 +1524,15 @@ app.get('/warmup', async (req, res) => {
 app.post('/api/prueba', (req, res) => res.json({ ok: true, received: Object.keys(req.body || {}) }));
 
 function badParams(res, msg) { return res.status(400).json({ error: msg }); }
+
+// 0) Lista de comunas disponibles en la tabla MR (para el selector manual).
+app.post('/api/v2/comunas', (req, res) => {
+  try {
+    res.json({ comunas: rumaComunaList() });
+  } catch (e) {
+    res.status(500).json({ error: 'No se pudo leer la tabla de comunas: ' + e.message });
+  }
+});
 
 // 1) Fechas disponibles (escena completa)
 app.post('/api/v2/get-valid-dates', async (req, res) => {
