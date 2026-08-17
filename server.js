@@ -2460,14 +2460,10 @@ function generateHerbicideRecommendation(trend, windows, series, monthlyPattern)
     const currentYear = now2.getFullYear();
     let bestCandidate = null;
     for (const c of candidates) {
-      if (c.month >= currentMonth) {
-        bestCandidate = { month: c.month, label: monthNames[c.month - 1], expectedDate: `${currentYear}-${String(c.month).padStart(2, '0')}-15`, avgNdvi: c.avgNdvi };
-        break;
-      }
-    }
-    if (!bestCandidate && candidates.length) {
-      const c = candidates[0];
-      bestCandidate = { month: c.month, label: monthNames[c.month - 1], expectedDate: `${currentYear + 1}-${String(c.month).padStart(2, '0')}-15`, avgNdvi: c.avgNdvi };
+      const year = c.month >= currentMonth ? currentYear : currentYear + 1;
+      const dateStr = `${year}-${String(c.month).padStart(2, '0')}-15`;
+      bestCandidate = { month: c.month, label: monthNames[c.month - 1], expectedDate: dateStr, avgNdvi: c.avgNdvi };
+      break;
     }
     nextBestMonth = bestCandidate;
   }
