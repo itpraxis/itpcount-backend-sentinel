@@ -2403,13 +2403,16 @@ function findLocalExtrema(series) {
 }
 
 function classifyWindows(timeseries, extrema) {
+  const valid = timeseries.filter(t => t.ndvi !== null).map(t => t.ndvi);
+  const mean = valid.length ? valid.reduce((a, b) => a + b, 0) / valid.length : 0.5;
   const windows = [];
   const mins = extrema.filter(e => e.type === 'min');
   for (const m of mins) {
     const val = m.value;
+    if (val >= mean) continue;
     let level;
-    if (val < 0.4) level = 'optimal';
-    else if (val < 0.6) level = 'good';
+    if (val < 0.35) level = 'optimal';
+    else if (val < mean * 0.85) level = 'good';
     else level = 'marginal';
     windows.push({ index: m.index, date: timeseries[m.index]?.date || null, ndvi: val, level, label: level === 'optimal' ? 'Óptima' : level === 'good' ? 'Buena' : 'Marginal' });
   }
@@ -2437,7 +2440,9 @@ function computeTrend(series) {
 }
 
 function generateHerbicideRecommendation(trend, windows, series, monthlyPattern) {
-  const avg = series.filter(v => v !== null).reduce((a, b) => a + b, 0) / (series.filter(v => v !== null).length || 1);
+  const valid = series.filter(v => v !== null);
+  const avg = valid.length ? valid.reduce((a, b) => a + b, 0) / valid.length : 0;
+  const monthNames = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'];
   const bestWindow = windows.filter(w => w.level === 'optimal' || w.level === 'good').sort((a, b) => a.ndvi - b.ndvi)[0];
   let nextWindow = null;
   if (bestWindow && bestWindow.date) {
@@ -2447,26 +2452,28 @@ function generateHerbicideRecommendation(trend, windows, series, monthlyPattern)
     while (nextDate <= now) nextDate.setMonth(nextDate.getMonth() + 12);
     nextWindow = { date: nextDate.toISOString().split('T')[0], level: bestWindow.level, ndvi: bestWindow.ndvi, basedOn: bestWindow.date };
   }
-  const monthNames = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'];
-  let bestMonthIdx = null, bestMonthNdvi = Infinity;
-  if (monthlyPattern) {
-    for (const p of monthlyPattern) {
-      if (p.avgNdvi !== null && p.avgNdvi < bestMonthNdvi) { bestMonthNdvi = p.avgNdvi; bestMonthIdx = p.month - 1; }
-    }
-  }
-  const now2 = new Date();
   let nextBestMonth = null;
-  if (bestMonthIdx !== null) {
-    let candidateMonth = bestMonthIdx;
-    const currentMonth = now2.getMonth();
-    if (candidateMonth <= currentMonth) candidateMonth += 12;
-    const monthSpan = candidateMonth - currentMonth;
-    const targetDate = new Date(now2.getFullYear(), now2.getMonth() + monthSpan, 1);
-    nextBestMonth = { month: bestMonthIdx + 1, label: monthNames[bestMonthIdx], expectedDate: targetDate.toISOString().split('T')[0] };
+  if (monthlyPattern && monthlyPattern.length) {
+    const candidates = monthlyPattern.filter(p => p.n >= 2 && p.avgNdvi !== null && p.avgNdvi < avg).sort((a, b) => a.avgNdvi - b.avgNdvi);
+    const now2 = new Date();
+    const currentMonth = now2.getMonth() + 1;
+    const currentYear = now2.getFullYear();
+    let bestCandidate = null;
+    for (const c of candidates) {
+      if (c.month >= currentMonth) {
+        bestCandidate = { month: c.month, label: monthNames[c.month - 1], expectedDate: `${currentYear}-${String(c.month).padStart(2, '0')}-15`, avgNdvi: c.avgNdvi };
+        break;
+      }
+    }
+    if (!bestCandidate && candidates.length) {
+      const c = candidates[0];
+      bestCandidate = { month: c.month, label: monthNames[c.month - 1], expectedDate: `${currentYear + 1}-${String(c.month).padStart(2, '0')}-15`, avgNdvi: c.avgNdvi };
+    }
+    nextBestMonth = bestCandidate;
   }
   let advice;
   if (nextBestMonth) {
-    advice = `Basado en el patrón estacional, se espera la próxima ventana óptima alrededor de ${nextBestMonth.label} ${new Date(nextBestMonth.expectedDate).getFullYear()}. Prepare la aplicación para inicios de ${nextBestMonth.label}.`;
+    advice = `Basado en el patrón estacional, el mejor mes para aplicar herbicida es ${nextBestMonth.label} (NDVI promedio: ${nextBestMonth.avgNdvi.toFixed(3)}). Prepare la aplicación para inicios de ${nextBestMonth.label} ${new Date(nextBestMonth.expectedDate).getFullYear()}.`;
   } else if (trend.direction === 'decreciente') {
     advice = 'La vegetación está en declive. Se recomienda esperar a la próxima ventana óptima para maximizar el efecto del herbicida.';
   } else if (trend.direction === 'creciente') {
@@ -2474,7 +2481,8 @@ function generateHerbicideRecommendation(trend, windows, series, monthlyPattern)
   } else {
     advice = 'La vegetación es estable. Evalué las ventanas disponibles para elegir el mejor momento de aplicación.';
   }
-  return { advice, bestWindow: bestWindow || null, nextWindow, nextBestMonth, avgNdvi: Number(avg.toFixed(3)) };
+  const bestMonths = monthlyPattern ? monthlyPattern.filter(p => p.n >= 2 && p.avgNdvi !== null && p.avgNdvi < avg).sort((a, b) => a.avgNdvi - b.avgNdvi).slice(0, 3).map(p => ({ month: p.month, label: monthNames[p.month - 1], avgNdvi: p.avgNdvi })) : [];
+  return { advice, bestWindow: bestWindow || null, nextWindow, nextBestMonth, bestMonths, avgNdvi: Number(avg.toFixed(3)) };
 }
 
 // POST /api/v2/herbicide-timing — Fase 1: Detección de ventanas de aplicación
@@ -2532,7 +2540,7 @@ app.post('/api/v2/herbicide-timing', async (req, res) => {
       const ag = monthAgg[m];
       const avg = ag && ag.n > 0 ? Number((ag.sum / ag.n).toFixed(3)) : null;
       const isWindow = windows.some(w => w.date && new Date(w.date).getMonth() + 1 === m);
-      return { month: m, label: monthNames[i], avgNdvi: avg, isWindow };
+      return { month: m, label: monthNames[i], avgNdvi: avg, n: ag ? ag.n : 0, isWindow };
     });
     const rec = generateHerbicideRecommendation(trend, windows, ndviValues, monthlyPattern);
     const quota = await commitPolygon(req, res, m);
