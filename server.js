@@ -2452,33 +2452,50 @@ function generateHerbicideRecommendation(trend, windows, series, monthlyPattern)
     while (nextDate <= now) nextDate.setMonth(nextDate.getMonth() + 12);
     nextWindow = { date: nextDate.toISOString().split('T')[0], level: bestWindow.level, ndvi: bestWindow.ndvi, basedOn: bestWindow.date };
   }
-  let nextBestMonth = null;
+  const decliningMonths = [];
+  const lowStableMonths = [];
   if (monthlyPattern && monthlyPattern.length) {
-    const candidates = monthlyPattern.filter(p => p.n >= 1 && p.avgNdvi !== null && p.avgNdvi >= 0.15 && p.avgNdvi < avg).sort((a, b) => a.avgNdvi - b.avgNdvi);
-    const now2 = new Date();
-    const currentMonth = now2.getMonth() + 1;
-    const currentYear = now2.getFullYear();
-    let bestCandidate = null;
-    for (const c of candidates) {
+    for (const p of monthlyPattern) {
+      if (p.avgNdvi === null || p.avgNdvi < 0.15) continue;
+      if (p.monthTrend === 'descendente') decliningMonths.push(p);
+      if (p.avgNdvi < avg && p.monthTrend !== 'creciente') lowStableMonths.push(p);
+    }
+  }
+  decliningMonths.sort((a, b) => a.avgNdvi - b.avgNdvi);
+  lowStableMonths.sort((a, b) => a.avgNdvi - b.avgNdvi);
+  const now2 = new Date();
+  const currentMonth = now2.getMonth() + 1;
+  const currentYear = now2.getFullYear();
+  const allRelevant = [...decliningMonths.map(p => ({ ...p, reason: 'descendente' })), ...lowStableMonths.filter(p => !decliningMonths.some(d => d.month === p.month)).map(p => ({ ...p, reason: 'bajo_estable' }))];
+  allRelevant.sort((a, b) => a.avgNdvi - b.avgNdvi);
+  let nextBestMonth = null;
+  if (allRelevant.length) {
+    for (const c of allRelevant) {
       const year = c.month >= currentMonth ? currentYear : currentYear + 1;
-      const dateStr = `${year}-${String(c.month).padStart(2, '0')}-15`;
-      bestCandidate = { month: c.month, label: monthNames[c.month - 1], expectedDate: dateStr, avgNdvi: c.avgNdvi };
+      nextBestMonth = { month: c.month, label: monthNames[c.month - 1], expectedDate: `${year}-${String(c.month).padStart(2, '0')}-15`, avgNdvi: c.avgNdvi, reason: c.reason };
       break;
     }
-    nextBestMonth = bestCandidate;
   }
+  const bestMonths = allRelevant.slice(0, 3).map(p => ({ month: p.month, label: monthNames[p.month - 1], avgNdvi: p.avgNdvi, reason: p.reason }));
   let advice;
+  const decLabels = decliningMonths.map(p => p.label).join(', ');
+  const lowLabels = lowStableMonths.slice(0, 3).map(p => p.label).join(', ');
   if (nextBestMonth) {
-    advice = `Basado en el patrón estacional, el mejor mes para aplicar herbicida es ${nextBestMonth.label} (NDVI promedio: ${nextBestMonth.avgNdvi.toFixed(3)}). Prepare la aplicación para inicios de ${nextBestMonth.label} ${new Date(nextBestMonth.expectedDate).getFullYear()}.`;
+    const reasonText = nextBestMonth.reason === 'descendente'
+      ? `la cobertura vegetal está en descenso en ${nextBestMonth.label}`
+      : `la cobertura vegetal es baja y estable en ${nextBestMonth.label}`;
+    advice = `Análisis del patrón estacional NDVI: ${reasonText} (promedio: ${nextBestMonth.avgNdvi.toFixed(3)}). `;
+    if (decLabels) advice += `Meses con tendencia descendente: ${decLabels}. `;
+    if (lowLabels) advice += `Meses con cobertura baja: ${lowLabels}. `;
+    advice += `Estos períodos pueden corresponder a barbecho, post-cosecha o receso vegetativo. Verifique el calendario agrícola de su zona y valide las condiciones de suelo en la Fase 2.`;
   } else if (trend.direction === 'decreciente') {
-    advice = 'La vegetación está en declive. Se recomienda esperar a la próxima ventana óptima para maximizar el efecto del herbicida.';
+    advice = 'La vegetación está en declive general. Identifique los meses con menor cobertura en el patrón mensual y valide condiciones en Fase 2.';
   } else if (trend.direction === 'creciente') {
-    advice = 'La vegetación está en crecimiento. Aplique el herbicida lo antes posible en la próxima ventana óptima para interrumpir el crecimiento.';
+    advice = 'La vegetación está en crecimiento. Los meses de menor cobertura podrían corresponder a post-cosecha o receso. Verifique el calendario agrícola local.';
   } else {
-    advice = 'La vegetación es estable. Evalué las ventanas disponibles para elegir el mejor momento de aplicación.';
+    advice = 'La vegetación es estable. Revise el patrón mensual para identificar períodos de menor cobertura vegetal.';
   }
-  const bestMonths = monthlyPattern ? monthlyPattern.filter(p => p.n >= 1 && p.avgNdvi !== null && p.avgNdvi >= 0.15 && p.avgNdvi < avg).sort((a, b) => a.avgNdvi - b.avgNdvi).slice(0, 3).map(p => ({ month: p.month, label: monthNames[p.month - 1], avgNdvi: p.avgNdvi })) : [];
-  return { advice, bestWindow: bestWindow || null, nextWindow, nextBestMonth, bestMonths, avgNdvi: Number(avg.toFixed(3)) };
+  return { advice, bestWindow: bestWindow || null, nextWindow, nextBestMonth, bestMonths, decliningMonths: decliningMonths.map(p => ({ month: p.month, label: p.label, avgNdvi: p.avgNdvi })), avgNdvi: Number(avg.toFixed(3)) };
 }
 
 // POST /api/v2/herbicide-timing — Fase 1: Detección de ventanas de aplicación
@@ -2536,7 +2553,17 @@ app.post('/api/v2/herbicide-timing', async (req, res) => {
       const ag = monthAgg[m];
       const avg = ag && ag.n > 0 ? Number((ag.sum / ag.n).toFixed(3)) : null;
       const isWindow = windows.some(w => w.date && new Date(w.date).getMonth() + 1 === m);
-      return { month: m, label: monthNames[i], avgNdvi: avg, n: ag ? ag.n : 0, isWindow };
+      const prevM = i > 0 ? i : 11;
+      const prevAg = monthAgg[prevM + 1];
+      const prevAvg = prevAg && prevAg.n > 0 ? prevAg.sum / prevAg.n : null;
+      let monthTrend = 'sin_datos';
+      if (avg !== null && prevAvg !== null) {
+        const diff = avg - prevAvg;
+        if (diff < -0.03) monthTrend = 'descendente';
+        else if (diff > 0.03) monthTrend = 'creciente';
+        else monthTrend = 'estable';
+      }
+      return { month: m, label: monthNames[i], avgNdvi: avg, n: ag ? ag.n : 0, isWindow, monthTrend };
     });
     const rec = generateHerbicideRecommendation(trend, windows, ndviValues, monthlyPattern);
     const quota = await commitPolygon(req, res, m);
@@ -2638,6 +2665,70 @@ app.post('/api/v2/herbicide-soil-typical', async (req, res) => {
     else recommendation = 'Condiciones de humedad normales: adecuadas para la aplicación de herbicida.';
     const quota = await commitPolygon(req, res, m);
     res.json({ ndvi: ndviMean, ndwi: ndwiMean, msi: msiMean, moistureLevel, recommendation, month, foundDate, quota });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/v2/herbicide-soil-compare — Fase 2c: comparación de condiciones para múltiples meses
+app.post('/api/v2/herbicide-soil-compare', async (req, res) => {
+  try {
+    const { coordinates, months, maxCloudCoverage = 40 } = req.body || {};
+    if (!Array.isArray(coordinates) || coordinates.length < 3) return badParams(res, 'Faltan coordenadas del polígono.');
+    if (!Array.isArray(months) || !months.length) return badParams(res, 'Faltan los meses a comparar.');
+    const ring = coordinates;
+    const bbox = bboxOf(ring);
+    if (!bbox) return badParams(res, 'BBOX inválido.');
+    const { width, height } = imageSize(bbox);
+    const m = await meterEndpoints(req, res, ring);
+    if (!m) return;
+    const now = new Date();
+    const currentYear = now.getFullYear();
+    const monthNames = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'];
+    const results = [];
+    for (const month of months) {
+      if (month < 1 || month > 12) continue;
+      let foundDate = null;
+      const sy = `${currentYear}-${String(month).padStart(2, '0')}-01`;
+      const ey = `${currentYear}-${String(month).padStart(2, '0')}-${new Date(currentYear, month, 0).getDate()}`;
+      try {
+        const data = await catalogSearch({ bbox, collections: ['sentinel-2-l2a'], datetime: `${sy}T00:00:00Z/${ey}T23:59:59Z`, limit: 50, filter: `eo:cloud_cover < ${maxCloudCoverage}` });
+        if (data.features && data.features.length) {
+          const dates = data.features.map(f => f.properties.datetime.split('T')[0]).sort();
+          foundDate = dates[Math.floor(dates.length / 2)];
+        }
+      } catch (e) { /* noop */ }
+      if (!foundDate) {
+        const py = currentYear - 1;
+        const sy2 = `${py}-${String(month).padStart(2, '0')}-01`;
+        const ey2 = `${py}-${String(month).padStart(2, '0')}-${new Date(py, month, 0).getDate()}`;
+        try {
+          const data2 = await catalogSearch({ bbox, collections: ['sentinel-2-l2a'], datetime: `${sy2}T00:00:00Z/${ey2}T23:59:59Z`, limit: 50, filter: `eo:cloud_cover < ${maxCloudCoverage}` });
+          if (data2.features && data2.features.length) {
+            const dates = data2.features.map(f => f.properties.datetime.split('T')[0]).sort();
+            foundDate = dates[Math.floor(dates.length / 2)];
+          }
+        } catch (e2) { /* noop */ }
+      }
+      if (!foundDate) { results.push({ month, label: monthNames[month - 1], ndvi: null, ndwi: null, msi: null, moistureLevel: 'sin_datos', recommendation: 'Sin imágenes disponibles.', foundDate: null }); continue; }
+      const ring2 = toRing(ring);
+      const idx = maskIndices(width, height, bbox, ring2);
+      const img = await fetchHerbicideMoisture({ ring: ring2, bbox, date: foundDate, width, height });
+      const ndviSt = statsOf(img.ndvi, idx);
+      const ndwiSt = statsOf(img.ndwi, idx);
+      const msiSt = statsOf(img.msi, idx);
+      const ndviMean = ndviSt.mean !== null ? Number(((ndviSt.mean * 2 - 1)).toFixed(3)) : null;
+      const ndwiMean = ndwiSt.mean !== null ? Number(((ndwiSt.mean * 2 - 1)).toFixed(3)) : null;
+      const msiMean = msiSt.mean !== null ? Number(((msiSt.mean * 2 - 1)).toFixed(3)) : null;
+      let moistureLevel;
+      if (ndwiMean !== null) { if (ndwiMean > 0.1) moistureLevel = 'humedo'; else if (ndwiMean > -0.1) moistureLevel = 'normal'; else moistureLevel = 'seco'; }
+      else moistureLevel = 'desconocido';
+      let recommendation;
+      if (moistureLevel === 'humedo') recommendation = 'Suelo húmedo: puede dificultar la absorción del herbicida.';
+      else if (moistureLevel === 'seco') recommendation = 'Suelo seco: buena absorción pero verifique estrés hídrico.';
+      else recommendation = 'Condiciones normales: adecuadas para aplicación.';
+      results.push({ month, label: monthNames[month - 1], ndvi: ndviMean, ndwi: ndwiMean, msi: msiMean, moistureLevel, recommendation, foundDate });
+    }
+    const quota = await commitPolygon(req, res, m);
+    res.json({ results, quota });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
