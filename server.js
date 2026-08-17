@@ -2454,7 +2454,7 @@ function generateHerbicideRecommendation(trend, windows, series, monthlyPattern)
   }
   let nextBestMonth = null;
   if (monthlyPattern && monthlyPattern.length) {
-    const candidates = monthlyPattern.filter(p => p.n >= 2 && p.avgNdvi !== null && p.avgNdvi < avg).sort((a, b) => a.avgNdvi - b.avgNdvi);
+    const candidates = monthlyPattern.filter(p => p.n >= 1 && p.avgNdvi !== null && p.avgNdvi < avg).sort((a, b) => a.avgNdvi - b.avgNdvi);
     const now2 = new Date();
     const currentMonth = now2.getMonth() + 1;
     const currentYear = now2.getFullYear();
@@ -2481,7 +2481,7 @@ function generateHerbicideRecommendation(trend, windows, series, monthlyPattern)
   } else {
     advice = 'La vegetación es estable. Evalué las ventanas disponibles para elegir el mejor momento de aplicación.';
   }
-  const bestMonths = monthlyPattern ? monthlyPattern.filter(p => p.n >= 2 && p.avgNdvi !== null && p.avgNdvi < avg).sort((a, b) => a.avgNdvi - b.avgNdvi).slice(0, 3).map(p => ({ month: p.month, label: monthNames[p.month - 1], avgNdvi: p.avgNdvi })) : [];
+  const bestMonths = monthlyPattern ? monthlyPattern.filter(p => p.n >= 1 && p.avgNdvi !== null && p.avgNdvi < avg).sort((a, b) => a.avgNdvi - b.avgNdvi).slice(0, 3).map(p => ({ month: p.month, label: monthNames[p.month - 1], avgNdvi: p.avgNdvi })) : [];
   return { advice, bestWindow: bestWindow || null, nextWindow, nextBestMonth, bestMonths, avgNdvi: Number(avg.toFixed(3)) };
 }
 
