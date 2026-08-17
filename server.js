@@ -2453,7 +2453,7 @@ function generateHerbicideRecommendation(trend, windows, series) {
 // POST /api/v2/herbicide-timing — Fase 1: Detección de ventanas de aplicación
 app.post('/api/v2/herbicide-timing', async (req, res) => {
   try {
-    const { coordinates, lookbackMonths = 18, maxCloudCoverage = 30 } = req.body || {};
+    const { coordinates, lookbackMonths = 12, maxCloudCoverage = 30 } = req.body || {};
     if (!Array.isArray(coordinates) || coordinates.length < 3) return badParams(res, 'Faltan coordenadas del polígono.');
     const ring = coordinates;
     const bbox = bboxOf(ring);
