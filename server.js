@@ -2338,6 +2338,240 @@ app.post('/api/v2/compare-rvi', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ============================================================
+// HERBICIDE — Control vegetación / Timing / Efectividad
+// ============================================================
+
+const HERBICIDE_MOISTURE_EVAL = `//VERSION=3
+function setup() {
+  return {
+    input: [{ bands: ["B03","B04","B08","B11","SCL"], units: "DN" }],
+    output: [{ id: "res", bands: 3, sampleType: "FLOAT32" }]
+  };
+}
+function isCloud(scl) { return scl === 3 || scl === 8 || scl === 9 || scl === 10; }
+function valid(scl) { return scl !== 0 && scl !== 1 && scl !== 11; }
+function evaluatePixel(sample) {
+  var scl = sample.SCL;
+  if (!valid(scl)) return { res: [NaN, NaN, NaN] };
+  var ndvi = (sample.B08 - sample.B04) / (sample.B08 + sample.B04 + 1e-8);
+  var ndwi = (sample.B03 - sample.B08) / (sample.B03 + sample.B08 + 1e-8);
+  var msi = (sample.B11 - sample.B08) / (sample.B11 + sample.B08 + 1e-8);
+  return { res: [(ndvi + 1) / 2, (ndwi + 1) / 2, (msi + 1) / 2] };
+}`;
+
+async function fetchHerbicideMoisture({ ring, bbox, date, width, height, snowMonths = null }) {
+  const payload = {
+    input: {
+      bounds: { geometry: { type: 'Polygon', coordinates: [ring] } },
+      data: [{ type: 'sentinel-2-l2a', dataFilter: { timeRange: { from: `${date}T00:00:00Z`, to: `${date}T23:59:59Z` }, maxCloudCoverage: 100 } }]
+    },
+    output: { width, height, responses: [{ identifier: 'res', format: { type: 'image/tiff' } }] },
+    evalscript: useSnowForDate(date, snowMonths) ? HERBICIDE_MOISTURE_EVAL : HERBICIDE_MOISTURE_EVAL
+  };
+  const buf = await shFetch(payload);
+  const { bands } = await parseTiff(buf);
+  if (bands.length < 3) throw new Error('Respuesta de humedad incompleta (bands=' + bands.length + ')');
+  return { ndvi: bands[0].values, ndwi: bands[1].values, msi: bands[2].values, width, height };
+}
+
+function smoothSeries(arr, windowSize = 3) {
+  const out = new Array(arr.length).fill(null);
+  const half = Math.floor(windowSize / 2);
+  for (let i = 0; i < arr.length; i++) {
+    if (arr[i] === null) continue;
+    let sum = 0, n = 0;
+    for (let j = Math.max(0, i - half); j <= Math.min(arr.length - 1, i + half); j++) {
+      if (arr[j] !== null) { sum += arr[j]; n++; }
+    }
+    out[i] = n > 0 ? sum / n : null;
+  }
+  return out;
+}
+
+function findLocalExtrema(series) {
+  const extrema = [];
+  for (let i = 1; i < series.length - 1; i++) {
+    if (series[i] === null) continue;
+    const prev = series[i - 1], next = series[i + 1];
+    if (prev !== null && next !== null) {
+      if (series[i] <= prev && series[i] <= next) extrema.push({ index: i, type: 'min', value: series[i] });
+      if (series[i] >= prev && series[i] >= next) extrema.push({ index: i, type: 'max', value: series[i] });
+    }
+  }
+  return extrema;
+}
+
+function classifyWindows(timeseries, extrema) {
+  const windows = [];
+  const mins = extrema.filter(e => e.type === 'min');
+  for (const m of mins) {
+    const val = m.value;
+    let level;
+    if (val < 0.4) level = 'optimal';
+    else if (val < 0.6) level = 'good';
+    else level = 'marginal';
+    windows.push({ index: m.index, date: timeseries[m.index]?.date || null, ndvi: val, level, label: level === 'optimal' ? 'Óptima' : level === 'good' ? 'Buena' : 'Marginal' });
+  }
+  return windows;
+}
+
+function computeTrend(series) {
+  const valid = series.filter(v => v !== null);
+  if (valid.length < 2) return { slope: 0, direction: 'estable', r2: 0 };
+  const n = valid.length;
+  let sumX = 0, sumY = 0, sumXY = 0, sumX2 = 0, sumY2 = 0;
+  for (let i = 0; i < n; i++) {
+    sumX += i; sumY += valid[i];
+    sumXY += i * valid[i]; sumX2 += i * i; sumY2 += valid[i] * valid[i];
+  }
+  const slope = (n * sumXY - sumX * sumY) / (n * sumX2 - sumX * sumX || 1);
+  const r2num = (n * sumXY - sumX * sumY) ** 2;
+  const r2den = (n * sumX2 - sumX * sumX) * (n * sumY2 - sumY * sumY) || 1;
+  const r2 = r2num / r2den;
+  let direction;
+  if (slope > 0.005) direction = 'creciente';
+  else if (slope < -0.005) direction = 'decreciente';
+  else direction = 'estable';
+  return { slope: Number(slope.toFixed(5)), direction, r2: Number(r2.toFixed(3)) };
+}
+
+function generateHerbicideRecommendation(trend, windows, series) {
+  const avg = series.filter(v => v !== null).reduce((a, b) => a + b, 0) / (series.filter(v => v !== null).length || 1);
+  const bestWindow = windows.filter(w => w.level === 'optimal' || w.level === 'good').sort((a, b) => a.ndvi - b.ndvi)[0];
+  let advice;
+  if (trend.direction === 'decreciente') {
+    advice = 'La vegetación está en declive. Se recomienda esperar a una ventana óptima para maximizar el efecto del herbicida.';
+  } else if (trend.direction === 'creciente') {
+    advice = 'La vegetación está en crecimiento. Aplique el herbicida lo antes posible en la próxima ventana óptima para interrumpir el crecimiento.';
+  } else {
+    advice = 'La vegetación es estable. Evalué las ventanas disponibles para elegir el mejor momento de aplicación.';
+  }
+  return { advice, bestWindow: bestWindow || null, avgNdvi: Number(avg.toFixed(3)) };
+}
+
+// POST /api/v2/herbicide-timing — Fase 1: Detección de ventanas de aplicación
+app.post('/api/v2/herbicide-timing', async (req, res) => {
+  try {
+    const { coordinates, lookbackMonths = 18, maxCloudCoverage = 30 } = req.body || {};
+    if (!Array.isArray(coordinates) || coordinates.length < 3) return badParams(res, 'Faltan coordenadas del polígono.');
+    const ring = coordinates;
+    const bbox = bboxOf(ring);
+    if (!bbox) return badParams(res, 'BBOX inválido.');
+    const { width, height } = imageSize(bbox);
+    const m = await meterEndpoints(req, res, ring);
+    if (!m) return;
+    const now = new Date();
+    const start = new Date(now);
+    start.setMonth(start.getMonth() - lookbackMonths);
+    const snowM = null;
+    const months = [];
+    for (let d = new Date(start); d <= now; d.setMonth(d.getMonth() + 1)) {
+      months.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`);
+    }
+    const timeseries = [];
+    for (const mk of months) {
+      const [y, m2] = mk.split('-').map(Number);
+      const monthStart = new Date(y, m2 - 1, 1);
+      const monthEnd = new Date(y, m2, 0);
+      try {
+        const data = await catalogSearch({ bbox, collections: ['sentinel-2-l2a'], datetime: `${monthStart.toISOString().split('T')[0]}T00:00:00Z/${monthEnd.toISOString().split('T')[0]}T23:59:59Z`, limit: 50, filter: `eo:cloud_cover < ${maxCloudCoverage}` });
+        if (!data.features || !data.features.length) { timeseries.push({ date: mk + '-15', ndvi: null }); continue; }
+        const dates = data.features.map(f => f.properties.datetime.split('T')[0]).sort();
+        const bestDate = dates[Math.floor(dates.length / 2)];
+        const ring2 = toRing(ring);
+        const idx = maskIndices(width, height, bbox, ring2);
+        const img = await fetchOptical({ ring: ring2, bbox, date: bestDate, width, height, maxCloud: maxCloudCoverage, snowMonths: snowM });
+        const st = statsOf(img.ndvi, idx);
+        timeseries.push({ date: bestDate, ndvi: st.mean !== null ? Number(((st.mean * 2 - 1)).toFixed(3)) : null });
+      } catch (e) { timeseries.push({ date: mk + '-15', ndvi: null }); }
+    }
+    const ndviValues = timeseries.map(t => t.ndvi);
+    const smoothed = smoothSeries(ndviValues, 3);
+    const extrema = findLocalExtrema(smoothed.map((v, i) => v !== null ? v : ndviValues[i]));
+    const windows = classifyWindows(timeseries, extrema);
+    const trend = computeTrend(ndviValues);
+    const rec = generateHerbicideRecommendation(trend, windows, ndviValues);
+    const quota = await commitPolygon(req, res, m);
+    res.json({ timeseries, smoothed, extrema, windows, trend, recommendation: rec, quota });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/v2/herbicide-soil — Fase 2: Validación logística (suelo/humedad)
+app.post('/api/v2/herbicide-soil', async (req, res) => {
+  try {
+    const { coordinates, date, maxCloudCoverage = 30 } = req.body || {};
+    if (!Array.isArray(coordinates) || coordinates.length < 3) return badParams(res, 'Faltan coordenadas del polígono.');
+    if (!date) return badParams(res, 'Falta la fecha.');
+    const ring = coordinates;
+    const bbox = bboxOf(ring);
+    if (!bbox) return badParams(res, 'BBOX inválido.');
+    const { width, height } = imageSize(bbox);
+    const m = await meterEndpoints(req, res, ring);
+    if (!m) return;
+    const ring2 = toRing(ring);
+    const idx = maskIndices(width, height, bbox, ring2);
+    const img = await fetchHerbicideMoisture({ ring: ring2, bbox, date, width, height });
+    const ndviSt = statsOf(img.ndvi, idx);
+    const ndwiSt = statsOf(img.ndwi, idx);
+    const msiSt = statsOf(img.msi, idx);
+    const ndviMean = ndviSt.mean !== null ? Number(((ndviSt.mean * 2 - 1)).toFixed(3)) : null;
+    const ndwiMean = ndwiSt.mean !== null ? Number(((ndwiSt.mean * 2 - 1)).toFixed(3)) : null;
+    const msiMean = msiSt.mean !== null ? Number(((msiSt.mean * 2 - 1)).toFixed(3)) : null;
+    let moistureLevel;
+    if (ndwiMean !== null) {
+      if (ndwiMean > 0.1) moistureLevel = 'humedo';
+      else if (ndwiMean > -0.1) moistureLevel = 'normal';
+      else moistureLevel = 'seco';
+    } else moistureLevel = 'desconocido';
+    let recommendation;
+    if (moistureLevel === 'humedo') recommendation = 'Suelo húmedo: puede dificultar la absorción del herbicida. Considere esperar a condiciones más secas.';
+    else if (moistureLevel === 'seco') recommendation = 'Suelo seco: buena absorción pero verifique que no haya estrés hídrico severo en la vegetación.';
+    else recommendation = 'Condiciones de humedad normales: adecuadas para la aplicación de herbicida.';
+    const quota = await commitPolygon(req, res, m);
+    res.json({ ndvi: ndviMean, ndwi: ndwiMean, msi: msiMean, moistureLevel, recommendation, date, quota });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/v2/herbicide-effect — Fase 3: Seguimiento / efectividad
+app.post('/api/v2/herbicide-effect', async (req, res) => {
+  try {
+    const { coordinates, dateBefore, dateAfter, maxCloudCoverage = 30 } = req.body || {};
+    if (!Array.isArray(coordinates) || coordinates.length < 3) return badParams(res, 'Faltan coordenadas del polígono.');
+    if (!dateBefore || !dateAfter) return badParams(res, 'Faltan las fechas antes/después.');
+    const ring = coordinates;
+    const bbox = bboxOf(ring);
+    if (!bbox) return badParams(res, 'BBOX inválido.');
+    const { width, height } = imageSize(bbox);
+    const m = await meterEndpoints(req, res, ring);
+    if (!m) return;
+    const ring2 = toRing(ring);
+    const idx = maskIndices(width, height, bbox, ring2);
+    const img1 = await fetchOptical({ ring: ring2, bbox, date: dateBefore, width, height, maxCloud: maxCloudCoverage });
+    const img2 = await fetchOptical({ ring: ring2, bbox, date: dateAfter, width, height, maxCloud: maxCloudCoverage });
+    const st1 = statsOf(img1.ndvi, idx);
+    const st2 = statsOf(img2.ndvi, idx);
+    const cloud1 = cloudPctOf(img1.cloud, idx);
+    const cloud2 = cloudPctOf(img2.cloud, idx);
+    const ndviBefore = st1.mean !== null ? Number(((st1.mean * 2 - 1)).toFixed(3)) : null;
+    const ndviAfter = st2.mean !== null ? Number(((st2.mean * 2 - 1)).toFixed(3)) : null;
+    const delta = ndviBefore !== null && ndviAfter !== null ? Number((ndviAfter - ndviBefore).toFixed(3)) : null;
+    let effectiveness;
+    if (delta !== null) {
+      if (delta < -0.15) effectiveness = 'efectivo';
+      else if (delta < -0.05) effectiveness = 'parcial';
+      else effectiveness = 'inefectivo';
+    } else effectiveness = 'indefinido';
+    let advice;
+    if (effectiveness === 'efectivo') advice = 'Reducción significativa de NDVI detectada. El tratamiento de herbicida fue efectivo.';
+    else if (effectiveness === 'parcial') advice = 'Reducción moderada de NDVI. El tratamiento tuvo efecto parcial, considere una segunda aplicación.';
+    else if (effectiveness === 'inefectivo') advice = 'Sin reducción significativa de NDVI. El tratamiento no fue efectivo. Revise la dosificación o el momento de aplicación.';
+    else advice = 'No se pudo determinar la efectividad. Verifique la calidad de las imágenes.';
+    const quota = await commitPolygon(req, res, m);
+    res.json({ ndviBefore, ndviAfter, delta, effectiveness, advice, cloudBefore: cloud1.cloudPct, cloudAfter: cloud2.cloudPct, dateBefore, dateAfter, quota });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 if (require.main === module) {
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`✅ Backend v2 listo en http://localhost:${PORT}`);
