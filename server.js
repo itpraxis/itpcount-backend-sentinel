@@ -2439,15 +2439,23 @@ function computeTrend(series) {
 function generateHerbicideRecommendation(trend, windows, series) {
   const avg = series.filter(v => v !== null).reduce((a, b) => a + b, 0) / (series.filter(v => v !== null).length || 1);
   const bestWindow = windows.filter(w => w.level === 'optimal' || w.level === 'good').sort((a, b) => a.ndvi - b.ndvi)[0];
+  let nextWindow = null;
+  if (bestWindow && bestWindow.date) {
+    const now = new Date();
+    const bestDate = new Date(bestWindow.date);
+    let nextDate = new Date(bestDate);
+    while (nextDate <= now) nextDate.setMonth(nextDate.getMonth() + 12);
+    nextWindow = { date: nextDate.toISOString().split('T')[0], level: bestWindow.level, ndvi: bestWindow.ndvi, basedOn: bestWindow.date };
+  }
   let advice;
   if (trend.direction === 'decreciente') {
-    advice = 'La vegetación está en declive. Se recomienda esperar a una ventana óptima para maximizar el efecto del herbicida.';
+    advice = 'La vegetación está en declive. Se recomienda esperar a la próxima ventana óptima para maximizar el efecto del herbicida.';
   } else if (trend.direction === 'creciente') {
     advice = 'La vegetación está en crecimiento. Aplique el herbicida lo antes posible en la próxima ventana óptima para interrumpir el crecimiento.';
   } else {
     advice = 'La vegetación es estable. Evalué las ventanas disponibles para elegir el mejor momento de aplicación.';
   }
-  return { advice, bestWindow: bestWindow || null, avgNdvi: Number(avg.toFixed(3)) };
+  return { advice, bestWindow: bestWindow || null, nextWindow, avgNdvi: Number(avg.toFixed(3)) };
 }
 
 // POST /api/v2/herbicide-timing — Fase 1: Detección de ventanas de aplicación
