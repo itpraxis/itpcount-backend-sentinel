@@ -2345,19 +2345,20 @@ app.post('/api/v2/compare-rvi', async (req, res) => {
 const HERBICIDE_MOISTURE_EVAL = `//VERSION=3
 function setup() {
   return {
-    input: [{ bands: ["B03","B04","B08","B11","SCL"], units: "DN" }],
-    output: [{ id: "res", bands: 3, sampleType: "FLOAT32" }]
+    input: [{ bands: ["B03","B04","B05","B08","B11","SCL"], units: "DN" }],
+    output: [{ id: "res", bands: 4, sampleType: "FLOAT32" }]
   };
 }
 function isCloud(scl) { return scl === 3 || scl === 8 || scl === 9 || scl === 10; }
 function valid(scl) { return scl !== 0 && scl !== 1 && scl !== 11; }
 function evaluatePixel(sample) {
   var scl = sample.SCL;
-  if (!valid(scl)) return { res: [NaN, NaN, NaN] };
+  if (!valid(scl)) return { res: [NaN, NaN, NaN, NaN] };
   var ndvi = (sample.B08 - sample.B04) / (sample.B08 + sample.B04 + 1e-8);
+  var savi = ((sample.B08 - sample.B04) / (sample.B08 + sample.B04 + 0.5)) * 1.5;
   var ndwi = (sample.B03 - sample.B08) / (sample.B03 + sample.B08 + 1e-8);
-  var msi = (sample.B11 - sample.B08) / (sample.B11 + sample.B08 + 1e-8);
-  return { res: [(ndvi + 1) / 2, (ndwi + 1) / 2, (msi + 1) / 2] };
+  var ndre = (sample.B08 - sample.B05) / (sample.B08 + sample.B05 + 1e-8);
+  return { res: [(ndvi + 1) / 2, (savi + 1) / 2, (ndwi + 1) / 2, (ndre + 1) / 2] };
 }`;
 
 async function fetchHerbicideMoisture({ ring, bbox, date, width, height, snowMonths = null }) {
@@ -2371,8 +2372,8 @@ async function fetchHerbicideMoisture({ ring, bbox, date, width, height, snowMon
   };
   const buf = await shFetch(payload);
   const { bands } = await parseTiff(buf);
-  if (bands.length < 3) throw new Error('Respuesta de humedad incompleta (bands=' + bands.length + ')');
-  return { ndvi: bands[0].values, ndwi: bands[1].values, msi: bands[2].values, width, height };
+  if (bands.length < 4) throw new Error('Respuesta de humedad incompleta (bands=' + bands.length + ')');
+  return { ndvi: bands[0].values, savi: bands[1].values, ndwi: bands[2].values, ndre: bands[3].values, width, height };
 }
 
 const S1_SAR_EVAL = `//VERSION=3
@@ -2576,17 +2577,19 @@ app.post('/api/v2/herbicide-timing', async (req, res) => {
       const monthEnd = new Date(y, m2, 0);
       try {
         const data = await catalogSearch({ bbox, collections: ['sentinel-2-l2a'], datetime: `${monthStart.toISOString().split('T')[0]}T00:00:00Z/${monthEnd.toISOString().split('T')[0]}T23:59:59Z`, limit: 50, filter: `eo:cloud_cover < ${maxCloudCoverage}` });
-        if (!data.features || !data.features.length) { timeseries.push({ date: mk + '-15', ndvi: null }); continue; }
+        if (!data.features || !data.features.length) { timeseries.push({ date: mk + '-15', ndvi: null, savi: null }); continue; }
         const dates = data.features.map(f => f.properties.datetime.split('T')[0]).sort();
         const bestDate = dates[Math.floor(dates.length / 2)];
         const ring2 = toRing(ring);
         const idx = maskIndices(width, height, bbox, ring2);
-        const img = await fetchOptical({ ring: ring2, bbox, date: bestDate, width, height, maxCloud: maxCloudCoverage, snowMonths: snowM });
-        const st = statsOf(img.ndvi, idx);
-        timeseries.push({ date: bestDate, ndvi: st.mean !== null ? Number(((st.mean * 2 - 1)).toFixed(3)) : null });
-      } catch (e) { timeseries.push({ date: mk + '-15', ndvi: null }); }
+        const img = await fetchHerbicideMoisture({ ring: ring2, bbox, date: bestDate, width, height });
+        const ndviSt = statsOf(img.ndvi, idx);
+        const saviSt = statsOf(img.savi, idx);
+        timeseries.push({ date: bestDate, ndvi: ndviSt.mean !== null ? Number(((ndviSt.mean * 2 - 1)).toFixed(3)) : null, savi: saviSt.mean !== null ? Number(((saviSt.mean * 2 - 1)).toFixed(3)) : null });
+      } catch (e) { timeseries.push({ date: mk + '-15', ndvi: null, savi: null }); }
     }
     const ndviValues = timeseries.map(t => t.ndvi);
+    const saviValues = timeseries.map(t => t.savi);
     const smoothed = smoothSeries(ndviValues, 3);
     const extrema = findLocalExtrema(smoothed.map((v, i) => v !== null ? v : ndviValues[i]));
     const windows = classifyWindows(timeseries, extrema);
@@ -2596,26 +2599,28 @@ app.post('/api/v2/herbicide-timing', async (req, res) => {
     for (const t of timeseries) {
       if (t.ndvi === null) continue;
       const mon = new Date(t.date).getMonth() + 1;
-      if (!monthAgg[mon]) monthAgg[mon] = { sum: 0, n: 0 };
-      monthAgg[mon].sum += t.ndvi;
+      if (!monthAgg[mon]) monthAgg[mon] = { sumNdvi: 0, sumSavi: 0, n: 0 };
+      monthAgg[mon].sumNdvi += t.ndvi;
+      if (t.savi !== null) monthAgg[mon].sumSavi += t.savi;
       monthAgg[mon].n++;
     }
     const monthlyPattern = Array.from({ length: 12 }, (_, i) => {
       const m = i + 1;
       const ag = monthAgg[m];
-      const avg = ag && ag.n > 0 ? Number((ag.sum / ag.n).toFixed(3)) : null;
+      const avgNdvi = ag && ag.n > 0 ? Number((ag.sumNdvi / ag.n).toFixed(3)) : null;
+      const avgSavi = ag && ag.n > 0 && ag.sumSavi > 0 ? Number((ag.sumSavi / ag.n).toFixed(3)) : null;
       const isWindow = windows.some(w => w.date && new Date(w.date).getMonth() + 1 === m);
       const prevM = i > 0 ? i : 11;
       const prevAg = monthAgg[prevM + 1];
-      const prevAvg = prevAg && prevAg.n > 0 ? prevAg.sum / prevAg.n : null;
+      const prevAvg = prevAg && prevAg.n > 0 ? prevAg.sumNdvi / prevAg.n : null;
       let monthTrend = 'sin_datos';
-      if (avg !== null && prevAvg !== null) {
-        const diff = avg - prevAvg;
+      if (avgNdvi !== null && prevAvg !== null) {
+        const diff = avgNdvi - prevAvg;
         if (diff < -0.03) monthTrend = 'descendente';
         else if (diff > 0.03) monthTrend = 'creciente';
         else monthTrend = 'estable';
       }
-      return { month: m, label: monthNames[i], avgNdvi: avg, n: ag ? ag.n : 0, isWindow, monthTrend };
+      return { month: m, label: monthNames[i], avgNdvi, avgSavi, n: ag ? ag.n : 0, isWindow, monthTrend };
     });
     const rec = generateHerbicideRecommendation(trend, windows, ndviValues, monthlyPattern);
     const quota = await commitPolygon(req, res, m);
@@ -2623,7 +2628,7 @@ app.post('/api/v2/herbicide-timing', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// POST /api/v2/herbicide-soil — Fase 2: Validación logística (suelo/humedad)
+// POST /api/v2/herbicide-soil — Fase 2: Validación logística (suelo/humedad) — S1 primario
 app.post('/api/v2/herbicide-soil', async (req, res) => {
   try {
     const { coordinates, date, maxCloudCoverage = 30 } = req.body || {};
@@ -2637,25 +2642,43 @@ app.post('/api/v2/herbicide-soil', async (req, res) => {
     if (!m) return;
     const ring2 = toRing(ring);
     const idx = maskIndices(width, height, bbox, ring2);
-    const img = await fetchHerbicideMoisture({ ring: ring2, bbox, date, width, height });
-    const ndviSt = statsOf(img.ndvi, idx);
-    const ndwiSt = statsOf(img.ndwi, idx);
-    const msiSt = statsOf(img.msi, idx);
-    const ndviMean = ndviSt.mean !== null ? Number(((ndviSt.mean * 2 - 1)).toFixed(3)) : null;
-    const ndwiMean = ndwiSt.mean !== null ? Number(((ndwiSt.mean * 2 - 1)).toFixed(3)) : null;
-    const msiMean = msiSt.mean !== null ? Number(((msiSt.mean * 2 - 1)).toFixed(3)) : null;
-    let moistureLevel;
-    if (ndwiMean !== null) {
-      if (ndwiMean > 0.1) moistureLevel = 'humedo';
-      else if (ndwiMean > -0.1) moistureLevel = 'normal';
-      else moistureLevel = 'seco';
-    } else moistureLevel = 'desconocido';
-    let recommendation;
-    if (moistureLevel === 'humedo') recommendation = 'Suelo húmedo: puede dificultar la absorción del herbicida. Considere esperar a condiciones más secas.';
-    else if (moistureLevel === 'seco') recommendation = 'Suelo seco: buena absorción pero verifique que no haya estrés hídrico severo en la vegetación.';
-    else recommendation = 'Condiciones de humedad normales: adecuadas para la aplicación de herbicida.';
+    const dt = new Date(date);
+    const month = dt.getMonth() + 1;
+    const year = dt.getFullYear();
+    const s1Date = await findS1Date({ bbox, month, year });
+    let vvMean = null, vhMean = null, ratioMean = null, ndviMean = null, saviMean = null, ndwiMean = null, ndreMean = null;
+    let source, moistureLevel, transitability, recommendation;
+    if (s1Date) {
+      source = 'sentinel-1';
+      const sar = await fetchS1Sar({ ring: ring2, bbox, date: s1Date, width, height });
+      const vvSt = statsOf(sar.vv, idx);
+      const vhSt = statsOf(sar.vh, idx);
+      const rSt = statsOf(sar.ratio, idx);
+      vvMean = vvSt.mean !== null ? Number(vvSt.mean.toFixed(2)) : null;
+      vhMean = vhSt.mean !== null ? Number(vhSt.mean.toFixed(2)) : null;
+      ratioMean = rSt.mean !== null ? Number(rSt.mean.toFixed(2)) : null;
+      if (vvMean !== null) { if (vvMean > -10) moistureLevel = 'saturado'; else if (vvMean > -12) moistureLevel = 'humedo'; else if (vvMean > -15) moistureLevel = 'normal'; else moistureLevel = 'seco'; }
+      else moistureLevel = 'desconocido';
+      if (vvMean !== null) { if (vvMean > -10) transitability = 'no_transitable'; else if (vvMean > -12) transitability = 'marginal'; else transitability = 'transitable'; }
+      else transitability = 'desconocido';
+      if (transitability === 'no_transitable') recommendation = 'SAR: suelo saturado. NO es seguro ingresar maquinaria.';
+      else if (transitability === 'marginal') recommendation = 'SAR: suelo húmedo. Acceso marginal, considere espera.';
+      else if (moistureLevel === 'seco') recommendation = 'SAR: suelo seco. Buena transitabilidad y absorción.';
+      else recommendation = 'SAR: condiciones normales. Suelo apto para maquinaria.';
+    } else {
+      source = 'sentinel-2';
+      const img = await fetchHerbicideMoisture({ ring: ring2, bbox, date, width, height });
+      ndviMean = statsOf(img.ndvi, idx).mean !== null ? Number(((statsOf(img.ndvi, idx).mean * 2 - 1)).toFixed(3)) : null;
+      saviMean = statsOf(img.savi, idx).mean !== null ? Number(((statsOf(img.savi, idx).mean * 2 - 1)).toFixed(3)) : null;
+      ndwiMean = statsOf(img.ndwi, idx).mean !== null ? Number(((statsOf(img.ndwi, idx).mean * 2 - 1)).toFixed(3)) : null;
+      ndreMean = statsOf(img.ndre, idx).mean !== null ? Number(((statsOf(img.ndre, idx).mean * 2 - 1)).toFixed(3)) : null;
+      if (ndwiMean !== null) { if (ndwiMean > 0.1) moistureLevel = 'humedo'; else if (ndwiMean > -0.1) moistureLevel = 'normal'; else moistureLevel = 'seco'; }
+      else moistureLevel = 'desconocido';
+      transitability = 'solo_optico';
+      recommendation = 'Óptico: humedad estimada por NDWI. Para transitabilidad real, use la comparación con S1.';
+    }
     const quota = await commitPolygon(req, res, m);
-    res.json({ ndvi: ndviMean, ndwi: ndwiMean, msi: msiMean, moistureLevel, recommendation, date, quota });
+    res.json({ source, vv: vvMean, vh: vhMean, sarRatio: ratioMean, ndvi: ndviMean, savi: saviMean, ndwi: ndwiMean, ndre: ndreMean, moistureLevel, transitability, recommendation, date, foundDate: source === 'sentinel-1' ? s1Date : date, quota });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -2695,16 +2718,18 @@ app.post('/api/v2/herbicide-soil-typical', async (req, res) => {
         }
       } catch (e2) { /* noop */ }
     }
-    if (!foundDate) return res.json({ ndvi: null, ndwi: null, msi: null, moistureLevel: 'sin_datos', recommendation: 'No hay imágenes satelitales disponibles para este mes.', month, foundDate: null, quota: await commitPolygon(req, res, m) });
+    if (!foundDate) return res.json({ ndvi: null, savi: null, ndwi: null, ndre: null, moistureLevel: 'sin_datos', recommendation: 'No hay imágenes satelitales disponibles para este mes.', month, foundDate: null, quota: await commitPolygon(req, res, m) });
     const ring2 = toRing(ring);
     const idx = maskIndices(width, height, bbox, ring2);
     const img = await fetchHerbicideMoisture({ ring: ring2, bbox, date: foundDate, width, height });
     const ndviSt = statsOf(img.ndvi, idx);
+    const saviSt = statsOf(img.savi, idx);
     const ndwiSt = statsOf(img.ndwi, idx);
-    const msiSt = statsOf(img.msi, idx);
+    const ndreSt = statsOf(img.ndre, idx);
     const ndviMean = ndviSt.mean !== null ? Number(((ndviSt.mean * 2 - 1)).toFixed(3)) : null;
+    const saviMean = saviSt.mean !== null ? Number(((saviSt.mean * 2 - 1)).toFixed(3)) : null;
     const ndwiMean = ndwiSt.mean !== null ? Number(((ndwiSt.mean * 2 - 1)).toFixed(3)) : null;
-    const msiMean = msiSt.mean !== null ? Number(((msiSt.mean * 2 - 1)).toFixed(3)) : null;
+    const ndreMean = ndreSt.mean !== null ? Number(((ndreSt.mean * 2 - 1)).toFixed(3)) : null;
     let moistureLevel;
     if (ndwiMean !== null) {
       if (ndwiMean > 0.1) moistureLevel = 'humedo';
@@ -2716,11 +2741,11 @@ app.post('/api/v2/herbicide-soil-typical', async (req, res) => {
     else if (moistureLevel === 'seco') recommendation = 'Suelo seco: buena absorción pero verifique que no haya estrés hídrico severo en la vegetación.';
     else recommendation = 'Condiciones de humedad normales: adecuadas para la aplicación de herbicida.';
     const quota = await commitPolygon(req, res, m);
-    res.json({ ndvi: ndviMean, ndwi: ndwiMean, msi: msiMean, moistureLevel, recommendation, month, foundDate, quota });
+    res.json({ ndvi: ndviMean, savi: saviMean, ndwi: ndwiMean, ndre: ndreMean, moistureLevel, recommendation, month, foundDate, quota });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// POST /api/v2/herbicide-soil-compare — Fase 2c: comparación de condiciones para múltiples meses
+// POST /api/v2/herbicide-soil-compare — Fase 2c: S1 primario para transitabilidad, S2 fallback
 app.post('/api/v2/herbicide-soil-compare', async (req, res) => {
   try {
     const { coordinates, months, maxCloudCoverage = 40 } = req.body || {};
@@ -2739,36 +2764,31 @@ app.post('/api/v2/herbicide-soil-compare', async (req, res) => {
     for (const month of months) {
       if (month < 1 || month > 12) continue;
       let foundDate = null;
-      let source = 'sentinel-2';
-      const sy = `${currentYear}-${String(month).padStart(2, '0')}-01`;
-      const ey = `${currentYear}-${String(month).padStart(2, '0')}-${new Date(currentYear, month, 0).getDate()}`;
-      try {
-        const data = await catalogSearch({ bbox, collections: ['sentinel-2-l2a'], datetime: `${sy}T00:00:00Z/${ey}T23:59:59Z`, limit: 50, filter: `eo:cloud_cover < ${maxCloudCoverage}` });
-        if (data.features && data.features.length) {
-          const dates = data.features.map(f => f.properties.datetime.split('T')[0]).sort();
-          foundDate = dates[Math.floor(dates.length / 2)];
-        }
-      } catch (e) { /* noop */ }
+      let source = null;
+      const s1Date = await findS1Date({ bbox, month, year: currentYear });
+      if (s1Date) { foundDate = s1Date; source = 'sentinel-1'; }
+      if (!foundDate) {
+        const sy = `${currentYear}-${String(month).padStart(2, '0')}-01`;
+        const ey = `${currentYear}-${String(month).padStart(2, '0')}-${new Date(currentYear, month, 0).getDate()}`;
+        try {
+          const data = await catalogSearch({ bbox, collections: ['sentinel-2-l2a'], datetime: `${sy}T00:00:00Z/${ey}T23:59:59Z`, limit: 50, filter: `eo:cloud_cover < ${maxCloudCoverage}` });
+          if (data.features && data.features.length) { foundDate = data.features.map(f => f.properties.datetime.split('T')[0]).sort()[Math.floor(data.features.length / 2)]; source = 'sentinel-2'; }
+        } catch (e) { /* noop */ }
+      }
       if (!foundDate) {
         const py = currentYear - 1;
         const sy2 = `${py}-${String(month).padStart(2, '0')}-01`;
         const ey2 = `${py}-${String(month).padStart(2, '0')}-${new Date(py, month, 0).getDate()}`;
         try {
           const data2 = await catalogSearch({ bbox, collections: ['sentinel-2-l2a'], datetime: `${sy2}T00:00:00Z/${ey2}T23:59:59Z`, limit: 50, filter: `eo:cloud_cover < ${maxCloudCoverage}` });
-          if (data2.features && data2.features.length) {
-            const dates = data2.features.map(f => f.properties.datetime.split('T')[0]).sort();
-            foundDate = dates[Math.floor(dates.length / 2)];
-          }
+          if (data2.features && data2.features.length) { foundDate = data2.features.map(f => f.properties.datetime.split('T')[0]).sort()[Math.floor(data2.features.length / 2)]; source = 'sentinel-2'; }
         } catch (e2) { /* noop */ }
       }
-      if (!foundDate) {
-        const s1Date = await findS1Date({ bbox, month, year: currentYear });
-        if (s1Date) { foundDate = s1Date; source = 'sentinel-1'; }
-      }
-      if (!foundDate) { results.push({ month, label: monthNames[month - 1], ndvi: null, ndwi: null, msi: null, moistureLevel: 'sin_datos', recommendation: 'Sin imágenes S2 ni S1 disponibles.', foundDate: null, source: null }); continue; }
+      if (!foundDate) { results.push({ month, label: monthNames[month - 1], source: null, vv: null, vh: null, sarRatio: null, ndvi: null, savi: null, ndwi: null, ndre: null, moistureLevel: 'sin_datos', transitability: 'desconocido', recommendation: 'Sin imágenes disponibles.', foundDate: null }); continue; }
       const ring2 = toRing(ring);
       const idx = maskIndices(width, height, bbox, ring2);
-      let ndviMean = null, ndwiMean = null, msiMean = null, moistureLevel, recommendation, vvMean = null, vhMean = null, ratioMean = null;
+      let vvMean = null, vhMean = null, ratioMean = null, ndviMean = null, saviMean = null, ndwiMean = null, ndreMean = null;
+      let moistureLevel, transitability, recommendation;
       if (source === 'sentinel-1') {
         const sar = await fetchS1Sar({ ring: ring2, bbox, date: foundDate, width, height });
         const vvSt = statsOf(sar.vv, idx);
@@ -2777,33 +2797,44 @@ app.post('/api/v2/herbicide-soil-compare', async (req, res) => {
         vvMean = vvSt.mean !== null ? Number(vvSt.mean.toFixed(2)) : null;
         vhMean = vhSt.mean !== null ? Number(vhSt.mean.toFixed(2)) : null;
         ratioMean = rSt.mean !== null ? Number(rSt.mean.toFixed(2)) : null;
-        if (vvMean !== null) { if (vvMean > -10) moistureLevel = 'humedo'; else if (vvMean > -15) moistureLevel = 'normal'; else moistureLevel = 'seco'; }
-        else moistureLevel = 'desconocido';
-        if (moistureLevel === 'humedo') recommendation = 'SAR: suelo húmedo (VV alto). Puede dificultar absorción del herbicida.';
-        else if (moistureLevel === 'seco') recommendation = 'SAR: suelo seco (VV bajo). Buena absorción pero verifique estrés.';
-        else recommendation = 'SAR: condiciones normales de humedad.';
+        if (vvMean !== null) {
+          if (vvMean > -10) moistureLevel = 'saturado';
+          else if (vvMean > -12) moistureLevel = 'humedo';
+          else if (vvMean > -15) moistureLevel = 'normal';
+          else moistureLevel = 'seco';
+        } else moistureLevel = 'desconocido';
+        if (vvMean !== null) {
+          if (vvMean > -10) transitability = 'no_transitable';
+          else if (vvMean > -12) transitability = 'marginal';
+          else transitability = 'transitable';
+        } else transitability = 'desconocido';
+        if (transitability === 'no_transitable') recommendation = 'SAR: suelo saturado (VV > -10 dB). NO es seguro ingresar maquinaria. Riesgo de compactación y encajamiento.';
+        else if (transitability === 'marginal') recommendation = 'SAR: suelo húmedo (VV -10 a -12 dB). Acceso marginal. Considere espera o maquinaria liviana.';
+        else if (moistureLevel === 'seco') recommendation = 'SAR: suelo seco (VV < -15 dB). Buena transitabilidad. Verifique que la vegetación no tenga estrés hídrico severo.';
+        else recommendation = 'SAR: condiciones normales. Suelo apto para ingreso de maquinaria.';
       } else {
         const img = await fetchHerbicideMoisture({ ring: ring2, bbox, date: foundDate, width, height });
         const ndviSt = statsOf(img.ndvi, idx);
+        const saviSt = statsOf(img.savi, idx);
         const ndwiSt = statsOf(img.ndwi, idx);
-        const msiSt = statsOf(img.msi, idx);
+        const ndreSt = statsOf(img.ndre, idx);
         ndviMean = ndviSt.mean !== null ? Number(((ndviSt.mean * 2 - 1)).toFixed(3)) : null;
+        saviMean = saviSt.mean !== null ? Number(((saviSt.mean * 2 - 1)).toFixed(3)) : null;
         ndwiMean = ndwiSt.mean !== null ? Number(((ndwiSt.mean * 2 - 1)).toFixed(3)) : null;
-        msiMean = msiSt.mean !== null ? Number(((msiSt.mean * 2 - 1)).toFixed(3)) : null;
+        ndreMean = ndreSt.mean !== null ? Number(((ndreSt.mean * 2 - 1)).toFixed(3)) : null;
         if (ndwiMean !== null) { if (ndwiMean > 0.1) moistureLevel = 'humedo'; else if (ndwiMean > -0.1) moistureLevel = 'normal'; else moistureLevel = 'seco'; }
         else moistureLevel = 'desconocido';
-        if (moistureLevel === 'humedo') recommendation = 'Suelo húmedo: puede dificultar la absorción del herbicida.';
-        else if (moistureLevel === 'seco') recommendation = 'Suelo seco: buena absorción pero verifique estrés hídrico.';
-        else recommendation = 'Condiciones normales: adecuadas para aplicación.';
+        transitability = 'solo_optico';
+        recommendation = 'Óptico: humedad estimada por NDWI (no mide suelo directamente). Para transitabilidad real, se requiere Sentinel-1.';
       }
-      results.push({ month, label: monthNames[month - 1], ndvi: ndviMean, ndwi: ndwiMean, msi: msiMean, vv: vvMean, vh: vhMean, sarRatio: ratioMean, moistureLevel, recommendation, foundDate, source });
+      results.push({ month, label: monthNames[month - 1], source, vv: vvMean, vh: vhMean, sarRatio: ratioMean, ndvi: ndviMean, savi: saviMean, ndwi: ndwiMean, ndre: ndreMean, moistureLevel, transitability, recommendation, foundDate });
     }
     const quota = await commitPolygon(req, res, m);
     res.json({ results, quota });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// POST /api/v2/herbicide-effect — Fase 3: Seguimiento / efectividad
+// POST /api/v2/herbicide-effect — Fase 3: Seguimiento / efectividad (NDVI, SAVI, NDRE)
 app.post('/api/v2/herbicide-effect', async (req, res) => {
   try {
     const { coordinates, dateBefore, dateAfter, maxCloudCoverage = 30 } = req.body || {};
@@ -2817,28 +2848,61 @@ app.post('/api/v2/herbicide-effect', async (req, res) => {
     if (!m) return;
     const ring2 = toRing(ring);
     const idx = maskIndices(width, height, bbox, ring2);
-    const img1 = await fetchOptical({ ring: ring2, bbox, date: dateBefore, width, height, maxCloud: maxCloudCoverage });
-    const img2 = await fetchOptical({ ring: ring2, bbox, date: dateAfter, width, height, maxCloud: maxCloudCoverage });
-    const st1 = statsOf(img1.ndvi, idx);
-    const st2 = statsOf(img2.ndvi, idx);
-    const cloud1 = cloudPctOf(img1.cloud, idx);
-    const cloud2 = cloudPctOf(img2.cloud, idx);
-    const ndviBefore = st1.mean !== null ? Number(((st1.mean * 2 - 1)).toFixed(3)) : null;
-    const ndviAfter = st2.mean !== null ? Number(((st2.mean * 2 - 1)).toFixed(3)) : null;
+    const img1 = await fetchHerbicideMoisture({ ring: ring2, bbox, date: dateBefore, width, height });
+    const img2 = await fetchHerbicideMoisture({ ring: ring2, bbox, date: dateAfter, width, height });
+    const ndviSt1 = statsOf(img1.ndvi, idx);
+    const ndviSt2 = statsOf(img2.ndvi, idx);
+    const saviSt1 = statsOf(img1.savi, idx);
+    const saviSt2 = statsOf(img2.savi, idx);
+    const ndreSt1 = statsOf(img1.ndre, idx);
+    const ndreSt2 = statsOf(img2.ndre, idx);
+    const ndviBefore = ndviSt1.mean !== null ? Number(((ndviSt1.mean * 2 - 1)).toFixed(3)) : null;
+    const ndviAfter = ndviSt2.mean !== null ? Number(((ndviSt2.mean * 2 - 1)).toFixed(3)) : null;
+    const saviBefore = saviSt1.mean !== null ? Number(((saviSt1.mean * 2 - 1)).toFixed(3)) : null;
+    const saviAfter = saviSt2.mean !== null ? Number(((saviSt2.mean * 2 - 1)).toFixed(3)) : null;
+    const ndreBefore = ndreSt1.mean !== null ? Number(((ndreSt1.mean * 2 - 1)).toFixed(3)) : null;
+    const ndreAfter = ndreSt2.mean !== null ? Number(((ndreSt2.mean * 2 - 1)).toFixed(3)) : null;
     const delta = ndviBefore !== null && ndviAfter !== null ? Number((ndviAfter - ndviBefore).toFixed(3)) : null;
+    const deltaSavi = saviBefore !== null && saviAfter !== null ? Number((saviAfter - saviBefore).toFixed(3)) : null;
+    const deltaNdre = ndreBefore !== null && ndreAfter !== null ? Number((ndreAfter - ndreBefore).toFixed(3)) : null;
     let effectiveness;
     if (delta !== null) {
       if (delta < -0.15) effectiveness = 'efectivo';
       else if (delta < -0.05) effectiveness = 'parcial';
       else effectiveness = 'inefectivo';
     } else effectiveness = 'indefinido';
+    let resistance = false;
+    if (delta !== null && deltaSavi !== null && deltaNdre !== null) {
+      const absDelta = Math.abs(delta);
+      const absDeltaSavi = Math.abs(deltaSavi);
+      const absDeltaNdre = Math.abs(deltaNdre);
+      if (absDelta < 0.03 && absDeltaSavi < 0.03 && absDeltaNdre < 0.03) resistance = true;
+    }
+    const daysBetween = Math.round((new Date(dateAfter) - new Date(dateBefore)) / (1000 * 60 * 60 * 24));
+    let t5Date = null, t15Date = null;
+    if (dateBefore) {
+      const d0 = new Date(dateBefore);
+      const d5 = new Date(d0); d5.setDate(d5.getDate() + 5);
+      const d15 = new Date(d0); d15.setDate(d15.getDate() + 15);
+      t5Date = d5.toISOString().split('T')[0];
+      t15Date = d15.toISOString().split('T')[0];
+    }
     let advice;
-    if (effectiveness === 'efectivo') advice = 'Reducción significativa de NDVI detectada. El tratamiento de herbicida fue efectivo.';
-    else if (effectiveness === 'parcial') advice = 'Reducción moderada de NDVI. El tratamiento tuvo efecto parcial, considere una segunda aplicación.';
-    else if (effectiveness === 'inefectivo') advice = 'Sin reducción significativa de NDVI. El tratamiento no fue efectivo. Revise la dosificación o el momento de aplicación.';
-    else advice = 'No se pudo determinar la efectividad. Verifique la calidad de las imágenes.';
+    if (resistance) {
+      advice = '⚠ Posible resistencia: NDVI, SAVI y NDRE muestran casi sin cambio (Δ < 0.03). Revise la dosificación, formulación del herbicida y timing de aplicación.';
+    } else if (effectiveness === 'efectivo') {
+      advice = 'Reducción significativa detectada en NDVI' + (deltaNdre !== null ? `, SAVI (Δ${deltaSavi > 0 ? '+' : ''}${deltaSavi}) y NDRE (Δ${deltaNdre > 0 ? '+' : ''}${deltaNdre})` : '') + '. El tratamiento fue efectivo.';
+    } else if (effectiveness === 'parcial') {
+      advice = 'Reducción moderada (NDVI Δ' + delta + '). Efecto parcial. ';
+      if (daysBetween < 15) advice += 'Considere evaluación a T+15 días para ver efecto completo.';
+      else advice += 'Considere una segunda aplicación.';
+    } else if (effectiveness === 'inefectivo') {
+      advice = 'Sin reducción significativa de NDVI (Δ' + delta + '). El tratamiento no fue efectivo. ';
+      if (daysBetween < 7) advice += 'Es poco tiempo (<7 días). Evalúe a T+15.';
+      else advice += 'Revise la dosificación, formulación o el momento de aplicación.';
+    } else advice = 'No se pudo determinar la efectividad. Verifique la calidad de las imágenes.';
     const quota = await commitPolygon(req, res, m);
-    res.json({ ndviBefore, ndviAfter, delta, effectiveness, advice, cloudBefore: cloud1.cloudPct, cloudAfter: cloud2.cloudPct, dateBefore, dateAfter, quota });
+    res.json({ ndviBefore, ndviAfter, saviBefore, saviAfter, ndreBefore, ndreAfter, delta, deltaSavi, deltaNdre, effectiveness, resistance, daysBetween, t5Date, t15Date, advice, dateBefore, dateAfter, quota });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
