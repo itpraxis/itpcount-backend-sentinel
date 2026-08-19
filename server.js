@@ -2379,13 +2379,13 @@ async function fetchHerbicideMoisture({ ring, bbox, date, width, height, snowMon
 const S1_SAR_EVAL = `//VERSION=3
 function setup() {
   return {
-    input: [{ bands: ["VV","VH"], units: "dB" }],
+    input: [{ bands: ["VV","VH"] }],
     output: [{ id: "res", bands: 3, sampleType: "FLOAT32" }]
   };
 }
 function evaluatePixel(sample) {
-  var vv = sample.VV;
-  var vh = sample.VH;
+  var vv = 10 * Math.log10(sample.VV);
+  var vh = 10 * Math.log10(sample.VH);
   var ratio = vh - vv;
   return { res: [vv, vh, ratio] };
 }`;
