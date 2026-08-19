@@ -2508,8 +2508,12 @@ function generateHerbicideRecommendation(trend, windows, series, monthlyPattern)
   const decliningMonths = [];
   const lowStableMonths = [];
   if (monthlyPattern && monthlyPattern.length) {
+    const nValues = monthlyPattern.map(p => p.n).filter(v => v > 0);
+    const medianN = nValues.length ? nValues.sort((a, b) => a - b)[Math.floor(nValues.length / 2)] : 0;
+    const minN = Math.max(2, Math.ceil(medianN * 0.5));
     for (const p of monthlyPattern) {
       if (p.avgNdvi === null || p.avgNdvi < 0.15) continue;
+      if (p.n < minN) continue;
       if (p.monthTrend === 'descendente') decliningMonths.push(p);
       if (p.avgNdvi < avg && p.monthTrend !== 'creciente') lowStableMonths.push(p);
     }
@@ -2620,8 +2624,13 @@ app.post('/api/v2/herbicide-timing', async (req, res) => {
         else if (diff > 0.03) monthTrend = 'creciente';
         else monthTrend = 'estable';
       }
-      return { month: m, label: monthNames[i], avgNdvi, avgSavi, n: ag ? ag.n : 0, isWindow, monthTrend };
+      const nCount = ag ? ag.n : 0;
+      return { month: m, label: monthNames[i], avgNdvi, avgSavi, n: nCount, isWindow, monthTrend };
     });
+    const allN = monthlyPattern.map(p => p.n).filter(v => v > 0);
+    const medianN = allN.length ? allN.sort((a, b) => a - b)[Math.floor(allN.length / 2)] : 0;
+    const minN = Math.max(2, Math.ceil(medianN * 0.5));
+    monthlyPattern.forEach(p => { p.lowData = p.n > 0 && p.n < minN; });
     const rec = generateHerbicideRecommendation(trend, windows, ndviValues, monthlyPattern);
     const quota = await commitPolygon(req, res, m);
     res.json({ timeseries, smoothed, extrema, windows, monthlyPattern, trend, recommendation: rec, quota });
