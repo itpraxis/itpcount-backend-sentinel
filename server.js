@@ -2954,6 +2954,146 @@ app.post('/api/v2/herbicide-effect', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ============================================================
+// WEATHER FORECAST — Open-Meteo (free, no API key)
+// ============================================================
+async function fetchWeatherForecast(lat, lon, days = 14) {
+  const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&daily=temperature_2m_max,temperature_2m_min,precipitation_sum,precipitation_probability_max,weathercode&timezone=auto&forecast_days=${days}`;
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error('Open-Meteo error: ' + resp.status);
+  const data = await resp.json();
+  if (!data.daily) throw new Error('Open-Meteo sin datos diarios');
+  const result = [];
+  for (let i = 0; i < data.daily.time.length; i++) {
+    const precip = data.daily.precipitation_sum[i] || 0;
+    const precipProb = data.daily.precipitation_probability_max[i] || 0;
+    const tMax = data.daily.temperature_2m_max[i];
+    const tMin = data.daily.temperature_2m_min[i];
+    const wmo = data.daily.weathercode[i] || 0;
+    let skyCondition = 'despejado';
+    if (wmo >= 95) skyCondition = 'tormenta';
+    else if (wmo >= 61) skyCondition = 'lluvia';
+    else if (wmo >= 51) skyCondition = 'llovizna';
+    else if (wmo >= 3) skyCondition = 'nublado';
+    else if (wmo >= 1) skyCondition = 'parcial_nublado';
+    result.push({ date: data.daily.time[i], precipitation: precip, precipProbability: precipProb, tempMax: tMax, tempMin: tMin, weatherCode: wmo, skyCondition });
+  }
+  return result;
+}
+
+function centroidOf(ring) {
+  let cx = 0, cy = 0;
+  for (const [x, y] of ring) { cx += x; cy += y; }
+  return { lat: cy / ring.length, lon: cx / ring.length };
+}
+
+function assessReadiness(precip, precipProb, skyCondition, recentRain) {
+  if (skyCondition === 'tormenta') return { status: 'poor', icon: '❌', reason: 'Tormenta' };
+  if (precip > 5 || precipProb > 70) return { status: 'poor', icon: '❌', reason: precip > 5 ? `Lluvia ${precip}mm` : `Prob. lluvia ${precipProb}%` };
+  if (precip > 1 || precipProb > 40 || skyCondition === 'lluvia') return { status: 'marginal', icon: '⚠️', reason: precip > 0 ? `Lluvia leve ${precip}mm` : `Prob. lluvia ${precipProb}%` };
+  if (recentRain) return { status: 'marginal', icon: '⚠️', reason: 'Lluvia reciente, suelo húmedo' };
+  return { status: 'optimal', icon: '✅', reason: 'Seco, sin lluvia' };
+}
+
+// POST /api/v2/herbicide-readiness — Calendario de transitabilidad 14 días
+app.post('/api/v2/herbicide-readiness', async (req, res) => {
+  try {
+    const { coordinates, days = 14 } = req.body || {};
+    if (!Array.isArray(coordinates) || coordinates.length < 3) return badParams(res, 'Faltan coordenadas del polígono.');
+    const ring = coordinates;
+    const bbox = bboxOf(ring);
+    if (!bbox) return badParams(res, 'BBOX inválido.');
+    const m = await meterEndpoints(req, res, ring);
+    if (!m) return;
+    const center = centroidOf(ring);
+    const forecast = await fetchWeatherForecast(center.lat, center.lon, days);
+    let recentRain = false;
+    for (const f of forecast.slice(0, 3)) { if (f.precipitation > 0.5) recentRain = true; }
+    const calendar = forecast.map(f => {
+      const assessment = assessReadiness(f.precipitation, f.precipProbability, f.skyCondition, recentRain);
+      if (f.precipitation > 0.5) recentRain = true;
+      return { date: f.date, ...assessment, precipitation: f.precipitation, precipProbability: f.precipProbability, tempMax: f.tempMax, tempMin: f.tempMin, skyCondition: f.skyCondition };
+    });
+    const optimalDays = calendar.filter(d => d.status === 'optimal').length;
+    const marginalDays = calendar.filter(d => d.status === 'marginal').length;
+    const poorDays = calendar.filter(d => d.status === 'poor').length;
+    let summary;
+    if (optimalDays >= 5) summary = 'Hay buenas ventanas de aplicación en los próximos ' + days + ' días.';
+    else if (optimalDays >= 2) summary = 'Ventanas limitadas. Considere aprovechar los días secos disponibles.';
+    else if (marginalDays > poorDays) summary = 'Condiciones marginales. Monitoree la evolución diaria.';
+    else summary = 'Condiciones desfavorables en el período. Espere a mejores condiciones.';
+    const quota = await commitPolygon(req, res, m);
+    res.json({ calendar, summary, optimalDays, marginalDays, poorDays, quota });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/v2/herbicide-effect-series — Fase 3: serie temporal post-tratamiento
+app.post('/api/v2/herbicide-effect-series', async (req, res) => {
+  try {
+    const { coordinates, dateBefore, dateAfter, daysAfter = 30, stepDays = 5, maxCloudCoverage = 30 } = req.body || {};
+    if (!Array.isArray(coordinates) || coordinates.length < 3) return badParams(res, 'Faltan coordenadas del polígono.');
+    if (!dateBefore || !dateAfter) return badParams(res, 'Faltan las fechas antes/después.');
+    const ring = coordinates;
+    const bbox = bboxOf(ring);
+    if (!bbox) return badParams(res, 'BBOX inválido.');
+    const { width, height } = imageSize(bbox);
+    const m = await meterEndpoints(req, res, ring);
+    if (!m) return;
+    const ring2 = toRing(ring);
+    const idx = maskIndices(width, height, bbox, ring2);
+    const imgBefore = await fetchHerbicideMoisture({ ring: ring2, bbox, date: dateBefore, width, height });
+    const ndviBeforeSt = statsOf(imgBefore.ndvi, idx);
+    const saviBeforeSt = statsOf(imgBefore.savi, idx);
+    const ndreBeforeSt = statsOf(imgBefore.ndre, idx);
+    const ndviBefore = ndviBeforeSt.mean !== null ? Number(((ndviBeforeSt.mean * 2 - 1)).toFixed(3)) : null;
+    const saviBefore = saviBeforeSt.mean !== null ? Number(((saviBeforeSt.mean * 2 - 1)).toFixed(3)) : null;
+    const ndreBefore = ndreBeforeSt.mean !== null ? Number(((ndreBeforeSt.mean * 2 - 1)).toFixed(3)) : null;
+    const afterDate = new Date(dateAfter);
+    const series = [];
+    for (let d = 0; d <= daysAfter; d += stepDays) {
+      const targetDate = new Date(afterDate);
+      targetDate.setDate(targetDate.getDate() + d);
+      const dateStr = targetDate.toISOString().split('T')[0];
+      if (targetDate > new Date()) break;
+      try {
+        const data = await catalogSearch({ bbox, collections: ['sentinel-2-l2a'], datetime: `${dateStr}T00:00:00Z/${dateStr}T23:59:59Z`, limit: 10, filter: `eo:cloud_cover < ${maxCloudCoverage}` });
+        if (!data.features || !data.features.length) { series.push({ date: dateStr, daysAfterTreatment: d, ndvi: null, savi: null, ndre: null, found: false }); continue; }
+        const dates = data.features.map(f => f.properties.datetime.split('T')[0]).sort();
+        const bestDate = dates[Math.floor(dates.length / 2)];
+        const img = await fetchHerbicideMoisture({ ring: ring2, bbox, date: bestDate, width, height });
+        const ndviSt = statsOf(img.ndvi, idx);
+        const saviSt = statsOf(img.savi, idx);
+        const ndreSt = statsOf(img.ndre, idx);
+        const ndvi = ndviSt.mean !== null ? Number(((ndviSt.mean * 2 - 1)).toFixed(3)) : null;
+        const savi = saviSt.mean !== null ? Number(((saviSt.mean * 2 - 1)).toFixed(3)) : null;
+        const ndre = ndreSt.mean !== null ? Number(((ndreSt.mean * 2 - 1)).toFixed(3)) : null;
+        series.push({ date: bestDate, daysAfterTreatment: d, ndvi, savi, ndre, found: true });
+      } catch (e) { series.push({ date: dateStr, daysAfterTreatment: d, ndvi: null, savi: null, ndre: null, found: false }); }
+    }
+    const deltas = series.filter(s => s.found && s.ndvi !== null && ndviBefore !== null).map(s => ({
+      date: s.date, daysAfterTreatment: s.daysAfterTreatment, deltaNdvi: Number((s.ndvi - ndviBefore).toFixed(3)), deltaSavi: s.savi !== null && saviBefore !== null ? Number((s.savi - saviBefore).toFixed(3)) : null, deltaNdre: s.ndre !== null && ndreBefore !== null ? Number((s.ndre - ndreBefore).toFixed(3)) : null
+    }));
+    let resistance = false;
+    if (deltas.length >= 2) {
+      const lastDelta = deltas[deltas.length - 1];
+      if (lastDelta.deltaNdvi !== null && Math.abs(lastDelta.deltaNdvi) < 0.03 &&
+          lastDelta.deltaSavi !== null && Math.abs(lastDelta.deltaSavi) < 0.03 &&
+          lastDelta.deltaNdre !== null && Math.abs(lastDelta.deltaNdre) < 0.03) resistance = true;
+    }
+    let effectiveness = 'indefinido';
+    if (deltas.length >= 1) {
+      const lastDelta = deltas[deltas.length - 1];
+      if (lastDelta.deltaNdvi !== null) {
+        if (lastDelta.deltaNdvi < -0.15) effectiveness = 'efectivo';
+        else if (lastDelta.deltaNdvi < -0.05) effectiveness = 'parcial';
+        else effectiveness = 'inefectivo';
+      }
+    }
+    const quota = await commitPolygon(req, res, m);
+    res.json({ ndviBefore, saviBefore, ndreBefore, dateBefore, dateAfter, series, deltas, resistance, effectiveness, quota });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 if (require.main === module) {
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`✅ Backend v2 listo en http://localhost:${PORT}`);
