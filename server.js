@@ -2508,12 +2508,18 @@ function generateHerbicideRecommendation(trend, windows, series, monthlyPattern)
   const decliningMonths = [];
   const lowStableMonths = [];
   if (monthlyPattern && monthlyPattern.length) {
-    const nValues = monthlyPattern.map(p => p.n).filter(v => v > 0);
-    const medianN = nValues.length ? nValues.sort((a, b) => a - b)[Math.floor(nValues.length / 2)] : 0;
-    const minN = Math.max(2, Math.ceil(medianN * 0.5));
+    const avgByMonth = {};
+    monthlyPattern.forEach(p => { if (p.avgNdvi !== null) avgByMonth[p.month] = p.avgNdvi; });
     for (const p of monthlyPattern) {
       if (p.avgNdvi === null || p.avgNdvi < 0.15) continue;
-      if (p.n < minN) continue;
+      if (p.n < 2) continue;
+      const prev = p.month > 1 ? p.month - 1 : 12;
+      const next = p.month < 12 ? p.month + 1 : 1;
+      const neighbors = [avgByMonth[prev], avgByMonth[next]].filter(v => v !== undefined);
+      if (neighbors.length) {
+        const avgNeighbors = neighbors.reduce((a, b) => a + b, 0) / neighbors.length;
+        if (avgNeighbors - p.avgNdvi > 0.12) continue;
+      }
       if (p.monthTrend === 'descendente') decliningMonths.push(p);
       if (p.avgNdvi < avg && p.monthTrend !== 'creciente') lowStableMonths.push(p);
     }
@@ -2631,6 +2637,19 @@ app.post('/api/v2/herbicide-timing', async (req, res) => {
     const medianN = allN.length ? allN.sort((a, b) => a - b)[Math.floor(allN.length / 2)] : 0;
     const minN = Math.max(2, Math.ceil(medianN * 0.5));
     monthlyPattern.forEach(p => { p.lowData = p.n > 0 && p.n < minN; });
+    const avgByMonth2 = {};
+    monthlyPattern.forEach(p => { if (p.avgNdvi !== null) avgByMonth2[p.month] = p.avgNdvi; });
+    monthlyPattern.forEach(p => {
+      p.anomalousLow = false;
+      if (p.avgNdvi === null || p.n < 2) return;
+      const prev = p.month > 1 ? p.month - 1 : 12;
+      const next = p.month < 12 ? p.month + 1 : 1;
+      const neighbors = [avgByMonth2[prev], avgByMonth2[next]].filter(v => v !== undefined);
+      if (neighbors.length) {
+        const avgN = neighbors.reduce((a, b) => a + b, 0) / neighbors.length;
+        if (avgN - p.avgNdvi > 0.12) p.anomalousLow = true;
+      }
+    });
     const rec = generateHerbicideRecommendation(trend, windows, ndviValues, monthlyPattern);
     const quota = await commitPolygon(req, res, m);
     res.json({ timeseries, smoothed, extrema, windows, monthlyPattern, trend, recommendation: rec, quota });
@@ -2689,11 +2708,23 @@ app.post('/api/v2/herbicide-soil', async (req, res) => {
       if (ndwiMean !== null) { if (ndwiMean > 0.1) moistureLevel = 'humedo'; else if (ndwiMean > -0.1) moistureLevel = 'normal'; else moistureLevel = 'seco'; }
       transitability = 'solo_optico';
     }
-    if (transitability === 'no_transitable') recommendation = 'SAR: suelo saturado. NO es seguro ingresar maquinaria.';
-    else if (transitability === 'marginal') recommendation = 'SAR: suelo húmedo. Acceso marginal, considere espera.';
-    else if (moistureLevel === 'seco') recommendation = sarFound ? 'SAR: suelo seco. Buena transitabilidad y absorción.' : 'Óptico: suelo seco. Buena absorción estimada.';
-    else if (transitability === 'solo_optico') recommendation = 'Óptico: humedad estimada por NDWI. Para transitabilidad real, use la comparación con S1.';
-    else if (moistureLevel !== 'desconocido') recommendation = sarFound ? 'SAR: condiciones normales. Suelo apto para maquinaria.' : 'Condiciones de humedad normales.';
+    if (transitability === 'no_transitable') {
+      recommendation = 'SAR: suelo saturado (VV > -10 dB). NO es seguro ingresar maquinaria.';
+      if (ndwiMean !== null && ndwiMean < 0) recommendation += ' El NDWI óptico indica menos humedad en superficie, pero SAR confirma saturación del suelo.';
+    } else if (transitability === 'marginal') {
+      recommendation = 'SAR: suelo húmedo (VV -10 a -12 dB). Acceso marginal.';
+      if (ndwiMean !== null && ndwiMean > 0.1) recommendation += ' NDWI también indica humedad alta. Considere espera.';
+      else if (ndwiMean !== null && ndwiMean < -0.1) recommendation += ' NDWI indica superficie más seca, pero SAR detecta humedad subsuperficial.';
+      else recommendation += ' Considere espera o maquinaria liviana.';
+    } else if (transitability === 'transitable' && moistureLevel === 'seco') {
+      recommendation = 'SAR: suelo seco (VV < -15 dB). Buena transitabilidad y absorción.';
+    } else if (transitability === 'solo_optico') {
+      if (ndwiMean !== null && ndwiMean > 0.1) recommendation = 'Óptico: humedad alta por NDWI. Puede dificultar absorción del herbicida.';
+      else if (ndwiMean !== null && ndwiMean < -0.1) recommendation = 'Óptico: suelo seco por NDWI. Buena absorción estimada.';
+      else recommendation = 'Óptico: condiciones normales por NDWI. Para transitabilidad real, use la comparación con S1.';
+    } else if (moistureLevel !== 'desconocido') {
+      recommendation = sarFound ? 'SAR: condiciones normales. Suelo apto para maquinaria.' : 'Condiciones de humedad normales.';
+    }
     const quota = await commitPolygon(req, res, m);
     res.json({ source, vv: vvMean, vh: vhMean, sarRatio: ratioMean, ndvi: ndviMean, savi: saviMean, ndwi: ndwiMean, ndre: ndreMean, moistureLevel, transitability, recommendation, date, foundDate: sarFound && s1Date ? s1Date : date, quota });
   } catch (e) { res.status(500).json({ error: e.message }); }
