@@ -2628,7 +2628,7 @@ app.post('/api/v2/herbicide-timing', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// POST /api/v2/herbicide-soil — Fase 2: Validación logística (suelo/humedad) — S1 primario
+// POST /api/v2/herbicide-soil — Fase 2: Validación logística (suelo/humedad) — S1+S2 combinado
 app.post('/api/v2/herbicide-soil', async (req, res) => {
   try {
     const { coordinates, date, maxCloudCoverage = 30 } = req.body || {};
@@ -2647,38 +2647,46 @@ app.post('/api/v2/herbicide-soil', async (req, res) => {
     const year = dt.getFullYear();
     const s1Date = await findS1Date({ bbox, month, year });
     let vvMean = null, vhMean = null, ratioMean = null, ndviMean = null, saviMean = null, ndwiMean = null, ndreMean = null;
-    let source, moistureLevel, transitability, recommendation;
+    let moistureLevel = 'desconocido', transitability = 'desconocido', recommendation = '';
+    let sarFound = false, opticalFound = false;
+    const promises = [];
     if (s1Date) {
-      source = 'sentinel-1';
-      const sar = await fetchS1Sar({ ring: ring2, bbox, date: s1Date, width, height });
-      const vvSt = statsOf(sar.vv, idx);
-      const vhSt = statsOf(sar.vh, idx);
-      const rSt = statsOf(sar.ratio, idx);
-      vvMean = vvSt.mean !== null ? Number(vvSt.mean.toFixed(2)) : null;
-      vhMean = vhSt.mean !== null ? Number(vhSt.mean.toFixed(2)) : null;
-      ratioMean = rSt.mean !== null ? Number(rSt.mean.toFixed(2)) : null;
-      if (vvMean !== null) { if (vvMean > -10) moistureLevel = 'saturado'; else if (vvMean > -12) moistureLevel = 'humedo'; else if (vvMean > -15) moistureLevel = 'normal'; else moistureLevel = 'seco'; }
-      else moistureLevel = 'desconocido';
-      if (vvMean !== null) { if (vvMean > -10) transitability = 'no_transitable'; else if (vvMean > -12) transitability = 'marginal'; else transitability = 'transitable'; }
-      else transitability = 'desconocido';
-      if (transitability === 'no_transitable') recommendation = 'SAR: suelo saturado. NO es seguro ingresar maquinaria.';
-      else if (transitability === 'marginal') recommendation = 'SAR: suelo húmedo. Acceso marginal, considere espera.';
-      else if (moistureLevel === 'seco') recommendation = 'SAR: suelo seco. Buena transitabilidad y absorción.';
-      else recommendation = 'SAR: condiciones normales. Suelo apto para maquinaria.';
-    } else {
-      source = 'sentinel-2';
-      const img = await fetchHerbicideMoisture({ ring: ring2, bbox, date, width, height });
-      ndviMean = statsOf(img.ndvi, idx).mean !== null ? Number(((statsOf(img.ndvi, idx).mean * 2 - 1)).toFixed(3)) : null;
-      saviMean = statsOf(img.savi, idx).mean !== null ? Number(((statsOf(img.savi, idx).mean * 2 - 1)).toFixed(3)) : null;
-      ndwiMean = statsOf(img.ndwi, idx).mean !== null ? Number(((statsOf(img.ndwi, idx).mean * 2 - 1)).toFixed(3)) : null;
-      ndreMean = statsOf(img.ndre, idx).mean !== null ? Number(((statsOf(img.ndre, idx).mean * 2 - 1)).toFixed(3)) : null;
-      if (ndwiMean !== null) { if (ndwiMean > 0.1) moistureLevel = 'humedo'; else if (ndwiMean > -0.1) moistureLevel = 'normal'; else moistureLevel = 'seco'; }
-      else moistureLevel = 'desconocido';
-      transitability = 'solo_optico';
-      recommendation = 'Óptico: humedad estimada por NDWI. Para transitabilidad real, use la comparación con S1.';
+      promises.push(
+        fetchS1Sar({ ring: ring2, bbox, date: s1Date, width, height }).then(sar => {
+          sarFound = true;
+          const vvSt = statsOf(sar.vv, idx);
+          const vhSt = statsOf(sar.vh, idx);
+          const rSt = statsOf(sar.ratio, idx);
+          vvMean = vvSt.mean !== null ? Number(vvSt.mean.toFixed(2)) : null;
+          vhMean = vhSt.mean !== null ? Number(vhSt.mean.toFixed(2)) : null;
+          ratioMean = rSt.mean !== null ? Number(rSt.mean.toFixed(2)) : null;
+          if (vvMean !== null) { if (vvMean > -10) moistureLevel = 'saturado'; else if (vvMean > -12) moistureLevel = 'humedo'; else if (vvMean > -15) moistureLevel = 'normal'; else moistureLevel = 'seco'; }
+          if (vvMean !== null) { if (vvMean > -10) transitability = 'no_transitable'; else if (vvMean > -12) transitability = 'marginal'; else transitability = 'transitable'; }
+        }).catch(() => {})
+      );
     }
+    promises.push(
+      fetchHerbicideMoisture({ ring: ring2, bbox, date, width, height }).then(img => {
+        opticalFound = true;
+        ndviMean = statsOf(img.ndvi, idx).mean !== null ? Number(((statsOf(img.ndvi, idx).mean * 2 - 1)).toFixed(3)) : null;
+        saviMean = statsOf(img.savi, idx).mean !== null ? Number(((statsOf(img.savi, idx).mean * 2 - 1)).toFixed(3)) : null;
+        ndwiMean = statsOf(img.ndwi, idx).mean !== null ? Number(((statsOf(img.ndwi, idx).mean * 2 - 1)).toFixed(3)) : null;
+        ndreMean = statsOf(img.ndre, idx).mean !== null ? Number(((statsOf(img.ndre, idx).mean * 2 - 1)).toFixed(3)) : null;
+      }).catch(() => {})
+    );
+    await Promise.all(promises);
+    const source = sarFound && opticalFound ? 's1+s2' : sarFound ? 'sentinel-1' : 'sentinel-2';
+    if (!sarFound && opticalFound) {
+      if (ndwiMean !== null) { if (ndwiMean > 0.1) moistureLevel = 'humedo'; else if (ndwiMean > -0.1) moistureLevel = 'normal'; else moistureLevel = 'seco'; }
+      transitability = 'solo_optico';
+    }
+    if (transitability === 'no_transitable') recommendation = 'SAR: suelo saturado. NO es seguro ingresar maquinaria.';
+    else if (transitability === 'marginal') recommendation = 'SAR: suelo húmedo. Acceso marginal, considere espera.';
+    else if (moistureLevel === 'seco') recommendation = sarFound ? 'SAR: suelo seco. Buena transitabilidad y absorción.' : 'Óptico: suelo seco. Buena absorción estimada.';
+    else if (transitability === 'solo_optico') recommendation = 'Óptico: humedad estimada por NDWI. Para transitabilidad real, use la comparación con S1.';
+    else if (moistureLevel !== 'desconocido') recommendation = sarFound ? 'SAR: condiciones normales. Suelo apto para maquinaria.' : 'Condiciones de humedad normales.';
     const quota = await commitPolygon(req, res, m);
-    res.json({ source, vv: vvMean, vh: vhMean, sarRatio: ratioMean, ndvi: ndviMean, savi: saviMean, ndwi: ndwiMean, ndre: ndreMean, moistureLevel, transitability, recommendation, date, foundDate: source === 'sentinel-1' ? s1Date : date, quota });
+    res.json({ source, vv: vvMean, vh: vhMean, sarRatio: ratioMean, ndvi: ndviMean, savi: saviMean, ndwi: ndwiMean, ndre: ndreMean, moistureLevel, transitability, recommendation, date, foundDate: sarFound && s1Date ? s1Date : date, quota });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
