@@ -1567,7 +1567,7 @@ app.post('/api/v2/get-valid-dates', async (req, res) => {
 
     const s1Promise = (async () => {
       try {
-        const data = await catalogSearch({ bbox, collections: ['sentinel-1-grd'], datetime: dtRange, limit: 200 });
+        const data = await catalogSearch({ bbox, collections: ['sentinel-1-grd'], datetime: dtRange, limit: 100 });
         const allFeatures = data.features || [];
         const seen = new Set(); const dates = [];
         for (const f of allFeatures) {
