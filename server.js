@@ -1544,29 +1544,54 @@ app.post('/api/v2/get-valid-dates', async (req, res) => {
     if (!ring || !bbox) return badParams(res, 'Parámetro coordinates inválido.');
     const now = new Date();
     const start = new Date(); start.setDate(now.getDate() - daysBack);
-    const params = {
-      bbox,
-      collections: ['sentinel-2-l2a'],
-      datetime: `${start.toISOString().split('T')[0]}T00:00:00Z/${now.toISOString().split('T')[0]}T23:59:59Z`,
-      limit: 100,
-      filter: `eo:cloud_cover < ${maxCloud}`
-    };
-    // Pagina el catálogo (rel=next con body.next) para no truncar en 100 escenas:
-    // cada fecha S2 genera ~4 escenas, así que 100 escenas ≈ solo 24 fechas. Con
-    // paginación se obtienen TODAS las fechas del año.
-    const seen = new Set();
-    const dates = [];
-    let data = await catalogSearch(params);
-    for (let page = 0; page < 6 && data; page++) {
-      for (const f of data.features || []) {
-        const d = f.properties.datetime.split('T')[0];
-        if (seen.has(d)) continue;
-        seen.add(d);
-        dates.push({ date: d, cloudCover: Math.round(f.properties['eo:cloud_cover'] * 10) / 10 });
+    const dtRange = `${start.toISOString().split('T')[0]}T00:00:00Z/${now.toISOString().split('T')[0]}T23:59:59Z`;
+
+    // Query S2 y S1 en paralelo
+    const s2Promise = (async () => {
+      const params = { bbox, collections: ['sentinel-2-l2a'], datetime: dtRange, limit: 100, filter: `eo:cloud_cover < ${maxCloud}` };
+      const seen = new Set(); const dates = [];
+      let data = await catalogSearch(params);
+      for (let page = 0; page < 6 && data; page++) {
+        for (const f of data.features || []) {
+          const d = f.properties.datetime.split('T')[0];
+          if (seen.has(d)) continue;
+          seen.add(d);
+          dates.push({ date: d, cloudCover: Math.round(f.properties['eo:cloud_cover'] * 10) / 10 });
+        }
+        const tok = catalogNext(data);
+        if (!tok) break;
+        data = await catalogSearch({ ...params, next: tok });
       }
-      const tok = catalogNext(data);
-      if (!tok) break;
-      data = await catalogSearch({ ...params, next: tok });
+      return dates;
+    })();
+
+    const s1Promise = (async () => {
+      try {
+        const data = await catalogSearch({ bbox, collections: ['sentinel-1-grd'], datetime: dtRange, limit: 200 });
+        const seen = new Set(); const dates = [];
+        for (const f of (data.features || [])) {
+          if (!(f.id && f.id.includes('1SDV'))) continue;
+          const d = (f.properties.datetime || '').split('T')[0];
+          if (!d || seen.has(d)) continue;
+          seen.add(d);
+          dates.push({ date: d });
+        }
+        return dates;
+      } catch (_) { return []; }
+    })();
+
+    const [s2Dates, s1Dates] = await Promise.all([s2Promise, s1Promise]);
+
+    // Merge por fecha
+    const s1Set = new Set(s1Dates.map(d => d.date));
+    const s2Set = new Map(s2Dates.map(d => [d.date, d.cloudCover]));
+    const allDatesSet = new Set([...s2Dates.map(d => d.date), ...s1Dates.map(d => d.date)]);
+    const dates = [];
+    for (const d of allDatesSet) {
+      const inS1 = s1Set.has(d);
+      const inS2 = s2Set.has(d);
+      const source = inS1 && inS2 ? 'S1+S2' : inS1 ? 'S1' : 'S2';
+      dates.push({ date: d, cloudCover: inS2 ? s2Set.get(d) : null, source });
     }
     dates.sort((a, b) => new Date(b.date) - new Date(a.date));
     res.json({ hasCoverage: dates.length > 0, totalDates: dates.length, dates, areaHa: polygonAreaHa(ring) });
@@ -2956,29 +2981,53 @@ app.post('/api/v2/herbicide-effect', async (req, res) => {
 
 // ============================================================
 // WEATHER FORECAST — Open-Meteo (free, no API key)
+// Cache + retry con backoff para evitar 429
 // ============================================================
+const _weatherCache = new Map(); // key → { ts, data }
+const WEATHER_CACHE_TTL = 30 * 60 * 1000; // 30 minutos
+let _weatherCooldownUntil = 0; // Timestamp until which requests are blocked after 429
+
 async function fetchWeatherForecast(lat, lon, days = 14) {
+  const cacheKey = `${lat.toFixed(3)},${lon.toFixed(3)},${days}`;
+  const cached = _weatherCache.get(cacheKey);
+  if (cached && (Date.now() - cached.ts) < WEATHER_CACHE_TTL) return cached.data;
+
+  if (Date.now() < _weatherCooldownUntil) throw new Error('Open-Meteo rate limit. Espere ' + Math.ceil((_weatherCooldownUntil - Date.now()) / 1000) + ' segundos e intente nuevamente.');
+
   const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&daily=temperature_2m_max,temperature_2m_min,precipitation_sum,precipitation_probability_max,weathercode&timezone=auto&forecast_days=${days}`;
-  const resp = await fetch(url);
-  if (!resp.ok) throw new Error('Open-Meteo error: ' + resp.status);
-  const data = await resp.json();
-  if (!data.daily) throw new Error('Open-Meteo sin datos diarios');
-  const result = [];
-  for (let i = 0; i < data.daily.time.length; i++) {
-    const precip = data.daily.precipitation_sum[i] || 0;
-    const precipProb = data.daily.precipitation_probability_max[i] || 0;
-    const tMax = data.daily.temperature_2m_max[i];
-    const tMin = data.daily.temperature_2m_min[i];
-    const wmo = data.daily.weathercode[i] || 0;
-    let skyCondition = 'despejado';
-    if (wmo >= 95) skyCondition = 'tormenta';
-    else if (wmo >= 61) skyCondition = 'lluvia';
-    else if (wmo >= 51) skyCondition = 'llovizna';
-    else if (wmo >= 3) skyCondition = 'nublado';
-    else if (wmo >= 1) skyCondition = 'parcial_nublado';
-    result.push({ date: data.daily.time[i], precipitation: precip, precipProbability: precipProb, tempMax: tMax, tempMin: tMin, weatherCode: wmo, skyCondition });
+  let lastErr;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) await new Promise(r => setTimeout(r, 1000 * Math.pow(2, attempt)));
+    try {
+      const resp = await fetch(url);
+      if (resp.status === 429) {
+        _weatherCooldownUntil = Date.now() + 60000; // 1 min cooldown after 429
+        lastErr = new Error('Open-Meteo rate limit (429). Espere 1 minuto e intente nuevamente.');
+        continue;
+      }
+      if (!resp.ok) throw new Error('Open-Meteo error: ' + resp.status);
+      const data = await resp.json();
+      if (!data.daily) throw new Error('Open-Meteo sin datos diarios');
+      const result = [];
+      for (let i = 0; i < data.daily.time.length; i++) {
+        const precip = data.daily.precipitation_sum[i] || 0;
+        const precipProb = data.daily.precipitation_probability_max[i] || 0;
+        const tMax = data.daily.temperature_2m_max[i];
+        const tMin = data.daily.temperature_2m_min[i];
+        const wmo = data.daily.weathercode[i] || 0;
+        let skyCondition = 'despejado';
+        if (wmo >= 95) skyCondition = 'tormenta';
+        else if (wmo >= 61) skyCondition = 'lluvia';
+        else if (wmo >= 51) skyCondition = 'llovizna';
+        else if (wmo >= 3) skyCondition = 'nublado';
+        else if (wmo >= 1) skyCondition = 'parcial_nublado';
+        result.push({ date: data.daily.time[i], precipitation: precip, precipProbability: precipProb, tempMax: tMax, tempMin: tMin, weatherCode: wmo, skyCondition });
+      }
+      _weatherCache.set(cacheKey, { ts: Date.now(), data: result });
+      return result;
+    } catch (e) { lastErr = e; }
   }
-  return result;
+  throw lastErr;
 }
 
 function centroidOf(ring) {
@@ -3027,7 +3076,7 @@ app.post('/api/v2/herbicide-readiness', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// POST /api/v2/herbicide-effect-series — Fase 3: serie temporal post-tratamiento
+// POST /api/v2/herbicide-effect-series — Fase 3: serie temporal post-tratamiento S1+S2
 app.post('/api/v2/herbicide-effect-series', async (req, res) => {
   try {
     const { coordinates, dateBefore, dateAfter, daysAfter = 30, stepDays = 5, maxCloudCoverage = 30 } = req.body || {};
@@ -3041,13 +3090,58 @@ app.post('/api/v2/herbicide-effect-series', async (req, res) => {
     if (!m) return;
     const ring2 = toRing(ring);
     const idx = maskIndices(width, height, bbox, ring2);
-    const imgBefore = await fetchHerbicideMoisture({ ring: ring2, bbox, date: dateBefore, width, height });
-    const ndviBeforeSt = statsOf(imgBefore.ndvi, idx);
-    const saviBeforeSt = statsOf(imgBefore.savi, idx);
-    const ndreBeforeSt = statsOf(imgBefore.ndre, idx);
-    const ndviBefore = ndviBeforeSt.mean !== null ? Number(((ndviBeforeSt.mean * 2 - 1)).toFixed(3)) : null;
-    const saviBefore = saviBeforeSt.mean !== null ? Number(((saviBeforeSt.mean * 2 - 1)).toFixed(3)) : null;
-    const ndreBefore = ndreBeforeSt.mean !== null ? Number(((ndreBeforeSt.mean * 2 - 1)).toFixed(3)) : null;
+
+    // --- BASELINE: fetch S2 + S1 en paralelo ---
+    const bDate = new Date(dateBefore);
+    const bFrom = new Date(bDate); bFrom.setDate(bFrom.getDate() - 5);
+    const bTo = new Date(bDate); bTo.setDate(bTo.getDate() + 5);
+    const bDtFrom = `${bFrom.toISOString().split('T')[0]}T00:00:00Z`;
+    const bDtTo = `${bTo.toISOString().split('T')[0]}T23:59:59Z`;
+
+    const [s2BeforeCatalog, s1BeforeCatalog] = await Promise.all([
+      catalogSearch({ bbox, collections: ['sentinel-2-l2a'], datetime: `${bDtFrom}/${bDtTo}`, limit: 10 }).catch(() => ({ features: [] })),
+      catalogSearch({ bbox, collections: ['sentinel-1-grd'], datetime: `${bDtFrom}/${bDtTo}`, limit: 10 }).catch(() => ({ features: [] }))
+    ]);
+
+    // --- Baseline S2 ---
+    let cloudCoverBefore = null, s2BeforeDate = null;
+    let ndviBefore = null, saviBefore = null, ndreBefore = null;
+    if (s2BeforeCatalog.features && s2BeforeCatalog.features.length) {
+      const bDateObj = new Date(dateBefore);
+      const bf = s2BeforeCatalog.features.find(f => f.properties.datetime.startsWith(dateBefore)) || s2BeforeCatalog.features.sort((a, b) => Math.abs(new Date(a.properties.datetime) - bDateObj) - Math.abs(new Date(b.properties.datetime) - bDateObj))[0];
+      if (bf) {
+        s2BeforeDate = bf.properties.datetime.split('T')[0];
+        if (bf.properties.eo_cloud_cover != null) cloudCoverBefore = Math.round(bf.properties.eo_cloud_cover);
+        const imgBefore = await fetchHerbicideMoisture({ ring: ring2, bbox, date: s2BeforeDate, width, height });
+        const ndviBeforeSt = statsOf(imgBefore.ndvi, idx);
+        const saviBeforeSt = statsOf(imgBefore.savi, idx);
+        const ndreBeforeSt = statsOf(imgBefore.ndre, idx);
+        ndviBefore = ndviBeforeSt.mean !== null ? Number(((ndviBeforeSt.mean * 2 - 1)).toFixed(3)) : null;
+        saviBefore = saviBeforeSt.mean !== null ? Number(((saviBeforeSt.mean * 2 - 1)).toFixed(3)) : null;
+        ndreBefore = ndreBeforeSt.mean !== null ? Number(((ndreBeforeSt.mean * 2 - 1)).toFixed(3)) : null;
+      }
+    }
+
+    // --- Baseline S1 ---
+    let vvBefore = null, vhBefore = null, vhRatioBefore = null, s1BeforeDate = null;
+    const s1BeforeFeatures = (s1BeforeCatalog.features || []).filter(f => f.id && f.id.includes('1SDV'));
+    if (s1BeforeFeatures.length) {
+      const bDateObj = new Date(dateBefore);
+      const bf = s1BeforeFeatures.find(f => f.properties.datetime.startsWith(dateBefore)) || s1BeforeFeatures.sort((a, b) => Math.abs(new Date(a.properties.datetime) - bDateObj) - Math.abs(new Date(b.properties.datetime) - bDateObj))[0];
+      if (bf) {
+        s1BeforeDate = bf.properties.datetime.split('T')[0];
+        try {
+          const sarBefore = await fetchS1Sar({ ring: ring2, bbox, date: s1BeforeDate, width, height });
+          const vvSt = statsOf(sarBefore.vv, idx);
+          const vhSt = statsOf(sarBefore.vh, idx);
+          vvBefore = vvSt.mean !== null ? Number(vvSt.mean.toFixed(2)) : null;
+          vhBefore = vhSt.mean !== null ? Number(vhSt.mean.toFixed(2)) : null;
+          vhRatioBefore = vvBefore !== null && vhBefore !== null ? Number((vhBefore - vvBefore).toFixed(2)) : null;
+        } catch (_) {}
+      }
+    }
+
+    // --- SERIE TEMPORAL: buscar S2 + S1 en cada paso ---
     const afterDate = new Date(dateAfter);
     const series = [];
     for (let d = 0; d <= daysAfter; d += stepDays) {
@@ -3055,42 +3149,116 @@ app.post('/api/v2/herbicide-effect-series', async (req, res) => {
       targetDate.setDate(targetDate.getDate() + d);
       const dateStr = targetDate.toISOString().split('T')[0];
       if (targetDate > new Date()) break;
-      try {
-        const data = await catalogSearch({ bbox, collections: ['sentinel-2-l2a'], datetime: `${dateStr}T00:00:00Z/${dateStr}T23:59:59Z`, limit: 10, filter: `eo:cloud_cover < ${maxCloudCoverage}` });
-        if (!data.features || !data.features.length) { series.push({ date: dateStr, daysAfterTreatment: d, ndvi: null, savi: null, ndre: null, found: false }); continue; }
-        const dates = data.features.map(f => f.properties.datetime.split('T')[0]).sort();
-        const bestDate = dates[Math.floor(dates.length / 2)];
-        const img = await fetchHerbicideMoisture({ ring: ring2, bbox, date: bestDate, width, height });
-        const ndviSt = statsOf(img.ndvi, idx);
-        const saviSt = statsOf(img.savi, idx);
-        const ndreSt = statsOf(img.ndre, idx);
-        const ndvi = ndviSt.mean !== null ? Number(((ndviSt.mean * 2 - 1)).toFixed(3)) : null;
-        const savi = saviSt.mean !== null ? Number(((saviSt.mean * 2 - 1)).toFixed(3)) : null;
-        const ndre = ndreSt.mean !== null ? Number(((ndreSt.mean * 2 - 1)).toFixed(3)) : null;
-        series.push({ date: bestDate, daysAfterTreatment: d, ndvi, savi, ndre, found: true });
-      } catch (e) { series.push({ date: dateStr, daysAfterTreatment: d, ndvi: null, savi: null, ndre: null, found: false }); }
+      const fromDate = new Date(targetDate); fromDate.setDate(fromDate.getDate() - 1);
+      const toDate = new Date(targetDate); toDate.setDate(toDate.getDate() + 1);
+      const dtFrom = `${fromDate.toISOString().split('T')[0]}T00:00:00Z`;
+      const dtTo = `${toDate.toISOString().split('T')[0]}T23:59:59Z`;
+
+      // Buscar S2 y S1 en paralelo
+      const [s2Data, s1Data] = await Promise.all([
+        catalogSearch({ bbox, collections: ['sentinel-2-l2a'], datetime: `${dtFrom}/${dtTo}`, limit: 10, filter: `eo:cloud_cover < ${maxCloudCoverage}` }).catch(() => ({ features: [] })),
+        catalogSearch({ bbox, collections: ['sentinel-1-grd'], datetime: `${dtFrom}/${dtTo}`, limit: 10 }).catch(() => ({ features: [] }))
+      ]);
+
+      let s2Result = null, s1Result = null;
+
+      // Procesar S2 si hay features
+      const s2Features = s2Data.features || [];
+      if (s2Features.length) {
+        try {
+          const dates = s2Features.map(f => f.properties.datetime.split('T')[0]).sort();
+          const bestDate = dates[Math.floor(dates.length / 2)];
+          const bestFeature = s2Features.find(f => f.properties.datetime.startsWith(bestDate));
+          const cloudCover = bestFeature && bestFeature.properties.eo_cloud_cover != null ? Math.round(bestFeature.properties.eo_cloud_cover) : null;
+          const img = await fetchHerbicideMoisture({ ring: ring2, bbox, date: bestDate, width, height });
+          const ndviSt = statsOf(img.ndvi, idx);
+          const saviSt = statsOf(img.savi, idx);
+          const ndreSt = statsOf(img.ndre, idx);
+          s2Result = {
+            date: bestDate,
+            ndvi: ndviSt.mean !== null ? Number(((ndviSt.mean * 2 - 1)).toFixed(3)) : null,
+            savi: saviSt.mean !== null ? Number(((saviSt.mean * 2 - 1)).toFixed(3)) : null,
+            ndre: ndreSt.mean !== null ? Number(((ndreSt.mean * 2 - 1)).toFixed(3)) : null,
+            cloudCover
+          };
+        } catch (_) {}
+      }
+
+      // Procesar S1 si hay features 1SDV
+      const s1Features = (s1Data.features || []).filter(f => f.id && f.id.includes('1SDV'));
+      if (s1Features.length) {
+        try {
+          const s1Dates = s1Features.map(f => f.properties.datetime.split('T')[0]).sort();
+          const s1BestDate = s1Dates[Math.floor(s1Dates.length / 2)];
+          const sar = await fetchS1Sar({ ring: ring2, bbox, date: s1BestDate, width, height });
+          const vvSt = statsOf(sar.vv, idx);
+          const vhSt = statsOf(sar.vh, idx);
+          const vv = vvSt.mean !== null ? Number(vvSt.mean.toFixed(2)) : null;
+          const vh = vhSt.mean !== null ? Number(vhSt.mean.toFixed(2)) : null;
+          s1Result = { date: s1BestDate, vv, vh, vhRatio: vv !== null && vh !== null ? Number((vh - vv).toFixed(2)) : null };
+        } catch (_) {}
+      }
+
+      const found = !!(s2Result || s1Result);
+      const source = s2Result && s1Result ? 'S1+S2' : s2Result ? 'S2' : s1Result ? 'S1' : null;
+      series.push({
+        date: dateStr, daysAfterTreatment: d, source,
+        s2: s2Result || null,
+        s1: s1Result || null,
+        found
+      });
     }
-    const deltas = series.filter(s => s.found && s.ndvi !== null && ndviBefore !== null).map(s => ({
-      date: s.date, daysAfterTreatment: s.daysAfterTreatment, deltaNdvi: Number((s.ndvi - ndviBefore).toFixed(3)), deltaSavi: s.savi !== null && saviBefore !== null ? Number((s.savi - saviBefore).toFixed(3)) : null, deltaNdre: s.ndre !== null && ndreBefore !== null ? Number((s.ndre - ndreBefore).toFixed(3)) : null
-    }));
+
+    // --- DELTAS ---
+    const deltas = series.filter(s => s.found).map(s => {
+      const deltaNdvi = s.s2 && s.s2.ndvi !== null && ndviBefore !== null ? Number((s.s2.ndvi - ndviBefore).toFixed(3)) : null;
+      const deltaSavi = s.s2 && s.s2.savi !== null && saviBefore !== null ? Number((s.s2.savi - saviBefore).toFixed(3)) : null;
+      const deltaNdre = s.s2 && s.s2.ndre !== null && ndreBefore !== null ? Number((s.s2.ndre - ndreBefore).toFixed(3)) : null;
+      const deltaVv = s.s1 && s.s1.vv !== null && vvBefore !== null ? Number((s.s1.vv - vvBefore).toFixed(2)) : null;
+      const deltaVh = s.s1 && s.s1.vh !== null && vhBefore !== null ? Number((s.s1.vh - vhBefore).toFixed(2)) : null;
+      return { date: s.date, daysAfterTreatment: s.daysAfterTreatment, source: s.source, deltaNdvi, deltaSavi, deltaNdre, deltaVv, deltaVh };
+    });
+
+    // --- RESISTENCIA ---
     let resistance = false;
     if (deltas.length >= 2) {
       const lastDelta = deltas[deltas.length - 1];
-      if (lastDelta.deltaNdvi !== null && Math.abs(lastDelta.deltaNdvi) < 0.03 &&
-          lastDelta.deltaSavi !== null && Math.abs(lastDelta.deltaSavi) < 0.03 &&
-          lastDelta.deltaNdre !== null && Math.abs(lastDelta.deltaNdre) < 0.03) resistance = true;
+      const noChangeOptical = lastDelta.deltaNdvi !== null && Math.abs(lastDelta.deltaNdvi) < 0.03;
+      const noChangeSar = lastDelta.deltaVv !== null && Math.abs(lastDelta.deltaVv) < 0.5;
+      if (noChangeOptical && noChangeSar) resistance = true;
+      else if (noChangeOptical && lastDelta.deltaVv === null) resistance = true;
     }
+
+    // --- EFECTIVIDAD: combinar S2 (NDVI) + S1 (VV) ---
     let effectiveness = 'indefinido';
     if (deltas.length >= 1) {
       const lastDelta = deltas[deltas.length - 1];
+      let score = 0; let signals = 0;
       if (lastDelta.deltaNdvi !== null) {
-        if (lastDelta.deltaNdvi < -0.15) effectiveness = 'efectivo';
-        else if (lastDelta.deltaNdvi < -0.05) effectiveness = 'parcial';
+        signals++;
+        if (lastDelta.deltaNdvi < -0.15) score += 2;
+        else if (lastDelta.deltaNdvi < -0.05) score += 1;
+      }
+      if (lastDelta.deltaVv !== null) {
+        signals++;
+        if (lastDelta.deltaVv > 1.5) score += 2;
+        else if (lastDelta.deltaVv > 0.5) score += 1;
+      }
+      if (signals > 0) {
+        const avg = score / signals;
+        if (avg >= 1.5) effectiveness = 'efectivo';
+        else if (avg >= 0.5) effectiveness = 'parcial';
         else effectiveness = 'inefectivo';
       }
     }
+
     const quota = await commitPolygon(req, res, m);
-    res.json({ ndviBefore, saviBefore, ndreBefore, dateBefore, dateAfter, series, deltas, resistance, effectiveness, quota });
+    res.json({
+      ndviBefore, saviBefore, ndreBefore, cloudCoverBefore,
+      vvBefore, vhBefore, vhRatioBefore, s2BeforeDate, s1BeforeDate,
+      dateBefore, dateAfter,
+      series, deltas, resistance, effectiveness, quota
+    });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
