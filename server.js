@@ -1568,16 +1568,18 @@ app.post('/api/v2/get-valid-dates', async (req, res) => {
     const s1Promise = (async () => {
       try {
         const data = await catalogSearch({ bbox, collections: ['sentinel-1-grd'], datetime: dtRange, limit: 200 });
+        const allFeatures = data.features || [];
         const seen = new Set(); const dates = [];
-        for (const f of (data.features || [])) {
+        for (const f of allFeatures) {
           if (!(f.id && f.id.includes('1SDV'))) continue;
           const d = (f.properties.datetime || '').split('T')[0];
           if (!d || seen.has(d)) continue;
           seen.add(d);
           dates.push({ date: d });
         }
+        console.log(`[S1-CATALOG] total=${allFeatures.length} 1SDV=${dates.length} ids=${allFeatures.slice(0,3).map(f=>f.id).join(',')}`);
         return dates;
-      } catch (_) { return []; }
+      } catch (e) { console.error('[S1-CATALOG] ERROR:', e.message); return []; }
     })();
 
     const [s2Dates, s1Dates] = await Promise.all([s2Promise, s1Promise]);
