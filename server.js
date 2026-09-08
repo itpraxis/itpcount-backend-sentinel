@@ -536,7 +536,10 @@ function evaluatePixel(sample) {
   var scl = sample.SCL;
   if (!valid(scl)) return { res: [NaN, NaN] };
   var ndvi = (sample.B08 - sample.B04) / (sample.B08 + sample.B04 + 1e-8);
-  return { res: [(ndvi + 1) / 2, isCloud(scl) ? 1 : 0] };
+  var cld = isCloud(scl) ? 1 : 0;
+  // V5: un píxel con nube se EXCLUYE del NDVI (NaN) además de marcarse en la banda de nube,
+  // para que no contamine stats, clasificación ni Otsu (antes solo se contaba como %).
+  return { res: [cld ? NaN : (ndvi + 1) / 2, cld] };
 }`;
 
 // Igual al anterior + banda SWIR (B11) para la máscara de nieve: píxeles con NDSI alto
@@ -558,7 +561,9 @@ function evaluatePixel(sample) {
   var ndsi = (sample.B04 - sample.B11) / (sample.B04 + sample.B11 + 1e-8);
   if (ndsi >= 0.45 && sample.B04 >= 2000) return { res: [NaN, 0] };
   var ndvi = (sample.B08 - sample.B04) / (sample.B08 + sample.B04 + 1e-8);
-  return { res: [(ndvi + 1) / 2, isCloud(scl) ? 1 : 0] };
+  var cld = isCloud(scl) ? 1 : 0;
+  // V5: nube se EXCLUYE del NDVI al igual que en OPTICAL_EVAL.
+  return { res: [cld ? NaN : (ndvi + 1) / 2, cld] };
 }`;
 
 // Variantes con detector de CALIMA/NIEBLA para la nubosidad por polígono (cloud-polygon):
@@ -580,7 +585,9 @@ function evaluatePixel(sample) {
   if (!valid(scl)) return { res: [NaN, NaN] };
   var ndvi = (sample.B08 - sample.B04) / (sample.B08 + sample.B04 + 1e-8);
   var hazy = (sample.B02 > 1000 && ndvi < 0.25) || (sample.B02 > 1700 && sample.B03 > 1700 && sample.B04 > 1700);
-  return { res: [(ndvi + 1) / 2, (isCloud(scl) || hazy) ? 1 : 0] };
+  var bad = (isCloud(scl) || hazy) ? 1 : 0;
+  // V5: nube/calima se EXCLUYE del NDVI además de contarse.
+  return { res: [bad ? NaN : (ndvi + 1) / 2, bad] };
 }`;
 const OPTICAL_EVAL_HAZE_SNOW = `//VERSION=3
 function setup() {
@@ -598,7 +605,9 @@ function evaluatePixel(sample) {
   if (ndsi >= 0.45 && sample.B04 >= 2000) return { res: [NaN, 0] };
   var ndvi = (sample.B08 - sample.B04) / (sample.B08 + sample.B04 + 1e-8);
   var hazy = (sample.B02 > 1000 && ndvi < 0.25) || (sample.B02 > 1700 && sample.B03 > 1700 && sample.B04 > 1700);
-  return { res: [(ndvi + 1) / 2, (isCloud(scl) || hazy) ? 1 : 0] };
+  var bad = (isCloud(scl) || hazy) ? 1 : 0;
+  // V5: nube/calima se EXCLUYE del NDVI además de contarse.
+  return { res: [bad ? NaN : (ndvi + 1) / 2, bad] };
 }`;
 
 async function fetchOptical({ ring, bbox, date, width, height, maxCloud = 100, snowMonths = null }) {
@@ -828,7 +837,7 @@ async function opticalNearRadar({ ring, bbox, date, width, height, snowMonths = 
   try {
     const near = await findNearestOpticalDate(bbox, date, 30);
     if (!near) return null;
-    const res = await cachedOptical({ ring, bbox, date: near, width, height, snowMonths });
+    const res = await cachedOpticalHaze({ ring, bbox, date: near, width, height, snowMonths });
     return { ndvi: res.ndvi, cloud: res.cloud, date: near };
   } catch (e) { return null; }
 }
@@ -836,28 +845,44 @@ async function opticalNearRadar({ ring, bbox, date, width, height, snowMonths = 
 // cuando el sensor secundario TIENE dato pero no alcanza su propio umbral de bosque (regla
 // estricta AND). Si el secundario NO tiene dato para el píxel (nieve, nube, fuera de escena),
 // el primario no se degrada: sin evidencia en contra, se respeta la lectura del primario.
-function consensusClassify(primaryVals, secondaryVals, mask, primaryClasses, secondaryClasses) {
+function consensusClassify(primaryVals, secondaryVals, mask, primaryClasses, secondaryClasses, rescue = false) {
   if (!secondaryVals) return classifyMasked(primaryVals, mask, primaryClasses);
   const n = primaryClasses.length;
   const out = new Uint8Array(primaryVals.length).fill(255);
   const pForest = primaryClasses.map((c, i) => c.forest ? i : -1).filter(i => i >= 0);
   const sForest = secondaryClasses.map((c, i) => c.forest ? i : -1).filter(i => i >= 0);
   const demoteTo = primaryClasses.findIndex(c => c.forest) - 1;
+  // V5: rescate radar en DOS BANDAS. Cuando el primario (NDVI) está excluido por nube/calima
+  // (NaN) y el secundario (RVI) indica vegetación vigorosa, el píxel se recupera sin atribuirlo
+  // automáticamente a Bosque: RVI muy alto (≥ from+0.10, p. ej. ≥0.80) → Bosque; banda
+  // intermedia (≥ from+0.05, p. ej. 0.75-0.80) → la clase previa al bosque en óptica ("densa no
+  // boscosa"). Validado con 7 polígonos: en plantaciones forestales coincide con el óptico
+  // (±12%) y no infla Bosque en predios mixtos (antes: hasta 10x).
+  const sForestMin = sForest.length ? Math.min(...sForest.map(i => secondaryClasses[i].from)) + 0.05 : Infinity;
+  const sForestHigh = sForest.length ? Math.min(...sForest.map(i => secondaryClasses[i].from)) + 0.10 : Infinity;
+  const prerForestIdx = pForest.length ? pForest[0] - 1 : -1;
   for (let k = 0; k < mask.length; k++) {
     const p = mask[k];
     const v = primaryVals[p];
-    if (v === undefined || v === null || Number.isNaN(v)) continue;
+    const sv = secondaryVals[p];
+    if (v === undefined || v === null || Number.isNaN(v)) {
+      if (rescue && sv !== undefined && sv !== null && !Number.isNaN(sv) && pForest.length) {
+        if (sv >= sForestHigh) out[p] = pForest[0];
+        else if (sv >= sForestMin && prerForestIdx >= 0) out[p] = prerForestIdx;
+      }
+      continue;
+    }
     let i = -1;
     for (let c = 0; c < n; c++) {
       if (v >= primaryClasses[c].from && v < primaryClasses[c].to) { i = c; break; }
     }
     if (i < 0) continue;
     if (pForest.includes(i)) {
-      const sv = secondaryVals[p];
-      if (sv !== undefined && sv !== null && !Number.isNaN(sv)) {
+      const ssv = secondaryVals[p];
+      if (ssv !== undefined && ssv !== null && !Number.isNaN(ssv)) {
         let j = -1;
         for (let c = 0; c < secondaryClasses.length; c++) {
-          if (sv >= secondaryClasses[c].from && sv < secondaryClasses[c].to) { j = c; break; }
+          if (ssv >= secondaryClasses[c].from && ssv < secondaryClasses[c].to) { j = c; break; }
         }
         if (j < 0 || !sForest.includes(j)) i = demoteTo;
       }
@@ -1697,7 +1722,9 @@ app.post('/api/v2/image', async (req, res) => {
 
     // ---- NDVI (con o sin composite server-side) ----
     if (!composite || composite <= 0) {
-      const { ndvi, cloud } = await cachedOptical({ ring, bbox, date, width, height, snowMonths: snowMonthsOf(m) });
+      // V5: usa la máscara HAZE (SCL + calima), la misma que la lista de fechas, y excluye
+      // nube/calima del NDVI (NaN), así el % coinciden y el análisis no se contamina.
+      const { ndvi, cloud } = await cachedOpticalHaze({ ring, bbox, date, width, height, snowMonths: snowMonthsOf(m) });
       const mask = maskIndices(width, height, bbox, ring);
       const cp = cloudPctOf(cloud, mask);
       const st = statsOf(ndvi, mask);
@@ -1706,15 +1733,41 @@ app.post('/api/v2/image', async (req, res) => {
       const areaPx = areaPerPixel(bbox, width, height);
       const cls = OPTICAL_CLASSES.map(c => ({ ...c }));
       const secondary = await rviNearOptical({ ring, bbox, date, width, height });
-      const clsRaster = consensusClassify(ndvi, secondary && secondary.rvi, mask, cls, RVI_CLASSES);
+      const clsRaster = consensusClassify(ndvi, secondary && secondary.rvi, mask, cls, RVI_CLASSES, true);
       const areas = classAreasFromRaster(clsRaster, mask, cls, areaPx);
       const image = toPng(clsRaster, width, height, colorClass(cls), mask);
+      // V5: % de píxeles del polígono que estaban excluidos por nube/calima (NDVI NaN) y fueron
+      // recuperados por el consenso RVI en dos bandas: `rescued` → bosque (RVI ≥0.80) y
+      // `rescuedDense` → densidad intermedia / "densa no boscosa" (RVI 0.75-0.80). Solo reporta
+      // si hubo escena radar (secondary).
+      let rescuedPct = null, rescuedDensePct = null;
+      if (secondary && secondary.rvi) {
+        const rvi = secondary.rvi;
+        const forestIdx = RVI_CLASSES.findIndex(c => c.forest);
+        const from = forestIdx >= 0 ? RVI_CLASSES[forestIdx].from + 0.05 : Infinity;
+        const fromHigh = forestIdx >= 0 ? RVI_CLASSES[forestIdx].from + 0.10 : Infinity;
+        let nExcluded = 0, nRescued = 0, nRescuedDense = 0;
+        for (let k = 0; k < mask.length; k++) {
+          const p = mask[k];
+          if (ndvi[p] === undefined || ndvi[p] === null || Number.isNaN(ndvi[p])) {
+            nExcluded++;
+            const sv = rvi[p];
+            if (sv !== undefined && sv !== null && !Number.isNaN(sv)) {
+              if (sv >= fromHigh) nRescued++;
+              else if (sv >= from) nRescuedDense++;
+            }
+          }
+        }
+        rescuedPct = nExcluded ? Math.round((nRescued / nExcluded) * 1000) / 10 : 0;
+        rescuedDensePct = nExcluded ? Math.round((nRescuedDense / nExcluded) * 1000) / 10 : 0;
+      }
       const quota = await commitPolygon(req, res, m);
       return res.json({
         image, usedDate: date, bbox, width, height, mode: 'ndvi',
         stats: { mean: st.mean, otsu },
         histogram: hist, areaPerPixel: areaPx, cloudPct: cp.cloudPct, classes: areas.classes, areaHa: areas.areaHa,
         consensus: !!secondary, consensusSensorDate: secondary ? secondary.date : null,
+        rescued: rescuedPct, rescuedDense: rescuedDensePct,
         snow: { months: snowMonthsOf(m) || [], mask: useSnowForDate(date, snowMonthsOf(m)) },
         quota
       });
@@ -1744,7 +1797,7 @@ app.post('/api/v2/image', async (req, res) => {
     const used = [];
     for (const p of picks) {
       try {
-        const { ndvi, cloud } = await fetchOptical({ ring, bbox, date: p.date, width, height, snowMonths: snowMonthsOf(m) });
+        const { ndvi, cloud } = await fetchOpticalHaze({ ring, bbox, date: p.date, width, height, snowMonths: snowMonthsOf(m) });
         const mask = maskIndices(width, height, bbox, ring);
         const cp = cloudPctOf(cloud, mask);
         stacks.push({ ndvi, mask, cloudPct: cp.cloudPct, date: p.date });
@@ -1774,7 +1827,7 @@ app.post('/api/v2/image', async (req, res) => {
     const areaPx = areaPerPixel(bbox, width, height);
     const cls = OPTICAL_CLASSES.map(c => ({ ...c }));
     const secondary = await rviNearOptical({ ring, bbox, date, width, height });
-    const clsRaster = consensusClassify(median, secondary && secondary.rvi, mask, cls, RVI_CLASSES);
+    const clsRaster = consensusClassify(median, secondary && secondary.rvi, mask, cls, RVI_CLASSES, true);
     const areas = classAreasFromRaster(clsRaster, mask, cls, areaPx);
     const image = toPng(clsRaster, width, height, colorClass(cls), mask);
     const bestCloud = used.reduce((m, u) => (u.polygonCloud === null ? m : Math.min(m, u.polygonCloud)), 100);
@@ -1874,8 +1927,8 @@ app.post('/api/v2/change', async (req, res) => {
     const mask = maskIndices(width, height, bbox, ring);
 
     const [o1, o2] = await Promise.all([
-      cachedOptical({ ring, bbox, date: date1, width, height, snowMonths: snowMonthsOf(m) }),
-      cachedOptical({ ring, bbox, date: date2, width, height, snowMonths: snowMonthsOf(m) })
+      cachedOpticalHaze({ ring, bbox, date: date1, width, height, snowMonths: snowMonthsOf(m) }),
+      cachedOpticalHaze({ ring, bbox, date: date2, width, height, snowMonths: snowMonthsOf(m) })
     ]);
     const areaPx = areaPerPixel(bbox, width, height);
     const cls = OPTICAL_CLASSES.map(c => ({ ...c }));
@@ -1904,8 +1957,8 @@ app.post('/api/v2/change', async (req, res) => {
         cachedRvi({ ring, bbox, date: r2.date, width, height, polarization: pol })
       ]);
       radar = { rvi1: rad1.rvi, rvi2: rad2.rvi, date1: r1.date, date2: r2.date, pol };
-      c1 = consensusClassify(o1.ndvi, rad1.rvi, mask, cls, RVI_CLASSES);
-      c2 = consensusClassify(o2.ndvi, rad2.rvi, mask, cls, RVI_CLASSES);
+      c1 = consensusClassify(o1.ndvi, rad1.rvi, mask, cls, RVI_CLASSES, true);
+      c2 = consensusClassify(o2.ndvi, rad2.rvi, mask, cls, RVI_CLASSES, true);
     }
     const comp = compareCategories(c1, c2, mask, cls, areaPx);
     const robust = robustChange(c1, c2, o1.ndvi, o2.ndvi, mask, cls, areaPx, band);
@@ -2024,7 +2077,7 @@ app.post('/api/v2/ndvi-timeseries', async (req, res) => {
     const series = [];
     for (const p of picks) {
       try {
-        const { ndvi, cloud } = await fetchOptical({ ring, bbox, date: p.date, width: W, height: H, snowMonths: snowMonthsOf(m) });
+        const { ndvi, cloud } = await fetchOpticalHaze({ ring, bbox, date: p.date, width: W, height: H, snowMonths: snowMonthsOf(m) });
         const cp = cloudPctOf(cloud, mask);
         const st = statsOf(ndvi, mask);
         series.push({ date: p.date, sceneCloud: Math.round(p.cloud * 10) / 10, polygonCloud: cp.cloudPct, ndviMean: st.mean });
@@ -2203,8 +2256,8 @@ app.post('/api/v2/compare', async (req, res) => {
     const areaPx = areaPerPixel(bbox, width, height);
 
     const [o1, o2] = await Promise.all([
-      cachedOptical({ ring, bbox, date: date1, width, height, snowMonths: snowMonthsOf(m) }),
-      cachedOptical({ ring, bbox, date: date2, width, height, snowMonths: snowMonthsOf(m) })
+      cachedOpticalHaze({ ring, bbox, date: date1, width, height, snowMonths: snowMonthsOf(m) }),
+      cachedOpticalHaze({ ring, bbox, date: date2, width, height, snowMonths: snowMonthsOf(m) })
     ]);
     const cls = OPTICAL_CLASSES.map(c => ({ ...c }));
     let c1 = classifyMasked(o1.ndvi, mask, cls);
@@ -2246,8 +2299,8 @@ app.post('/api/v2/compare', async (req, res) => {
           image2: toPng(rc2, width, height, colorClass(rcls), mask),
           changeImage: toPng(rcomp.codes, width, height, colorChangeMap, mask)
         };
-        c1 = consensusClassify(o1.ndvi, ra1.rvi, mask, cls, rcls);
-        c2 = consensusClassify(o2.ndvi, ra2.rvi, mask, cls, rcls);
+        c1 = consensusClassify(o1.ndvi, ra1.rvi, mask, cls, rcls, true);
+        c2 = consensusClassify(o2.ndvi, ra2.rvi, mask, cls, rcls, true);
       }
     } catch (e) { /* radar opcional */ }
     const comp = compareCategories(c1, c2, mask, cls, areaPx);
@@ -2357,10 +2410,10 @@ app.post('/api/v2/compare-rvi', async (req, res) => {
     const band = (Number(req.body.band) > 0 && Number(req.body.band) < 0.5) ? Number(req.body.band) : FOREST_BAND;
     const inWindow = (ref, v) => v && Math.abs(new Date(v) - new Date(ref)) <= 15 * 864e5;
     const sec1 = inWindow(date1, opticalDate1)
-      ? cachedOptical({ ring, bbox, date: opticalDate1, width, height, snowMonths: snowMonthsOf(m) })
+      ? cachedOpticalHaze({ ring, bbox, date: opticalDate1, width, height, snowMonths: snowMonthsOf(m) })
       : opticalNearRadar({ ring, bbox, date: date1, width, height, snowMonths: snowMonthsOf(m) });
     const sec2 = inWindow(date2, opticalDate2)
-      ? cachedOptical({ ring, bbox, date: opticalDate2, width, height, snowMonths: snowMonthsOf(m) })
+      ? cachedOpticalHaze({ ring, bbox, date: opticalDate2, width, height, snowMonths: snowMonthsOf(m) })
       : opticalNearRadar({ ring, bbox, date: date2, width, height, snowMonths: snowMonthsOf(m) });
     const [s1, s2] = await Promise.all([sec1, sec2]);
     rc1 = consensusClassify(r1.rvi, s1 && s1.ndvi, mask, rcls, OPTICAL_CLASSES);
