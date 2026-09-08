@@ -66,6 +66,15 @@ try {
   console.error('❌ No se pudo inicializar Firebase Admin:', e.message);
 }
 
+// ============================================================
+// TRUE COLOR HD (experimental) — toggle global reversible
+// ============================================================
+// Mejora solo la imagen truecolor (cosmética): sube la resolución de salida y usa
+// remuestreo bicúbico en Sentinel Hub. El valor ACTIVO aplica a todos los usuarios;
+// solo el usuario habilitado (lbrito@itpraxis.cl) puede leerlo/cambiarlo. Por defecto OFF.
+const TRUE_COLOR_HD_ALLOWED_USER = 'lbrito@itpraxis.cl';
+let trueColorHD = false; // 0/1 en body del endpoint; nada que ver con TRUECOLOR_RETRY.
+
 // Clave del mes local (YYYY-MM); los créditos se restablecen el día 1 a las 00:00.
 function monthKey(d = new Date()) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
@@ -414,7 +423,8 @@ function setup() {
 }
 function evaluatePixel(sample) { return { res: [sample.B04, sample.B03, sample.B02] }; }`;
 function trueColorPayload({ ring, date, width, height }) {
-  return {
+  let outWidth = width, outHeight = height;
+  const payload = {
     input: {
       bounds: { geometry: { type: 'Polygon', coordinates: [ring] } },
       data: [{ type: 'sentinel-2-l2a', dataFilter: { timeRange: { from: `${date}T00:00:00Z`, to: `${date}T23:59:59Z` }, maxCloudCoverage: 100 }, mosaicking: 'SCENE', units: 'DN' }]
@@ -422,6 +432,16 @@ function trueColorPayload({ ring, date, width, height }) {
     output: { width, height, responses: [{ identifier: 'res', format: { type: 'image/tiff' } }] },
     evalscript: TRUECOLOR_EVAL
   };
+  // Experimental: cuando el toggle TrueColor HD está ON, pedimos doble resolución y
+  // remuestreo bicúbico en Sentinel Hub para un realce cosmético (la escena sigue siendo S2 10 m real,
+  // el backend NDVI/radar no cambia). Límite 1200 px por lado para no disparar el costo.
+  if (trueColorHD) {
+    const HD_FACTOR = 2, HD_MAXPIX = 1200;
+    outWidth = Math.min(HD_MAXPIX, Math.round(width * HD_FACTOR));
+    outHeight = Math.min(HD_MAXPIX, Math.round(height * HD_FACTOR));
+    payload.output = { width: outWidth, height: outHeight, responses: [{ identifier: 'res', format: { type: 'image/tiff' } }], resampling: 'BICUBIC' };
+  }
+  return payload;
 }
 // Detecta un granulo degradado en las bandas crudas: vacio (todo ~0, imagen negra),
 // con la banda azul muerta (B02 ~0 mientras B04/B03 sanos, imagen amarilla) o
@@ -619,19 +639,23 @@ async function fetchOpticalHaze({ ring, bbox, date, width, height, maxCloud = 10
 }
 
 async function fetchTrueColor({ ring, bbox, date, width, height }) {
-  const bands = await shFetchTrueColorBands(trueColorPayload({ ring, date, width, height }));
-  return 'data:image/png;base64,' + renderTrueColorPng(bands, width, height).toString('base64');
+  const payload = trueColorPayload({ ring, date, width, height });
+  const bands = await shFetchTrueColorBands(payload);
+  const w = payload.output.width, h = payload.output.height;
+  return 'data:image/png;base64,' + renderTrueColorPng(bands, w, h).toString('base64');
 }
 
 // Truecolor recortado al polígono: fuera del anillo queda transparente (para superponer en el mapa).
 async function fetchTrueColorMasked({ ring, bbox, date, width, height }) {
-  const bands = await shFetchTrueColorBands(trueColorPayload({ ring, date, width, height }));
-  const src = PNG.sync.read(renderTrueColorPng(bands, width, height));
-  const mask = maskIndices(width, height, bbox, ring);
-  const inside = new Uint8Array(width * height);
+  const payload = trueColorPayload({ ring, date, width, height });
+  const bands = await shFetchTrueColorBands(payload);
+  const w = payload.output.width, h = payload.output.height;
+  const src = PNG.sync.read(renderTrueColorPng(bands, w, h));
+  const mask = maskIndices(w, h, bbox, ring);
+  const inside = new Uint8Array(w * h);
   for (const p of mask) inside[p] = 1;
-  const out = new PNG({ width, height });
-  for (let p = 0; p < width * height; p++) {
+  const out = new PNG({ width: w, height: h });
+  for (let p = 0; p < w * h; p++) {
     const i = p * 4;
     out.data[i] = src.data[i];
     out.data[i + 1] = src.data[i + 1];
@@ -1522,6 +1546,25 @@ app.get('/warmup', async (req, res) => {
   }
 });
 app.post('/api/prueba', (req, res) => res.json({ ok: true, received: Object.keys(req.body || {}) }));
+
+// Toggle experimental True Color HD (global, activo para todos mientras esté ON).
+// Solo el usuario habilitado puede leer/cambiar el valor.
+app.post('/api/v2/tc-hd', async (req, res) => {
+  try {
+    if (!(await checkUser(req, res))) return;
+    const token = (req.headers.authorization || '').match(/^Bearer (.+)$/i);
+    if (!token) return res.status(401).json({ error: 'No autenticado.' });
+    let email = null;
+    try { email = (await admin.auth().verifyIdToken(token[1])).email; } catch (e) { /* email null */ }
+    if (email !== TRUE_COLOR_HD_ALLOWED_USER) return res.status(403).json({ error: 'No autorizado.' });
+
+    if (typeof req.body.enabled === 'boolean') {
+      trueColorHD = req.body.enabled;
+      console.log(`🖼 TrueColor HD @-> ${trueColorHD ? 'ON' : 'OFF'} (${email})`);
+    }
+    res.json({ enabled: trueColorHD });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
 
 function badParams(res, msg) { return res.status(400).json({ error: msg }); }
 
