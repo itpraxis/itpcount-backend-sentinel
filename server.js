@@ -2469,6 +2469,41 @@ app.post('/api/v2/compare-rvi', async (req, res) => {
     if (volumen && corte) volumen.corteBand = corte.band;
     // Cosecha neta (antes − desp) con descomposición por especie (V4, aditivo).
     const cosecha = computeCosechaInfo(req.body, s1 && s1.ndvi, rc1, rc2, mask, rcls, areaPx, comp.forest, bbox, date2);
+    // ---- Corrección de deriva de la señal RVI ----
+    // Si la mediana RVI del polígono se desplazó de forma sistemática entre las dos
+    // fechas (drift up/down ≥ ±0.01, p. ej. por humedad del suelo/vegetación o cambio
+    // de adquisición), se desplaza la escena de la fecha 2 en sentido contrario antes
+    // de reclasificar. Así el cambio de bosque refleja vegetación REAL y no una subida
+    // o bajada uniforme de la señal. Los resultados crudos (radar.*) quedan igual;
+    // los corregidos se entregan en `deriva` para comparar.
+    const diag = diagRadarPair(r1.rvi, r2.rvi, mask, date1, date2);
+    const rnd2 = v => Math.round(v * 100) / 100;
+    let deriva = null;
+    if (diag && diag.medianDelta !== null && Math.abs(diag.medianDelta) >= 0.01) {
+      const shift = diag.medianDelta;
+      const rvi2c = r2.rvi.map(v => (Number.isFinite(v) ? v - shift : v));
+      const rc2c = consensusClassify(rvi2c, s2 && s2.ndvi, mask, rcls, OPTICAL_CLASSES);
+      const compC = compareCategories(rc1, rc2c, mask, rcls, areaPx);
+      const robustC = robustChange(rc1, rc2c, r1.rvi, rvi2c, mask, rcls, areaPx, band);
+      const corteC = robustChange(rc1, rc2c, r1.rvi, rvi2c, mask, rcls, areaPx, CORTE_BAND);
+      const rc2rC = robustAfter(rc1, rc2c, r1.rvi, rvi2c, mask, rcls, CORTE_BAND);
+      const rcompRC = compareCategories(rc1, rc2rC, mask, rcls, areaPx);
+      const lostHaC = (corteC && typeof corteC.lost === 'number') ? corteC.lost
+        : ((compC.forest && typeof compC.forest.lost === 'number') ? compC.forest.lost : null);
+      const cosechaC = computeCosechaInfo(req.body, s1 && s1.ndvi, rc1, rc2c, mask, rcls, areaPx, compC.forest, bbox, date2);
+      const sd = rnd2(shift);
+      deriva = {
+        applied: true,
+        shift: sd,
+        direction: sd >= 0 ? 'up' : 'down',
+        desc: `Deriva de la señal RVI: la mediana del polígono ${sd >= 0 ? 'subió' : 'bajó'} Δ ${sd >= 0 ? '+' : ''}${sd.toFixed(3)} entre fechas (humedad del suelo/vegetación o cambio de adquisición). Se compensó desplazando la escena de la fecha 2 en sentido contrario antes de reclasificar.`,
+        forest: compC.forest,
+        robust: robustC,
+        forestRob: rcompRC.forest,
+        cosecha: cosechaC,
+        volumen: computeVolumeInfo(req.body, s1 && s1.ndvi, mask, bbox, lostHaC, date2)
+      };
+    }
     const sec1Date = inWindow(date1, opticalDate1) ? opticalDate1 : (s1 && s1.date);
     const sec2Date = inWindow(date2, opticalDate2) ? opticalDate2 : (s2 && s2.date);
     const quota = await commitPolygon(req, res, m);
@@ -2497,6 +2532,7 @@ app.post('/api/v2/compare-rvi', async (req, res) => {
       volumen,
       cosecha,
       radarDiag: diagRadarPair(r1.rvi, r2.rvi, mask, date1, date2),
+      deriva,
       quota
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
