@@ -2384,6 +2384,46 @@ app.post('/api/v2/radar-dates', async (req, res) => {
 });
 
 // 10) Comparar superficies por categoría RVI entre dos fechas radar
+// Diagnóstico de la señal RVI dentro del polígono entre las dos fechas (mediana,
+// cuartiles y % de píxeles sobre el umbral de bosque 0.70). Ayuda a explicar falsas
+// ganancias/pérdidas de bosque por deriva de la señal radar (humedad del suelo o de la
+// vegetación, condiciones de adquisición) en lugar de cambio real.
+function rviMaskedStats(vals, mask) {
+  const arr = [];
+  for (let i = 0; i < vals.length; i++) {
+    if (mask[i] && Number.isFinite(vals[i])) arr.push(vals[i]);
+  }
+  arr.sort((a, b) => a - b);
+  const n = arr.length;
+  if (!n) return { n: 0, median: null, mean: null, q25: null, q75: null, pctForest: null };
+  let sum = 0; for (const v of arr) sum += v;
+  const mid = Math.floor(n / 2);
+  const q = p => arr[Math.min(arr.length - 1, (p * n) | 0)];
+  return {
+    n,
+    mean: sum / n,
+    median: n % 2 ? arr[mid] : (arr[mid - 1] + arr[mid]) / 2,
+    q25: q(0.25), q75: q(0.75),
+    pctForest: arr.filter(v => v >= 0.70).length / n
+  };
+}
+function diagRadarPair(rviA, rviB, mask, dateA, dateB) {
+  const r3 = v => (v === null || v === undefined) ? null : Math.round(v * 1000) / 1000;
+  const a = rviMaskedStats(rviA, mask), b = rviMaskedStats(rviB, mask);
+  const md = (a.median !== null && b.median !== null) ? r3(b.median - a.median) : null;
+  return {
+    date1: dateA, date2: dateB,
+    n1: a.n, n2: b.n,
+    median1: r3(a.median), median2: r3(b.median),
+    mean1: r3(a.mean), mean2: r3(b.mean),
+    q251: r3(a.q25), q751: r3(a.q75),
+    q252: r3(b.q25), q752: r3(b.q75),
+    pctForest1: r3(a.pctForest), pctForest2: r3(b.pctForest),
+    medianDelta: md,
+    drift: md === null ? null : (md >= 0.01 ? 'up' : md <= -0.01 ? 'down' : 'stable')
+  };
+}
+
 app.post('/api/v2/compare-rvi', async (req, res) => {
   try {
     const ring = toRing(req.body.coordinates);
@@ -2456,6 +2496,7 @@ app.post('/api/v2/compare-rvi', async (req, res) => {
       snowStats1: snowMaskStats(s1), snowStats2: snowMaskStats(s2),
       volumen,
       cosecha,
+      radarDiag: diagRadarPair(r1.rvi, r2.rvi, mask, date1, date2),
       quota
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
