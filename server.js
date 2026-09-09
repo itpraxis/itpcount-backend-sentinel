@@ -2440,24 +2440,18 @@ app.post('/api/v2/compare-rvi', async (req, res) => {
       cachedRvi({ ring, bbox, date: date2, width, height, polarization: 'DV' })
     ]);
     const rcls = RVI_CLASSES.map(c => ({ ...c }));
-    let rc1 = classifyMasked(r1.rvi, mask, rcls);
-    let rc2 = classifyMasked(r2.rvi, mask, rcls);
-    // Consenso dual: si el frontend envía opticalDate1/2 usa esas fechas S2 exactas
-    // (las mismas de la pestaña "Comparar NDVI"); solo las acepta si están cerca de
-    // la fecha radar correspondiente (±15 días); si no, busca la S2 más cercana.
-    const opticalDate1 = req.body.opticalDate1 || null;
-    const opticalDate2 = req.body.opticalDate2 || null;
+    // ===== compare-rvi es RADAR PURO (decisión usuario 2026-09-09) =====
+    // El bosque se clasifica SOLO con RVI en ambas fechas (simetría total: ningún
+    // sensor óptico entra a la clasificación). Si se usa este tab es porque el óptico
+    // puede estar nublado/no confiable; mezclarlo en una sola fecha sesga el Δ.
+    // El NDVI de la Fecha 1 se consulta igual (best-effort) SOLO para la mezcla de
+    // especies en `cosecha`; si está nublado, speciesOfPixel cae a "Mezcla / borde"
+    // y el usuario elige especie manualmente.
     const band = (Number(req.body.band) > 0 && Number(req.body.band) < 0.5) ? Number(req.body.band) : FOREST_BAND;
-    const inWindow = (ref, v) => v && Math.abs(new Date(v) - new Date(ref)) <= 15 * 864e5;
-    const sec1 = inWindow(date1, opticalDate1)
-      ? cachedOpticalHaze({ ring, bbox, date: opticalDate1, width, height, snowMonths: snowMonthsOf(m) })
-      : opticalNearRadar({ ring, bbox, date: date1, width, height, snowMonths: snowMonthsOf(m) });
-    const sec2 = inWindow(date2, opticalDate2)
-      ? cachedOpticalHaze({ ring, bbox, date: opticalDate2, width, height, snowMonths: snowMonthsOf(m) })
-      : opticalNearRadar({ ring, bbox, date: date2, width, height, snowMonths: snowMonthsOf(m) });
-    const [s1, s2] = await Promise.all([sec1, sec2]);
-    rc1 = consensusClassify(r1.rvi, s1 && s1.ndvi, mask, rcls, OPTICAL_CLASSES);
-    rc2 = consensusClassify(r2.rvi, s2 && s2.ndvi, mask, rcls, OPTICAL_CLASSES);
+    const s1 = await opticalNearRadar({ ring, bbox, date: date1, width, height, snowMonths: snowMonthsOf(m) });
+    const s2 = null;
+    const rc1 = classifyMasked(r1.rvi, mask, rcls);
+    const rc2 = classifyMasked(r2.rvi, mask, rcls);
     const comp = compareCategories(rc1, rc2, mask, rcls, areaPx);
     const robust = robustChange(rc1, rc2, r1.rvi, r2.rvi, mask, rcls, areaPx, band);
     const corte = robustChange(rc1, rc2, r1.rvi, r2.rvi, mask, rcls, areaPx, CORTE_BAND);
@@ -2482,7 +2476,7 @@ app.post('/api/v2/compare-rvi', async (req, res) => {
     if (diag && diag.medianDelta !== null && Math.abs(diag.medianDelta) >= 0.01) {
       const shift = diag.medianDelta;
       const rvi2c = r2.rvi.map(v => (Number.isFinite(v) ? v - shift : v));
-      const rc2c = consensusClassify(rvi2c, s2 && s2.ndvi, mask, rcls, OPTICAL_CLASSES);
+      const rc2c = classifyMasked(rvi2c, mask, rcls);
       const compC = compareCategories(rc1, rc2c, mask, rcls, areaPx);
       const robustC = robustChange(rc1, rc2c, r1.rvi, rvi2c, mask, rcls, areaPx, band);
       const corteC = robustChange(rc1, rc2c, r1.rvi, rvi2c, mask, rcls, areaPx, CORTE_BAND);
@@ -2504,8 +2498,7 @@ app.post('/api/v2/compare-rvi', async (req, res) => {
         volumen: computeVolumeInfo(req.body, s1 && s1.ndvi, mask, bbox, lostHaC, date2)
       };
     }
-    const sec1Date = inWindow(date1, opticalDate1) ? opticalDate1 : (s1 && s1.date);
-    const sec2Date = inWindow(date2, opticalDate2) ? opticalDate2 : (s2 && s2.date);
+    const sec1Date = (s1 && s1.date) || null; // óptico usado solo para mezcla de especies (best-effort)
     const quota = await commitPolygon(req, res, m);
     res.json({
       radar: {
@@ -2525,10 +2518,11 @@ app.post('/api/v2/compare-rvi', async (req, res) => {
         changeImageRob: toPng(rcompR.codes, width, height, colorChangeMap, mask)
       },
       bbox, width, height,
-      consensus: !!(s1 && s1.ndvi) || !!(s2 && s2.ndvi),
-      consensusSecondaryDates: [sec1Date, sec2Date],
-      snow: { months: snowMonthsOf(m) || [], mask1: useSnowForDate(sec1Date, snowMonthsOf(m)), mask2: useSnowForDate(sec2Date, snowMonthsOf(m)) },
-      snowStats1: snowMaskStats(s1), snowStats2: snowMaskStats(s2),
+      consensus: false,
+      dualMode: 'radar-only',
+      consensusSecondaryDates: null,
+      snow: { months: snowMonthsOf(m) || [], mask1: useSnowForDate(sec1Date, snowMonthsOf(m)), mask2: false },
+      snowStats1: snowMaskStats(s1), snowStats2: null,
       volumen,
       cosecha,
       radarDiag: diagRadarPair(r1.rvi, r2.rvi, mask, date1, date2),
