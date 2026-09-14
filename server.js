@@ -2203,19 +2203,20 @@ const FOREST_BAND = 0.02;
 // Banda FIJA para estimar la cosecha (corte claro): no depende de la banda que el
 // usuario ajuste en el formulario, para que "cuánto se cosechó" sea un número estable.
 const CORTE_BAND = 0.02;
-function robustChange(c1, c2, v1, v2, mask, classes, areaPerPx, band = FOREST_BAND) {
+function robustChange(c1, c2, v1, v2, mask, classes, areaPerPx, band = FOREST_BAND, forestFrom2 = null) {
   const f = classes.findIndex(c => c.forest);
   const out = { lost: 0, gained: 0, valid: 0 };
   if (f >= 0) {
-    const thr = classes[f].from;
+    // `forestFrom2` permite que la fecha 2 use su propio umbral de bosque (calibración por fecha).
+    const thr = classes[f].from, thr2 = forestFrom2 != null ? forestFrom2 : thr;
     for (let k = 0; k < mask.length; k++) {
       const p = mask[k];
       const a = v1[p], b = v2[p];
       if (a === undefined || a === null || b === undefined || b === null || Number.isNaN(a) || Number.isNaN(b)) continue;
       out.valid++;
       const was = c1[p] === f, is = c2[p] === f;
-      if (was && !is) { if (a >= thr + band && b <= thr - band) out.lost++; }
-      else if (!was && is) { if (a <= thr - band && b >= thr + band) out.gained++; }
+      if (was && !is) { if (a >= thr + band && b <= thr2 - band) out.lost++; }
+      else if (!was && is) { if (a <= thr - band && b >= thr2 + band) out.gained++; }
     }
   }
   const toHa = (c) => Math.round(((c * areaPerPx) / 10000) * 100) / 100;
@@ -2225,18 +2226,18 @@ function robustChange(c1, c2, v1, v2, mask, classes, areaPerPx, band = FOREST_BA
     changedPct: out.valid ? Math.round(((out.lost + out.gained) / out.valid) * 1000) / 10 : null
   };
 }
-function robustAfter(c1, c2, v1, v2, mask, classes, band = FOREST_BAND) {
+function robustAfter(c1, c2, v1, v2, mask, classes, band = FOREST_BAND, forestFrom2 = null) {
   const f = classes.findIndex(c => c.forest);
   const out = c2.slice();
   if (f >= 0) {
-    const thr = classes[f].from;
+    const thr = classes[f].from, thr2 = forestFrom2 != null ? forestFrom2 : thr;
     for (let k = 0; k < mask.length; k++) {
       const p = mask[k];
       const a = v1[p], b = v2[p];
       if (a === undefined || a === null || b === undefined || b === null || Number.isNaN(a) || Number.isNaN(b)) continue;
       const was = c1[p] === f, is = c2[p] === f;
       if (!was && is) out[p] = c1[p];
-      else if (was && !is) { if (!(a >= thr + band && b <= thr - band)) out[p] = c1[p]; }
+      else if (was && !is) { if (!(a >= thr + band && b <= thr2 - band)) out[p] = c1[p]; }
     }
   }
   return out;
@@ -2515,70 +2516,98 @@ app.post('/api/v2/compare-rvi', async (req, res) => {
       { key: 'date1', date: s1 && s1.date, pairs: rviCalibrationPairs(s1 && s1.ndvi, r1.rvi, mask) },
       { key: 'date2', date: s2 && s2.date, pairs: rviCalibrationPairs(s2 && s2.ndvi, r2.rvi, mask) }
     ];
-    const validCals = cals.filter(c => c.date && c.pairs.length >= MIN_CAL_PIXELS);
-    let rcls = RVI_CLASSES.map(c => ({ ...c }));
-    let calibration = null, agreement = null;
-    if (validCals.length) {
-      validCals.sort((x, y) => y.pairs.length - x.pairs.length);
-      const ref = validCals[0];
-      const th = rviThresholdsFromPairs(ref.pairs, OPTICAL_CLASSES, RVI_CLASSES);
-      if (th) {
-        rcls = th.classes;
-        calibration = {
-          applied: true,
-          method: 'quantile-anchor-consensus',
-          referenceDate: ref.date,
-          referenceDateKey: ref.key,
-          validPixels: ref.pairs.length,
-          consensusFraction: Math.round(th.consensusFraction * 1000) / 1000,
-          thresholds: th.thresholds,
-          forestThreshold: rcls[rcls.length - 1].from,
-          note: 'Umbrales RVI derivados de dos piezas: las 4 fronteras intermedias reproducen las áreas por categoría del NDVI (histogram matching por cuantiles) y el umbral de Bosque se ancla a la superficie de BOSQUE DE CONSENSO NDVI+RVI que muestra la pestaña NDVI (píxeles con NDVI≥0.85 confirmados por RVI). Así la escala del RVI queda homologada al análisis NDVI que ves en la pestaña.'
-        };
-        // Validación cruzada en la otra fecha (si tiene suficientes píxeles con ambos sensores).
-        // forestNdvi = bosque de CONSENSO (como lo define la pestaña NDVI); forestRvi = bosque RVI-calibrado.
-        const val = cals.find(c => c !== ref && c.date && c.pairs.length >= MIN_CAL_PIXELS);
-        if (val) {
-          const iN = [], iR = [], fN = OPTICAL_CLASSES.findIndex(c => c.forest), fR = rcls.findIndex(c => c.forest);
-          const rviCons = rcls.find(c => c.forest) ? RVI_CLASSES.find(c => c.forest).from : 0.7;
-          const fBoundary = OPTICAL_CLASSES[fN] ? OPTICAL_CLASSES[fN].from : 0.85;
-          let consForest = 0, rvForest = 0;
-          for (const [n, r] of val.pairs) {
-            let cn = -1, cr = -1;
-            for (let c = 0; c < OPTICAL_CLASSES.length; c++) if (n >= OPTICAL_CLASSES[c].from && n < OPTICAL_CLASSES[c].to) { cn = c; break; }
-            for (let c = 0; c < rcls.length; c++) if (r >= rcls[c].from && r < rcls[c].to) { cr = c; break; }
-            if (cn >= 0 && cr >= 0) { iN.push(cn); iR.push(cr); }
-            if (n >= fBoundary && r >= rviCons) consForest++;
-            if (cr === fR) rvForest++;
-          }
-          if (iN.length) {
-            const cN = consForest, cR = rvForest;
-            const toHa = (v) => Math.round(((v * areaPx) / 10000) * 100) / 100;
-            const same = iN.reduce((acc, v, i) => acc + (v === iR[i] ? 1 : 0), 0);
-            agreement = {
-              date: val.date, dateKey: val.key, validPixels: iN.length,
-              forestNdvi: toHa(cN), forestRvi: toHa(cR),
-              deltaHa: toHa(cR - cN),
-              forestDeltaPct: cN ? Math.round(((cR - cN) / cN) * 1000) / 10 : null,
-              classAgreementPct: Math.round((same / iN.length) * 1000) / 10
-            };
-          }
+    // ---- Calibración RVI → óptico, con soporte de umbral POR FECHA ----
+    // th1/th2 = umbrales RVI derivados del óptico de CADA fecha (4 cuantiles NDVI + umbral de
+    // Bosque por consenso NDVI+RVI). La validación 2026-09-14 (LAS MALOCAS, 2026-05-17→2026-08-09)
+    // mostró que con escala única la fecha 2 (invierno) se inflaba: el radar sube por humedad/
+    // estructura y el umbral de mayo clasificaba demasiado bosque en agosto (754 vs 559 ha de
+    // consenso). Con umbrales por fecha cada columna usa su propio óptico y el "Después" deja de
+    // inflarse.
+    const th1 = (s1 && s1.date && cals[0].pairs.length >= MIN_CAL_PIXELS) ? rviThresholdsFromPairs(cals[0].pairs, OPTICAL_CLASSES, RVI_CLASSES) : null;
+    const th2 = (s2 && s2.date && cals[1].pairs.length >= MIN_CAL_PIXELS) ? rviThresholdsFromPairs(cals[1].pairs, OPTICAL_CLASSES, RVI_CLASSES) : null;
+    let rcls1 = RVI_CLASSES.map(c => ({ ...c }));
+    let rcls2 = RVI_CLASSES.map(c => ({ ...c }));
+    let calibration = null, agreement = null, perDate = false;
+    if (th1 && th2) {
+      // ---- CALIBRACIÓN POR FECHA (ambas fechas tienen óptico despejado) ----
+      perDate = true;
+      rcls1 = th1.classes;
+      rcls2 = th2.classes;
+      calibration = {
+        applied: true,
+        method: 'per-date-consensus',
+        date1: s1.date, date2: s2.date,
+        validPixels1: cals[0].pairs.length, validPixels2: cals[1].pairs.length,
+        consensusFraction1: Math.round(th1.consensusFraction * 1000) / 1000,
+        consensusFraction2: Math.round(th2.consensusFraction * 1000) / 1000,
+        thresholds1: th1.thresholds, thresholds2: th2.thresholds,
+        forestThreshold1: rcls1[rcls1.length - 1].from,
+        forestThreshold2: rcls2[rcls2.length - 1].from,
+        note: 'Calibración POR FECHA: cada fecha ancla sus umbrales RVI contra su propio óptico (4 cuantiles NDVI para agua→densa + umbral de Bosque por consenso NDVI+RVI). Así la escala del RVI refleja la vegetación óptica de cada fecha y la columna "Después" no se infla por la respuesta del radar a humedad/estructura en invierno.'
+      };
+    } else if (th1 || th2) {
+      // ---- ESCALA ÚNICA (solo una fecha con óptico despejado) ----
+      const ref = th1 ? cals[0] : cals[1];
+      const th = th1 || th2;
+      rcls1 = th.classes;
+      rcls2 = th.classes;
+      calibration = {
+        applied: true,
+        method: 'quantile-anchor-consensus',
+        referenceDate: ref.date,
+        referenceDateKey: ref.key,
+        validPixels: ref.pairs.length,
+        consensusFraction: Math.round(th.consensusFraction * 1000) / 1000,
+        thresholds: th.thresholds,
+        forestThreshold: rcls1[rcls1.length - 1].from,
+        note: 'Solo una fecha tenía escena óptica despejada: sus umbrales RVI (4 cuantiles NDVI + bosque de consenso NDVI+RVI) se aplican a ambas fechas. La deriva de señal la compensa el bloque `deriva`.'
+      };
+      // Validación cruzada en la otra fecha (si tiene suficientes píxeles con ambos sensores).
+      // forestNdvi = bosque de CONSENSO (como lo define la pestaña NDVI); forestRvi = bosque RVI-calibrado.
+      const val = cals.find(c => c !== ref && c.date && c.pairs.length >= MIN_CAL_PIXELS);
+      if (val) {
+        const iN = [], iR = [], fN = OPTICAL_CLASSES.findIndex(c => c.forest), fR = rcls1.findIndex(c => c.forest);
+        const rviCons = rcls1.find(c => c.forest) ? RVI_CLASSES.find(c => c.forest).from : 0.7;
+        const fBoundary = OPTICAL_CLASSES[fN] ? OPTICAL_CLASSES[fN].from : 0.85;
+        let consForest = 0, rvForest = 0;
+        for (const [n, r] of val.pairs) {
+          let cn = -1, cr = -1;
+          for (let c = 0; c < OPTICAL_CLASSES.length; c++) if (n >= OPTICAL_CLASSES[c].from && n < OPTICAL_CLASSES[c].to) { cn = c; break; }
+          for (let c = 0; c < rcls1.length; c++) if (r >= rcls1[c].from && r < rcls1[c].to) { cr = c; break; }
+          if (cn >= 0 && cr >= 0) { iN.push(cn); iR.push(cr); }
+          if (n >= fBoundary && r >= rviCons) consForest++;
+          if (cr === fR) rvForest++;
+        }
+        if (iN.length) {
+          const cN = consForest, cR = rvForest;
+          const toHa = (v) => Math.round(((v * areaPx) / 10000) * 100) / 100;
+          const same = iN.reduce((acc, v, i) => acc + (v === iR[i] ? 1 : 0), 0);
+          agreement = {
+            date: val.date, dateKey: val.key, validPixels: iN.length,
+            forestNdvi: toHa(cN), forestRvi: toHa(cR),
+            deltaHa: toHa(cR - cN),
+            forestDeltaPct: cN ? Math.round(((cR - cN) / cN) * 1000) / 10 : null,
+            classAgreementPct: Math.round((same / iN.length) * 1000) / 10
+          };
         }
       }
     }
-    const rc1 = classifyMasked(r1.rvi, mask, rcls);
-    const rc2 = classifyMasked(r2.rvi, mask, rcls);
-    const comp = compareCategories(rc1, rc2, mask, rcls, areaPx);
-    const robust = robustChange(rc1, rc2, r1.rvi, r2.rvi, mask, rcls, areaPx, band);
-    const corte = robustChange(rc1, rc2, r1.rvi, r2.rvi, mask, rcls, areaPx, CORTE_BAND);
-    const rc2r = robustAfter(rc1, rc2, r1.rvi, r2.rvi, mask, rcls, CORTE_BAND);
-    const rcompR = compareCategories(rc1, rc2r, mask, rcls, areaPx);
+    const rc1 = classifyMasked(r1.rvi, mask, rcls1);
+    const rc2 = classifyMasked(r2.rvi, mask, rcls2);
+    const comp = compareCategories(rc1, rc2, mask, rcls1, areaPx);
+    // `fThr2` = umbral de bosque propio de la fecha 2: las transiciones robustas cruzan la
+    // frontera de la fecha 1 en `a` y la de la fecha 2 en `b` (necesario con escala por fecha).
+    const fThr2 = rcls2[rcls2.length - 1].from;
+    const robust = robustChange(rc1, rc2, r1.rvi, r2.rvi, mask, rcls1, areaPx, band, fThr2);
+    const corte = robustChange(rc1, rc2, r1.rvi, r2.rvi, mask, rcls1, areaPx, CORTE_BAND, fThr2);
+    const rc2r = robustAfter(rc1, rc2, r1.rvi, r2.rvi, mask, rcls1, CORTE_BAND, fThr2);
+    const rcompR = compareCategories(rc1, rc2r, mask, rcls1, areaPx);
     const lostHa = (corte && typeof corte.lost === 'number') ? corte.lost
       : ((comp.forest && typeof comp.forest.lost === 'number') ? comp.forest.lost : null);
     const volumen = computeVolumeInfo(req.body, s1 && s1.ndvi, mask, bbox, lostHa, date2);
     if (volumen && corte) volumen.corteBand = corte.band;
     // Cosecha neta (antes − desp) con descomposición por especie (V4, aditivo).
-    const cosecha = computeCosechaInfo(req.body, s1 && s1.ndvi, rc1, rc2, mask, rcls, areaPx, comp.forest, bbox, date2);
+    const cosecha = computeCosechaInfo(req.body, s1 && s1.ndvi, rc1, rc2, mask, rcls1, areaPx, comp.forest, bbox, date2);
     // ---- Corrección de deriva de la señal RVI ----
     // Si la mediana RVI del polígono se desplazó de forma sistemática entre las dos
     // fechas (drift up/down ≥ ±0.01, p. ej. por humedad del suelo/vegetación o cambio
@@ -2589,18 +2618,20 @@ app.post('/api/v2/compare-rvi', async (req, res) => {
     const diag = diagRadarPair(r1.rvi, r2.rvi, mask, date1, date2);
     const rnd2 = v => Math.round(v * 100) / 100;
     let deriva = null;
-    if (diag && diag.medianDelta !== null && Math.abs(diag.medianDelta) >= 0.01) {
+    // En modo por-fecha cada columna ya usa su propio umbral, la deriva de señal queda absorbida
+    // por la calibración de la fecha 2; la corrección solo aplica en escala única.
+    if (!perDate && diag && diag.medianDelta !== null && Math.abs(diag.medianDelta) >= 0.01) {
       const shift = diag.medianDelta;
       const rvi2c = r2.rvi.map(v => (Number.isFinite(v) ? v - shift : v));
-      const rc2c = classifyMasked(rvi2c, mask, rcls);
-      const compC = compareCategories(rc1, rc2c, mask, rcls, areaPx);
-      const robustC = robustChange(rc1, rc2c, r1.rvi, rvi2c, mask, rcls, areaPx, band);
-      const corteC = robustChange(rc1, rc2c, r1.rvi, rvi2c, mask, rcls, areaPx, CORTE_BAND);
-      const rc2rC = robustAfter(rc1, rc2c, r1.rvi, rvi2c, mask, rcls, CORTE_BAND);
-      const rcompRC = compareCategories(rc1, rc2rC, mask, rcls, areaPx);
+      const rc2c = classifyMasked(rvi2c, mask, rcls1);
+      const compC = compareCategories(rc1, rc2c, mask, rcls1, areaPx);
+      const robustC = robustChange(rc1, rc2c, r1.rvi, rvi2c, mask, rcls1, areaPx, band);
+      const corteC = robustChange(rc1, rc2c, r1.rvi, rvi2c, mask, rcls1, areaPx, CORTE_BAND);
+      const rc2rC = robustAfter(rc1, rc2c, r1.rvi, rvi2c, mask, rcls1, CORTE_BAND);
+      const rcompRC = compareCategories(rc1, rc2rC, mask, rcls1, areaPx);
       const lostHaC = (corteC && typeof corteC.lost === 'number') ? corteC.lost
         : ((compC.forest && typeof compC.forest.lost === 'number') ? compC.forest.lost : null);
-      const cosechaC = computeCosechaInfo(req.body, s1 && s1.ndvi, rc1, rc2c, mask, rcls, areaPx, compC.forest, bbox, date2);
+      const cosechaC = computeCosechaInfo(req.body, s1 && s1.ndvi, rc1, rc2c, mask, rcls1, areaPx, compC.forest, bbox, date2);
       const sd = rnd2(shift);
       deriva = {
         applied: true,
@@ -2628,9 +2659,9 @@ app.post('/api/v2/compare-rvi', async (req, res) => {
         robust,
         corte,
         areaPerPixel: areaPx,
-        image1: toPng(rc1, width, height, colorClass(rcls), mask),
-        image2: toPng(rc2, width, height, colorClass(rcls), mask),
-        image2Rob: toPng(rc2r, width, height, colorClass(rcls), mask),
+        image1: toPng(rc1, width, height, colorClass(rcls1), mask),
+        image2: toPng(rc2, width, height, colorClass(rcls1), mask),
+        image2Rob: toPng(rc2r, width, height, colorClass(rcls1), mask),
         changeImage: toPng(comp.codes, width, height, colorChangeMap, mask),
         changeImageRob: toPng(rcompR.codes, width, height, colorChangeMap, mask)
       },
