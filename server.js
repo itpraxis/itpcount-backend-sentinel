@@ -2425,14 +2425,19 @@ function diagRadarPair(rviA, rviB, mask, dateA, dateB) {
 }
 
 // ============================================================
-// CALIBRACIÓN RVI ANCLADA AL ÓPTICO (2026-09-14, decisión usuario)
+// CALIBRACIÓN RVI ANCLADA AL BOSQUE DE CONSENSO NDVI+RVI (2026-09-14, decisión usuario)
 // Histogram matching por cuantiles por polígono: en la fecha despejada de referencia
 // (la que tenga más píxeles válidos con ambos sensores) se derivan umbrales RVI que
-// reproducen las áreas por categoría del NDVI. Así la escala de categorías del RVI
-// queda homologada a la del óptico: mismo % de píxeles bajo cada frontera de clase.
-// Se aplica a ambas fechas (con la corrección de deriva ya existente). Si no hay
-// píxeles suficientes → umbrales clásicos con aviso. Incluye validación cruzada en
-// la otra fecha cuando esta tiene suficientes píxeles ópticos+radar.
+// reproducen las áreas por categoría del ÓPTICO y, sobre todo, la superficie de BOSQUE
+// que muestra la pestaña NDVI: allí "Bosque" NO es NDVI puro — es BOSQUE DE CONSENSO
+// (píxel NDVI≥0.85 que además el RVI confirma con RVI≥0.70; si el radar no confirma,
+// se degrada a "densa no boscosa"). Por eso el 4º umbral se ancla a esa fracción:
+// área de bosque RVI-calibrado ≡ área de bosque de la pestaña NDVI en la fecha de
+// referencia. Los 4 umbrales intermedios se derivan de los cuantiles de NDVI (mismas
+// superficies por categoría que el óptico entre agua y densa). Se aplican a AMBAS
+// fechas (la deriva residual la compensa el bloque `deriva`). Si no hay píxeles
+// suficientes → umbrales clásicos con aviso. Incluye validación cruzada en la otra
+// fecha cuando esta tiene suficientes píxeles ópticos+radar.
 // ============================================================
 const MIN_CAL_PIXELS = 150;
 function rviCalibrationPairs(ndvi, rvi, mask) {
@@ -2448,17 +2453,28 @@ function rviCalibrationPairs(ndvi, rvi, mask) {
 }
 function rviThresholdsFromPairs(pairs, opticalClasses, rviClasses) {
   const n = pairs.length;
+  if (!n) return null;
   const ndvi = new Float64Array(n), rvi = new Float64Array(n);
   for (let i = 0; i < n; i++) { ndvi[i] = pairs[i][0]; rvi[i] = pairs[i][1]; }
   const sorted = Array.from(rvi).sort((a, b) => a - b);
   const boundaries = opticalClasses.slice(1).map(c => c.from);
+  // 4 umbrales intermedios: cuantiles de NDVI (mismas superficies que el óptico puro)
   const t = [];
-  for (const b of boundaries) {
+  for (const b of boundaries.slice(0, -1)) {
     let below = 0;
     for (let i = 0; i < n; i++) if (ndvi[i] < b) below++;
     const idx = Math.min(n - 1, Math.max(0, Math.round((below / n) * (n - 1))));
     t.push(Math.round(sorted[idx] * 1000) / 1000);
   }
+  // Umbral de BOSQUE: se ancla a la fracción de CONSENSO (NDVI≥from_forest ∧ RVI≥from_forest
+  // del RVI clásico) — la misma definición de "Bosque" que usa la pestaña NDVI.
+  const fOpt = opticalClasses.find(c => c.forest), fRvi = rviClasses.find(c => c.forest);
+  const fBoundary = fOpt ? fOpt.from : 0.85, rviCons = fRvi ? fRvi.from : 0.7;
+  let nCons = 0;
+  for (let i = 0; i < n; i++) if (ndvi[i] >= fBoundary && rvi[i] >= rviCons) nCons++;
+  const fCons = nCons / n;
+  const idx = Math.min(n - 1, Math.max(0, Math.round((1 - fCons) * (n - 1))));
+  t.push(Math.round(sorted[idx] * 1000) / 1000);
   for (let i = 1; i < t.length; i++) if (t[i] <= t[i - 1]) return null;
   if (!t.every(x => Number.isFinite(x) && x > 0 && x < 1)) return null;
   if (t[t.length - 1] < 0.3 || t[t.length - 1] > 0.95) return null; // umbral de bosque fuera de rango físico plausible
@@ -2466,7 +2482,7 @@ function rviThresholdsFromPairs(pairs, opticalClasses, rviClasses) {
   cls[0].to = t[0];
   for (let i = 1; i < cls.length - 1; i++) { cls[i].from = t[i - 1]; cls[i].to = t[i]; }
   cls[cls.length - 1].from = t[t.length - 1];
-  return { thresholds: t, classes: cls };
+  return { thresholds: t, classes: cls, consensusFraction: fCons };
 }
 
 app.post('/api/v2/compare-rvi', async (req, res) => {
@@ -2510,27 +2526,33 @@ app.post('/api/v2/compare-rvi', async (req, res) => {
         rcls = th.classes;
         calibration = {
           applied: true,
-          method: 'quantile-anchor-ndvi',
+          method: 'quantile-anchor-consensus',
           referenceDate: ref.date,
           referenceDateKey: ref.key,
           validPixels: ref.pairs.length,
+          consensusFraction: Math.round(th.consensusFraction * 1000) / 1000,
           thresholds: th.thresholds,
           forestThreshold: rcls[rcls.length - 1].from,
-          note: 'Umbrales RVI calibrados al NDVI (histogram matching por cuantiles) sobre la fecha despejada de referencia: mismo % de píxeles bajo cada frontera de clase. Las superficies por categoría quedan homologadas a la escala del óptico.'
+          note: 'Umbrales RVI derivados de dos piezas: las 4 fronteras intermedias reproducen las áreas por categoría del NDVI (histogram matching por cuantiles) y el umbral de Bosque se ancla a la superficie de BOSQUE DE CONSENSO NDVI+RVI que muestra la pestaña NDVI (píxeles con NDVI≥0.85 confirmados por RVI). Así la escala del RVI queda homologada al análisis NDVI que ves en la pestaña.'
         };
-        // Validación cruzada en la otra fecha (si tiene suficientes píxeles con ambos sensores)
+        // Validación cruzada en la otra fecha (si tiene suficientes píxeles con ambos sensores).
+        // forestNdvi = bosque de CONSENSO (como lo define la pestaña NDVI); forestRvi = bosque RVI-calibrado.
         const val = cals.find(c => c !== ref && c.date && c.pairs.length >= MIN_CAL_PIXELS);
         if (val) {
-          const iN = [], iR = [];
+          const iN = [], iR = [], fN = OPTICAL_CLASSES.findIndex(c => c.forest), fR = rcls.findIndex(c => c.forest);
+          const rviCons = rcls.find(c => c.forest) ? RVI_CLASSES.find(c => c.forest).from : 0.7;
+          const fBoundary = OPTICAL_CLASSES[fN] ? OPTICAL_CLASSES[fN].from : 0.85;
+          let consForest = 0, rvForest = 0;
           for (const [n, r] of val.pairs) {
             let cn = -1, cr = -1;
             for (let c = 0; c < OPTICAL_CLASSES.length; c++) if (n >= OPTICAL_CLASSES[c].from && n < OPTICAL_CLASSES[c].to) { cn = c; break; }
             for (let c = 0; c < rcls.length; c++) if (r >= rcls[c].from && r < rcls[c].to) { cr = c; break; }
             if (cn >= 0 && cr >= 0) { iN.push(cn); iR.push(cr); }
+            if (n >= fBoundary && r >= rviCons) consForest++;
+            if (cr === fR) rvForest++;
           }
           if (iN.length) {
-            const fN = OPTICAL_CLASSES.findIndex(c => c.forest), fR = rcls.findIndex(c => c.forest);
-            const cN = iN.filter(i => i === fN).length, cR = iR.filter(i => i === fR).length;
+            const cN = consForest, cR = rvForest;
             const toHa = (v) => Math.round(((v * areaPx) / 10000) * 100) / 100;
             const same = iN.reduce((acc, v, i) => acc + (v === iR[i] ? 1 : 0), 0);
             agreement = {
