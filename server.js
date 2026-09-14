@@ -2424,6 +2424,51 @@ function diagRadarPair(rviA, rviB, mask, dateA, dateB) {
   };
 }
 
+// ============================================================
+// CALIBRACIÓN RVI ANCLADA AL ÓPTICO (2026-09-14, decisión usuario)
+// Histogram matching por cuantiles por polígono: en la fecha despejada de referencia
+// (la que tenga más píxeles válidos con ambos sensores) se derivan umbrales RVI que
+// reproducen las áreas por categoría del NDVI. Así la escala de categorías del RVI
+// queda homologada a la del óptico: mismo % de píxeles bajo cada frontera de clase.
+// Se aplica a ambas fechas (con la corrección de deriva ya existente). Si no hay
+// píxeles suficientes → umbrales clásicos con aviso. Incluye validación cruzada en
+// la otra fecha cuando esta tiene suficientes píxeles ópticos+radar.
+// ============================================================
+const MIN_CAL_PIXELS = 150;
+function rviCalibrationPairs(ndvi, rvi, mask) {
+  const pairs = [];
+  for (let k = 0; k < mask.length; k++) {
+    const p = mask[k];
+    const n = ndvi && ndvi[p], r = rvi && rvi[p];
+    if (n === undefined || r === undefined || n === null || r === null) continue;
+    if (!Number.isFinite(n) || !Number.isFinite(r)) continue;
+    pairs.push([n, r]);
+  }
+  return pairs;
+}
+function rviThresholdsFromPairs(pairs, opticalClasses, rviClasses) {
+  const n = pairs.length;
+  const ndvi = new Float64Array(n), rvi = new Float64Array(n);
+  for (let i = 0; i < n; i++) { ndvi[i] = pairs[i][0]; rvi[i] = pairs[i][1]; }
+  const sorted = Array.from(rvi).sort((a, b) => a - b);
+  const boundaries = opticalClasses.slice(1).map(c => c.from);
+  const t = [];
+  for (const b of boundaries) {
+    let below = 0;
+    for (let i = 0; i < n; i++) if (ndvi[i] < b) below++;
+    const idx = Math.min(n - 1, Math.max(0, Math.round((below / n) * (n - 1))));
+    t.push(Math.round(sorted[idx] * 1000) / 1000);
+  }
+  for (let i = 1; i < t.length; i++) if (t[i] <= t[i - 1]) return null;
+  if (!t.every(x => Number.isFinite(x) && x > 0 && x < 1)) return null;
+  if (t[t.length - 1] < 0.3 || t[t.length - 1] > 0.95) return null; // umbral de bosque fuera de rango físico plausible
+  const cls = rviClasses.map(c => ({ ...c }));
+  cls[0].to = t[0];
+  for (let i = 1; i < cls.length - 1; i++) { cls[i].from = t[i - 1]; cls[i].to = t[i]; }
+  cls[cls.length - 1].from = t[t.length - 1];
+  return { thresholds: t, classes: cls };
+}
+
 app.post('/api/v2/compare-rvi', async (req, res) => {
   try {
     const ring = toRing(req.body.coordinates);
@@ -2439,17 +2484,66 @@ app.post('/api/v2/compare-rvi', async (req, res) => {
       cachedRvi({ ring, bbox, date: date1, width, height, polarization: 'DV' }),
       cachedRvi({ ring, bbox, date: date2, width, height, polarization: 'DV' })
     ]);
-    const rcls = RVI_CLASSES.map(c => ({ ...c }));
-    // ===== compare-rvi es RADAR PURO (decisión usuario 2026-09-09) =====
-    // El bosque se clasifica SOLO con RVI en ambas fechas (simetría total: ningún
-    // sensor óptico entra a la clasificación). Si se usa este tab es porque el óptico
-    // puede estar nublado/no confiable; mezclarlo en una sola fecha sesga el Δ.
-    // El NDVI de la Fecha 1 se consulta igual (best-effort) SOLO para la mezcla de
-    // especies en `cosecha`; si está nublado, speciesOfPixel cae a "Mezcla / borde"
-    // y el usuario elige especie manualmente.
     const band = (Number(req.body.band) > 0 && Number(req.body.band) < 0.5) ? Number(req.body.band) : FOREST_BAND;
-    const s1 = await opticalNearRadar({ ring, bbox, date: date1, width, height, snowMonths: snowMonthsOf(m) });
-    const s2 = null;
+    // ---- Calibración/anclaje RVI → óptico (decisión usuario 2026-09-14) ----
+    // La clasificación RVI se homologa al NDVI por histogram matching por polígono:
+    // fecha de referencia = la despejada con más píxeles válidos (ambos sensores);
+    // umbrales RVI = cuantiles que reproducen las áreas por categoría del NDVI.
+    // Se aplican a ambas fechas (la deriva residual la compensa el bloque `deriva`).
+    // Si no hay píxeles suficientes → umbrales RVI clásicos + aviso en `calibration`.
+    const [s1, s2] = await Promise.all([
+      opticalNearRadar({ ring, bbox, date: date1, width, height, snowMonths: snowMonthsOf(m) }),
+      opticalNearRadar({ ring, bbox, date: date2, width, height, snowMonths: snowMonthsOf(m) })
+    ]);
+    const cals = [
+      { key: 'date1', date: s1 && s1.date, pairs: rviCalibrationPairs(s1 && s1.ndvi, r1.rvi, mask) },
+      { key: 'date2', date: s2 && s2.date, pairs: rviCalibrationPairs(s2 && s2.ndvi, r2.rvi, mask) }
+    ];
+    const validCals = cals.filter(c => c.date && c.pairs.length >= MIN_CAL_PIXELS);
+    let rcls = RVI_CLASSES.map(c => ({ ...c }));
+    let calibration = null, agreement = null;
+    if (validCals.length) {
+      validCals.sort((x, y) => y.pairs.length - x.pairs.length);
+      const ref = validCals[0];
+      const th = rviThresholdsFromPairs(ref.pairs, OPTICAL_CLASSES, RVI_CLASSES);
+      if (th) {
+        rcls = th.classes;
+        calibration = {
+          applied: true,
+          method: 'quantile-anchor-ndvi',
+          referenceDate: ref.date,
+          referenceDateKey: ref.key,
+          validPixels: ref.pairs.length,
+          thresholds: th.thresholds,
+          forestThreshold: rcls[rcls.length - 1].from,
+          note: 'Umbrales RVI calibrados al NDVI (histogram matching por cuantiles) sobre la fecha despejada de referencia: mismo % de píxeles bajo cada frontera de clase. Las superficies por categoría quedan homologadas a la escala del óptico.'
+        };
+        // Validación cruzada en la otra fecha (si tiene suficientes píxeles con ambos sensores)
+        const val = cals.find(c => c !== ref && c.date && c.pairs.length >= MIN_CAL_PIXELS);
+        if (val) {
+          const iN = [], iR = [];
+          for (const [n, r] of val.pairs) {
+            let cn = -1, cr = -1;
+            for (let c = 0; c < OPTICAL_CLASSES.length; c++) if (n >= OPTICAL_CLASSES[c].from && n < OPTICAL_CLASSES[c].to) { cn = c; break; }
+            for (let c = 0; c < rcls.length; c++) if (r >= rcls[c].from && r < rcls[c].to) { cr = c; break; }
+            if (cn >= 0 && cr >= 0) { iN.push(cn); iR.push(cr); }
+          }
+          if (iN.length) {
+            const fN = OPTICAL_CLASSES.findIndex(c => c.forest), fR = rcls.findIndex(c => c.forest);
+            const cN = iN.filter(i => i === fN).length, cR = iR.filter(i => i === fR).length;
+            const toHa = (v) => Math.round(((v * areaPx) / 10000) * 100) / 100;
+            const same = iN.reduce((acc, v, i) => acc + (v === iR[i] ? 1 : 0), 0);
+            agreement = {
+              date: val.date, dateKey: val.key, validPixels: iN.length,
+              forestNdvi: toHa(cN), forestRvi: toHa(cR),
+              deltaHa: toHa(cR - cN),
+              forestDeltaPct: cN ? Math.round(((cR - cN) / cN) * 1000) / 10 : null,
+              classAgreementPct: Math.round((same / iN.length) * 1000) / 10
+            };
+          }
+        }
+      }
+    }
     const rc1 = classifyMasked(r1.rvi, mask, rcls);
     const rc2 = classifyMasked(r2.rvi, mask, rcls);
     const comp = compareCategories(rc1, rc2, mask, rcls, areaPx);
@@ -2468,8 +2562,8 @@ app.post('/api/v2/compare-rvi', async (req, res) => {
     // fechas (drift up/down ≥ ±0.01, p. ej. por humedad del suelo/vegetación o cambio
     // de adquisición), se desplaza la escena de la fecha 2 en sentido contrario antes
     // de reclasificar. Así el cambio de bosque refleja vegetación REAL y no una subida
-    // o bajada uniforme de la señal. Los resultados crudos (radar.*) quedan igual;
-    // los corregidos se entregan en `deriva` para comparar.
+    // o bajada uniforme de la señal. Los resultados base (radar.*) quedan igual;
+    // los corregidos por deriva se entregan en `deriva` para comparar.
     const diag = diagRadarPair(r1.rvi, r2.rvi, mask, date1, date2);
     const rnd2 = v => Math.round(v * 100) / 100;
     let deriva = null;
@@ -2498,7 +2592,8 @@ app.post('/api/v2/compare-rvi', async (req, res) => {
         volumen: computeVolumeInfo(req.body, s1 && s1.ndvi, mask, bbox, lostHaC, date2)
       };
     }
-    const sec1Date = (s1 && s1.date) || null; // óptico usado solo para mezcla de especies (best-effort)
+    const sec1Date = (s1 && s1.date) || null;
+    const sec2Date = (s2 && s2.date) || null;
     const quota = await commitPolygon(req, res, m);
     res.json({
       radar: {
@@ -2519,10 +2614,12 @@ app.post('/api/v2/compare-rvi', async (req, res) => {
       },
       bbox, width, height,
       consensus: false,
-      dualMode: 'radar-only',
+      dualMode: calibration ? 'rvi-calibrated' : 'radar-only',
       consensusSecondaryDates: null,
-      snow: { months: snowMonthsOf(m) || [], mask1: useSnowForDate(sec1Date, snowMonthsOf(m)), mask2: false },
-      snowStats1: snowMaskStats(s1), snowStats2: null,
+      snow: { months: snowMonthsOf(m) || [], mask1: useSnowForDate(sec1Date, snowMonthsOf(m)), mask2: useSnowForDate(sec2Date, snowMonthsOf(m)) },
+      snowStats1: snowMaskStats(s1), snowStats2: snowMaskStats(s2),
+      calibration,
+      agreement,
       volumen,
       cosecha,
       radarDiag: diagRadarPair(r1.rvi, r2.rvi, mask, date1, date2),
