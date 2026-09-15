@@ -2480,6 +2480,12 @@ function diagRadarPair(rviA, rviB, mask, dateA, dateB) {
 // fecha cuando esta tiene suficientes píxeles ópticos+radar.
 // ============================================================
 const MIN_CAL_PIXELS = 150;
+// Guard de cobertura óptica (2026-09-15): una fecha cuyo óptico tenga menos del 60% de los
+// píxeles del polígono SIN nube/calima (~40%+ cubierto) NO es fiable para calibrar el RVI:
+// los pares NDVI+RVI solo existen en el sector despejado y ese subconjunto suele quedar
+// sesgado (la nube tapa el bosque remanente), disparando el umbral de Bosque y subclasificando
+// el polígono completo. Detección: 2026-09-09 LAS MALOCAS (57% nube) infló la cosecha 68→289 ha.
+const MIN_CAL_COVERAGE = 0.60;
 function rviCalibrationPairs(ndvi, rvi, mask) {
   const pairs = [];
   for (let k = 0; k < mask.length; k++) {
@@ -2555,6 +2561,13 @@ app.post('/api/v2/compare-rvi', async (req, res) => {
       { key: 'date1', date: s1 && s1.date, pairs: rviCalibrationPairs(s1 && s1.ndvi, r1.rvi, mask) },
       { key: 'date2', date: s2 && s2.date, pairs: rviCalibrationPairs(s2 && s2.ndvi, r2.rvi, mask) }
     ];
+    // Cobertura óptica por fecha = % de píxeles del polígono con NDVI válido (sin nube/calima).
+    // En una escena despejada NDVI es válido en todo el polígono → ~100%. La nube/calima lo
+    // vuelve NaN → cobertura baja. Se usa para no calibrar el RVI contra un óptico parcial.
+    const polyPx = mask.length || 1;
+    const covPct = (c) => Math.round((c.pairs.length / polyPx) * 1000) / 10;
+    const covOk = (c) => (c.pairs.length / polyPx) >= MIN_CAL_COVERAGE;
+    const cov1 = covPct(cals[0]), cov2 = covPct(cals[1]);
     // ---- Calibración RVI → óptico, con soporte de umbral POR FECHA ----
     // th1/th2 = umbrales RVI derivados del óptico de CADA fecha (4 cuantiles NDVI + umbral de
     // Bosque por consenso NDVI+RVI). La validación 2026-09-14 (LAS MALOCAS, 2026-05-17→2026-08-09)
@@ -2562,8 +2575,8 @@ app.post('/api/v2/compare-rvi', async (req, res) => {
     // estructura y el umbral de mayo clasificaba demasiado bosque en agosto (754 vs 559 ha de
     // consenso). Con umbrales por fecha cada columna usa su propio óptico y el "Después" deja de
     // inflarse.
-    const th1 = (s1 && s1.date && cals[0].pairs.length >= MIN_CAL_PIXELS) ? rviThresholdsFromPairs(cals[0].pairs, OPTICAL_CLASSES, RVI_CLASSES) : null;
-    const th2 = (s2 && s2.date && cals[1].pairs.length >= MIN_CAL_PIXELS) ? rviThresholdsFromPairs(cals[1].pairs, OPTICAL_CLASSES, RVI_CLASSES) : null;
+    const th1 = (s1 && s1.date && cals[0].pairs.length >= MIN_CAL_PIXELS && covOk(cals[0])) ? rviThresholdsFromPairs(cals[0].pairs, OPTICAL_CLASSES, RVI_CLASSES) : null;
+    const th2 = (s2 && s2.date && cals[1].pairs.length >= MIN_CAL_PIXELS && covOk(cals[1])) ? rviThresholdsFromPairs(cals[1].pairs, OPTICAL_CLASSES, RVI_CLASSES) : null;
     let rcls1 = RVI_CLASSES.map(c => ({ ...c }));
     let rcls2 = RVI_CLASSES.map(c => ({ ...c }));
     let calibration = null, agreement = null, perDate = false;
@@ -2577,6 +2590,7 @@ app.post('/api/v2/compare-rvi', async (req, res) => {
         method: 'per-date-consensus',
         date1: s1.date, date2: s2.date,
         validPixels1: cals[0].pairs.length, validPixels2: cals[1].pairs.length,
+        coverage1: cov1, coverage2: cov2, polygonPixels: polyPx,
         consensusFraction1: Math.round(th1.consensusFraction * 1000) / 1000,
         consensusFraction2: Math.round(th2.consensusFraction * 1000) / 1000,
         thresholds1: th1.thresholds, thresholds2: th2.thresholds,
@@ -2588,6 +2602,11 @@ app.post('/api/v2/compare-rvi', async (req, res) => {
       // ---- ESCALA ÚNICA (solo una fecha con óptico despejado) ----
       const ref = th1 ? cals[0] : cals[1];
       const th = th1 || th2;
+      const refCov = th1 ? cov1 : cov2;
+      const otherCov = th1 ? cov2 : cov1;
+      const otherKey = th1 ? 'date2' : 'date1';
+      const other = th1 ? cals[1] : cals[0];
+      const otherCloudy = otherCov !== null && otherCov < MIN_CAL_COVERAGE * 100;
       rcls1 = th.classes;
       rcls2 = th.classes;
       calibration = {
@@ -2596,14 +2615,20 @@ app.post('/api/v2/compare-rvi', async (req, res) => {
         referenceDate: ref.date,
         referenceDateKey: ref.key,
         validPixels: ref.pairs.length,
+        coverage: refCov, coverageOther: otherCov, polygonPixels: polyPx,
         consensusFraction: Math.round(th.consensusFraction * 1000) / 1000,
         thresholds: th.thresholds,
         forestThreshold: rcls1[rcls1.length - 1].from,
-        note: 'Solo una fecha tenía escena óptica despejada: sus umbrales RVI (4 cuantiles NDVI + bosque de consenso NDVI+RVI) se aplican a ambas fechas. La deriva de señal la compensa el bloque `deriva`.'
+        excludedByCloud: otherCloudy ? [otherKey] : [],
+        note: otherCloudy
+          ? (other.date
+            ? `Cobertura óptica insuficiente en la otra fecha (${otherCov}% del polígono sin nube/calima, umbral mínimo ${MIN_CAL_COVERAGE * 100}%): NO se calibró el RVI contra un óptico parcial porque ese subconjunto despejado queda sesgado (la nube suele tapar el bosque remanente y dispara el umbral de Bosque, sobre-estimando la cosecha). Se usan los umbrales RVI derivados de la fecha despejada (${ref.date}, cobertura ${refCov}%) aplicados a ambas fechas; la deriva de señal se compensa en \`deriva\`. El resultado de la fecha con nube NO es confiable: preferir otra escena.`
+            : `Cobertura óptica insuficiente en la otra fecha (${otherCov}% del polígono sin nube/calima, umbral mínimo ${MIN_CAL_COVERAGE * 100}%): sin escena despejada para calibrar. Se usan los umbrales RVI derivados de la fecha despejada (${ref.date}, cobertura ${refCov}%) aplicados a ambas fechas; la deriva de señal se compensa en \`deriva\`. El resultado de la fecha con nube NO es confiable: preferir otra escena.`)
+          : 'Solo una fecha tenía escena óptica despejada: sus umbrales RVI (4 cuantiles NDVI + bosque de consenso NDVI+RVI) se aplican a ambas fechas. La deriva de señal la compensa el bloque `deriva`.'
       };
       // Validación cruzada en la otra fecha (si tiene suficientes píxeles con ambos sensores).
       // forestNdvi = bosque de CONSENSO (como lo define la pestaña NDVI); forestRvi = bosque RVI-calibrado.
-      const val = cals.find(c => c !== ref && c.date && c.pairs.length >= MIN_CAL_PIXELS);
+      const val = cals.find(c => c !== ref && c.date && c.pairs.length >= MIN_CAL_PIXELS && covOk(c));
       if (val) {
         const iN = [], iR = [], fN = OPTICAL_CLASSES.findIndex(c => c.forest), fR = rcls1.findIndex(c => c.forest);
         const rviCons = rcls1.find(c => c.forest) ? RVI_CLASSES.find(c => c.forest).from : 0.7;
