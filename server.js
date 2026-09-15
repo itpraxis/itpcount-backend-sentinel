@@ -1394,7 +1394,37 @@ function speciesOfPixel(ndviVal) {
   if (ndviVal >= 0.85) return { group: 'pino', species: 'pinus', label: 'Pino radiata (probable)' };
   return { group: 'otra', species: null, label: 'Mezcla / borde' };
 }
-function computeCosechaInfo(reqBody, ndviBefore, c1, c2, mask, classes, areaPx, forest, bbox, date2) {
+// Grid de especies (píxeles con NDVI que permite separar Euca/Pino) para el fallback de
+// "especie por vecino más cercano": cuando el bosque vino del RVI y un píxel perdido no tiene
+// huella NDVI propia (NDVI<0.85), hereda la especie del píxel classifiable más cercano en vez
+// de caer en "Mezcla / borde". Es no-op en la pestaña NDVI (todo bosque tiene NDVI≥0.85).
+function speciesGridOf(ndvi, mask, width, height) {
+  const grid = new Int8Array(width * height).fill(-1);
+  for (let k = 0; k < mask.length; k++) {
+    const p = mask[k];
+    const g = speciesOfPixel(ndvi && ndvi[p]);
+    if (g && g.group !== 'otra') grid[p] = g.group === 'eucalipto' ? 0 : 1;
+  }
+  return grid;
+}
+function nearestSpeciesOf(grid, width, height, idx, maxR = 16) {
+  const x0 = idx % width, y0 = (idx / width) | 0;
+  const yMin = Math.max(0, y0 - maxR), yMax = Math.min(height - 1, y0 + maxR);
+  const xMin = Math.max(0, x0 - maxR), xMax = Math.min(width - 1, x0 + maxR);
+  for (let r = 1; r <= maxR; r++) {
+    const y1 = Math.max(yMin, y0 - r), y2 = Math.min(yMax, y0 + r);
+    const x1 = Math.max(xMin, x0 - r), x2 = Math.min(xMax, x0 + r);
+    for (let y = y1; y <= y2; y++) {
+      const row = y * width;
+      for (let x = x1; x <= x2; x++) {
+        const v = grid[row + x];
+        if (v === 0 || v === 1) return v === 0 ? 'eucalipto' : 'pino';
+      }
+    }
+  }
+  return null;
+}
+function computeCosechaInfo(reqBody, ndviBefore, c1, c2, mask, classes, areaPx, forest, bbox, date2, width = null, height = null) {
   const f = classes.findIndex(c => c.forest);
   const groups = {
     eucalipto: { species: 'globulus', label: 'Eucalyptus (copas cerradas)', px: 0 },
@@ -1402,13 +1432,22 @@ function computeCosechaInfo(reqBody, ndviBefore, c1, c2, mask, classes, areaPx, 
     otra:      { species: null,       label: 'Mezcla / borde',                px: 0 }
   };
   let lostPx = 0;
+  // Fallback "especie por vecino más cercano": grid de píxeles classifiable (Euca/Pino) para
+  // rescatar píxeles perdidos sin huella NDVI propia (caso RVI). Solo si hay geometría.
+  const specGrid = (width && height && ndviBefore) ? speciesGridOf(ndviBefore, mask, width, height) : null;
   if (f >= 0) {
     for (let k = 0; k < mask.length; k++) {
       const p = mask[k];
       if (c1[p] === f && c2[p] !== f && c2[p] !== 255) {
         lostPx++;
+        let grp = null;
         const g = speciesOfPixel(ndviBefore && ndviBefore[p]);
-        groups[g ? g.group : 'otra'].px++;
+        if (g) grp = g.group;
+        if ((!grp || grp === 'otra') && specGrid) {
+          const nn = nearestSpeciesOf(specGrid, width, height, p);
+          if (nn) grp = nn;
+        }
+        groups[grp || 'otra'].px++;
       }
     }
   }
@@ -1965,7 +2004,7 @@ app.post('/api/v2/change', async (req, res) => {
     const corte = robustChange(c1, c2, o1.ndvi, o2.ndvi, mask, cls, areaPx, CORTE_BAND);
     const compR = compareCategories(c1, robustAfter(c1, c2, o1.ndvi, o2.ndvi, mask, cls, CORTE_BAND), mask, cls, areaPx);
     // Cosecha neta (antes − desp) con descomposición por especie (V4, aditivo).
-    const cosecha = computeCosechaInfo(req.body, o1.ndvi, c1, c2, mask, cls, areaPx, comp.forest, bbox, date2);
+    const cosecha = computeCosechaInfo(req.body, o1.ndvi, c1, c2, mask, cls, areaPx, comp.forest, bbox, date2, width, height);
 
     const dNdvi = new Float32Array(width * height).fill(NaN);
     const dRvi = new Float32Array(width * height).fill(NaN);
@@ -2314,7 +2353,7 @@ app.post('/api/v2/compare', async (req, res) => {
     const volumen = computeVolumeInfo(req.body, o1.ndvi, mask, bbox, lostHa, date2);
     if (volumen && corte) volumen.corteBand = corte.band;
     // Cosecha neta (antes − desp) con descomposición por especie (V4, aditivo).
-    const cosecha = computeCosechaInfo(req.body, o1.ndvi, c1, c2, mask, cls, areaPx, comp.forest, bbox, date2);
+    const cosecha = computeCosechaInfo(req.body, o1.ndvi, c1, c2, mask, cls, areaPx, comp.forest, bbox, date2, width, height);
 
     const quota = await commitPolygon(req, res, m);
     res.json({
@@ -2607,7 +2646,7 @@ app.post('/api/v2/compare-rvi', async (req, res) => {
     const volumen = computeVolumeInfo(req.body, s1 && s1.ndvi, mask, bbox, lostHa, date2);
     if (volumen && corte) volumen.corteBand = corte.band;
     // Cosecha neta (antes − desp) con descomposición por especie (V4, aditivo).
-    const cosecha = computeCosechaInfo(req.body, s1 && s1.ndvi, rc1, rc2, mask, rcls1, areaPx, comp.forest, bbox, date2);
+    const cosecha = computeCosechaInfo(req.body, s1 && s1.ndvi, rc1, rc2, mask, rcls1, areaPx, comp.forest, bbox, date2, width, height);
     // ---- Corrección de deriva de la señal RVI ----
     // Si la mediana RVI del polígono se desplazó de forma sistemática entre las dos
     // fechas (drift up/down ≥ ±0.01, p. ej. por humedad del suelo/vegetación o cambio
@@ -2631,7 +2670,7 @@ app.post('/api/v2/compare-rvi', async (req, res) => {
       const rcompRC = compareCategories(rc1, rc2rC, mask, rcls1, areaPx);
       const lostHaC = (corteC && typeof corteC.lost === 'number') ? corteC.lost
         : ((compC.forest && typeof compC.forest.lost === 'number') ? compC.forest.lost : null);
-      const cosechaC = computeCosechaInfo(req.body, s1 && s1.ndvi, rc1, rc2c, mask, rcls1, areaPx, compC.forest, bbox, date2);
+      const cosechaC = computeCosechaInfo(req.body, s1 && s1.ndvi, rc1, rc2c, mask, rcls1, areaPx, compC.forest, bbox, date2, width, height);
       const sd = rnd2(shift);
       deriva = {
         applied: true,
